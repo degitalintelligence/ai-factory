@@ -9,7 +9,15 @@ class LeadPlan(BaseModel):
     risk: Literal["low", "medium", "high"] = "low"
 
 class DeveloperAction(BaseModel):
-    action: Literal["list_files", "read_file", "write_file", "run_command", "git_diff", "finish"]
+    action: Literal[
+        "list_files",
+        "read_file",
+        "write_file",
+        "delete_file",
+        "run_command",
+        "git_diff",
+        "finish",
+    ]
     path: str | None = None
     content: str | None = None
     command: str | None = None
