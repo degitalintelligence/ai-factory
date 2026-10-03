@@ -4,15 +4,15 @@ services:
       context: .
     restart: unless-stopped
     environment:
-      DATABASE_URL: ${DATABASE_URL}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      GITHUB_TOKEN: ${GITHUB_TOKEN}
-      GITHUB_OWNER: ${GITHUB_OWNER}
-      LAB_REPO: ${LAB_REPO}
-      LEAD_MODEL: ${LEAD_MODEL}
-      DEVELOPER_MODEL: ${DEVELOPER_MODEL}
-      REVIEWER_MODEL: ${REVIEWER_MODEL}
+      DATABASE_URL: postgresql+asyncpg://ai_factory:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/ai_factory
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
+      GITHUB_OWNER: ${GITHUB_OWNER:-degitalintelligence}
+      LAB_REPO: ${LAB_REPO:-telegram-lab}
+      LEAD_MODEL: ${LEAD_MODEL:?LEAD_MODEL is required}
+      DEVELOPER_MODEL: ${DEVELOPER_MODEL:?DEVELOPER_MODEL is required}
+      REVIEWER_MODEL: ${REVIEWER_MODEL:?REVIEWER_MODEL is required}
       MAX_ITERATIONS: ${MAX_ITERATIONS:-3}
       MAX_DEV_STEPS: ${MAX_DEV_STEPS:-30}
       WORKSPACE_ROOT: /workspaces
@@ -23,13 +23,14 @@ services:
       - ai_factory_workspaces:/workspaces
     ports:
       - "8080:8080"
+
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_DB: ai_factory
       POSTGRES_USER: ai_factory
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ai_factory -d ai_factory"]
       interval: 5s
@@ -37,6 +38,7 @@ services:
       retries: 20
     volumes:
       - ai_factory_postgres:/var/lib/postgresql/data
+
 volumes:
   ai_factory_postgres:
   ai_factory_workspaces:
