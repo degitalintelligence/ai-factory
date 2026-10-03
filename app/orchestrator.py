@@ -1,128 +1,225 @@
 import asyncio
-from datetime import datetime
-from sqlalchemy import select
+import json
+import logging
+
 from app.agents import developer_loop, lead_plan, review_change
-from app.config import settings
-from app.db import SessionLocal, Task, TaskStatus
+from app.config import Project, settings
+from app.gates import deployment_issues, quality_issues
 from app.github_api import GitHubAPI
+from app.llm import run_context
+from app.schemas import LeadPlan
+from app.security import redact
+from app.store import TaskStopped, plan_hash, store
 from app.workspace import Workspace
 
-async def create_task(requirement: str) -> Task:
-    async with SessionLocal() as session:
-        task = Task(requirement=requirement, status=TaskStatus.RECEIVED.value)
-        session.add(task)
-        await session.commit()
-        await session.refresh(task)
-        return task
+logger = logging.getLogger(__name__)
 
-async def get_task(task_id: int) -> Task | None:
-    async with SessionLocal() as session:
-        result = await session.execute(select(Task).where(Task.id == task_id))
-        return result.scalar_one_or_none()
 
-async def _update_task(task_id: int, **values) -> None:
-    async with SessionLocal() as session:
-        task = await session.get(Task, task_id)
-        if not task:
-            return
-        for key, value in values.items():
-            setattr(task, key, value)
-        task.updated_at = datetime.utcnow()
-        await session.commit()
+async def create_task(requirement, **kwargs):
+    return await store.create(requirement, **kwargs)
 
-async def run_task(task_id: int, notify) -> None:
-    task = await get_task(task_id)
-    if not task:
-        return
-    repo_full_name = f"{settings.github_owner}/{settings.lab_repo}"
-    branch = f"ai-factory/task-{task_id}"
-    workspace = Workspace(task_id, repo_full_name, branch)
+
+async def get_task(task_id):
+    return await store.get(task_id)
+
+
+async def repository_context(workspace, task):
+    chunks = ["PROJECT POLICY: " + task.policy_json, "FILES:\n" + workspace.list_files()]
+    for path in (
+        "README.md",
+        "AGENTS.md",
+        "requirements.txt",
+        "pyproject.toml",
+        "package.json",
+        "docs/ARCHITECTURE.md",
+    ):
+        try:
+            chunks.append(f"{path}:\n{workspace.read_file(path)[:10000]}")
+        except (ValueError, OSError, RuntimeError):
+            continue
+    previous = [
+        t
+        for t in await store.list(30)
+        if t.repo == task.repo and t.id != task.id and t.status == "pr_created"
+    ][:3]
+    chunks += [f"Previous completed task #{t.id}: {t.requirement[:1000]}\n{t.last_message}" for t in previous]
+    return "\n\n".join(chunks)
+
+
+async def run_task(task_id, notify=None, owner=None):
+    task = await store.get(task_id)
+    if not task or not owner:
+        raise TaskStopped("Tasks must be claimed by a durable worker")
+    token = run_context.set((task_id, owner))
+
+    async def check():
+        return await store.check(task_id, owner)
+
+    async def transition(status, message, **kwargs):
+        await check()
+        await store.update(task_id, owner, status=status, last_message=message, **kwargs)
+        await store.event(task_id, status, message)
+        if notify:
+            try:
+                await notify(f"Task #{task_id} [{task.project} → {task.repo}]\n{message}")
+            except Exception:
+                logger.warning("Notification unavailable for task %s", task_id)
+
     try:
-        await _update_task(task_id, status=TaskStatus.PLANNING.value, branch=branch)
-        await notify(f"Task #{task_id}: Lead is planning…")
-        plan = await lead_plan(task.requirement)
+        current = settings.projects().get(task.project)
+        policy = Project.model_validate_json(task.policy_json)
+        if current is None or current.model_dump() != policy.model_dump():
+            raise RuntimeError("Project policy changed or access revoked; create a fresh task")
+        api = GitHubAPI()
+        if task.pr_url and not task.head_sha:
+            pr = await api.find_pr(task.repo, task.branch)
+            if not pr or pr["state"] != "open":
+                raise RuntimeError("Feedback needs an open task PR; start a new task after merge")
+        workspace = Workspace(task.id, task.repo, task.branch, policy, task.base_sha)
+        base_sha = await asyncio.to_thread(workspace.prepare, existing_branch=bool(task.pr_url))
+        await store.update(task_id, owner, base_sha=base_sha)
+        task.base_sha = base_sha
 
-        if plan.risk == "high":
-            message = "Lead marked this task HIGH RISK. V0.1 will not execute high-risk tasks automatically."
-            await _update_task(task_id, status=TaskStatus.FAILED.value, last_message=message)
-            await notify(f"Task #{task_id} stopped: {message}")
+        async def publish(sha, digest, summary):
+            await check()
+            if await asyncio.to_thread(workspace.digest) != digest:
+                raise RuntimeError("Workspace changed since approved review; cannot publish")
+            if await api.branch_sha(task.repo, task.base_branch) != task.base_sha:
+                raise RuntimeError("Base branch changed; start a fresh task against the updated base")
+            remote = await api.branch_sha(task.repo, task.branch)
+            if remote != sha:
+                await check()
+                await asyncio.to_thread(workspace.push, sha)
+            if await api.branch_sha(task.repo, task.branch) != sha:
+                raise RuntimeError("Remote branch differs from approved commit")
+            await check()
+            artifacts = await store.artifacts(task_id)
+            review = next((a.content for a in reversed(artifacts) if a.kind == "review"), "")
+            tests = next((a.content for a in reversed(artifacts) if a.kind == "tests"), "")
+            body = (
+                f"## Requirement\n{task.requirement}\n\n## Plan\n```json\n{task.plan_json}\n```\n\n"
+                f"## Independent review\n```json\n{review}\n```\n\n## Test evidence\n```json\n{tests}\n```\n\n"
+                f"Reviewed source digest: `{digest}`\n\nCommit: `{sha}`\n\n"
+                "Deterministic tests, acceptance mapping, source integrity and hygiene gates passed. "
+                "Deployment files are statically checked when required. A live deployment is a separate explicit action."
+            )
+            if len(body) > 60000:
+                body = body[:56000] + "\n\nFull evidence retained in task artifacts (/report)."
+            url = await api.create_pr(
+                repo_full_name=task.repo,
+                branch=task.branch,
+                base=task.base_branch,
+                title=f"AI Factory #{task_id}: {task.requirement.splitlines()[0][:90]}",
+                body=redact(body),
+            )
+            await transition("pr_created", f"Passed gates. PR: {url}\n{summary}", pr_url=url)
+
+        # The commit and approval record are durable BEFORE a push or PR API request.
+        if task.head_sha and task.review_digest:
+            await transition("publishing", "Reconciling previously approved publication")
+            await publish(task.head_sha, task.review_digest, "Publication recovered without duplicate PR")
             return
+        context = await repository_context(workspace, task)
+        if task.plan_json:
+            plan = LeadPlan.model_validate_json(task.plan_json)
+        else:
+            await transition("planning", "Lead is analysing requirements and repository context")
+            plan = await lead_plan(task.requirement, context)
+            plan.deployment_required = plan.deployment_required or policy.require_deployment
+            task.plan_json = plan.model_dump_json()
+            await store.update(task_id, owner, plan_json=task.plan_json)
+            await store.artifact(task_id, "plan", task.plan_json)
+        if plan.questions:
+            await transition(
+                "waiting_input",
+                "Clarification needed: " + " | ".join(plan.questions) + f"\nUse /answer {task_id} <answer>",
+            )
+            return
+        if plan.risk == "high" and task.approved_plan_hash != plan_hash(task.plan_json):
+            await transition(
+                "awaiting_approval",
+                f"High-risk plan ready for review. Use /plan {task_id}; approve this exact plan with /approve {task_id} {plan_hash(task.plan_json)[:12]}",
+            )
+            return
+        feedback = json.loads(task.feedback_json)
+        for iteration in range(task.iteration + 1, settings.max_iterations + 1):
+            await transition(
+                "developing",
+                f"Developer iteration {iteration}/{settings.max_iterations}",
+                iteration=iteration,
+            )
 
-        await asyncio.to_thread(workspace.prepare)
-        feedback: list[str] = []
+            async def trace(step, record):
+                await check()
+                await store.event(task_id, "tool", f"Iteration {iteration}, step {step}: {record}")
 
-        for iteration in range(1, settings.max_iterations + 1):
-            await _update_task(task_id, status=TaskStatus.DEVELOPING.value)
-            await notify(f"Task #{task_id}: Developer iteration {iteration}/{settings.max_iterations}…")
             await developer_loop(
                 workspace=workspace,
                 requirement=task.requirement,
                 plan=plan,
                 reviewer_feedback=feedback,
+                checkpoint=check,
+                trace=trace,
             )
-
-            status_before_tests = await asyncio.to_thread(workspace.status_porcelain)
-            tests = await asyncio.to_thread(workspace.default_tests)
-            status_after_tests = await asyncio.to_thread(workspace.status_porcelain)
-            hygiene_issues = await asyncio.to_thread(
-                workspace.hygiene_issues,
-                status_before_tests,
-                status_after_tests,
-            )
-            diff = await asyncio.to_thread(workspace.diff)
-
-            await _update_task(task_id, status=TaskStatus.REVIEWING.value)
-            await notify(f"Task #{task_id}: Reviewer checking diff + tests + repo hygiene…")
+            await check()
+            try:
+                diff = await asyncio.to_thread(workspace.diff)
+                digest = await asyncio.to_thread(workspace.digest)
+                files = await asyncio.to_thread(workspace.snapshot)
+            except (ValueError, RuntimeError, OSError) as exc:
+                feedback = [redact(str(exc))]
+                await store.update(task_id, owner, feedback_json=json.dumps(feedback))
+                continue
+            await transition("testing", "Running mandatory tests in isolated sandbox")
+            report = await asyncio.to_thread(workspace.default_tests)
+            issues = []
+            if await asyncio.to_thread(workspace.digest) != digest:
+                issues.append("Source changed during tests")
+            if plan.deployment_required:
+                issues += deployment_issues(files, plan.persistence_required)
+            await store.artifact(task_id, "tests", report.model_dump_json())
+            await store.artifact(task_id, "diff", diff)
+            await transition("reviewing", "Independent review: requirements, tests, security and deployment")
             review = await review_change(
                 requirement=task.requirement,
                 plan=plan,
                 diff=diff,
-                test_output=tests,
-                hygiene_issues=hygiene_issues,
+                test_output=report.model_dump_json(),
+                hygiene_issues=issues,
+                context=context[:22000],
             )
-
-            # Deterministic policy gate: the LLM reviewer cannot approve past
-            # known hygiene violations.
-            if hygiene_issues:
-                review.approved = False
-                review.issues = list(dict.fromkeys(hygiene_issues + review.issues))
-                review.summary = (
-                    "Rejected by deterministic repository hygiene gate. "
-                    + review.summary
+            issues = quality_issues(plan, report, review, diff, issues)
+            await store.artifact(task_id, "review", review.model_dump_json())
+            await store.artifact(
+                task_id,
+                "gates",
+                json.dumps(
+                    {"passed": review.approved and not issues, "issues": issues, "source_digest": digest}
+                ),
+            )
+            if review.approved and not issues:
+                await check()
+                sha = await asyncio.to_thread(workspace.commit, f"AI Factory task #{task_id}", digest)
+                await transition(
+                    "publishing",
+                    "Review passed; publishing approved commit",
+                    head_sha=sha,
+                    review_digest=digest,
                 )
-
-            if review.approved:
-                await asyncio.to_thread(workspace.commit_and_push, f"AI Factory task #{task_id}")
-                pr_url = await GitHubAPI().create_pr(
-                    repo_full_name=repo_full_name,
-                    branch=branch,
-                    title=f"AI Factory task #{task_id}",
-                    body=(
-                        f"Requirement:\n\n{task.requirement}\n\n"
-                        f"Lead plan:\n\n{plan.model_dump_json(indent=2)}\n\n"
-                        f"Reviewer:\n\n{review.summary}\n\n"
-                        "Repository hygiene gate: PASS"
-                    ),
-                )
-                await _update_task(
-                    task_id,
-                    status=TaskStatus.PR_CREATED.value,
-                    pr_url=pr_url,
-                    last_message=review.summary,
-                )
-                await notify(f"✅ Task #{task_id} passed review + hygiene gate. PR created:\n{pr_url}")
+                await publish(sha, digest, review.summary)
                 return
-
-            feedback = review.issues or [review.summary]
-            await notify(
-                f"Task #{task_id}: Reviewer rejected iteration {iteration}. "
-                f"Returning {len(feedback)} issue(s) to Developer."
+            feedback = list(
+                dict.fromkeys(issues + review.issues + ([] if review.approved else [review.summary]))
             )
-
-        message = "Max review iterations reached without approval."
-        await _update_task(task_id, status=TaskStatus.FAILED.value, last_message=message)
-        await notify(f"❌ Task #{task_id} failed: {message}")
+            await store.update(task_id, owner, feedback_json=json.dumps(feedback))
+            await store.event(task_id, "rejected", "\n".join(feedback))
+        raise RuntimeError(
+            "Review iteration limit reached; use /report and /logs, then /retry or create a smaller task"
+        )
+    except TaskStopped:
+        raise
     except Exception as exc:
-        message = f"{type(exc).__name__}: {exc}"
-        await _update_task(task_id, status=TaskStatus.FAILED.value, last_message=message)
-        await notify(f"❌ Task #{task_id} crashed:\n{message}")
+        message = redact(f"{type(exc).__name__}: {exc}")[:4000]
+        await transition("failed", message)
+    finally:
+        run_context.reset(token)

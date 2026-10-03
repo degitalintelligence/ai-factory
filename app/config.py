@@ -1,19 +1,111 @@
+import json
+import re
 from pathlib import Path
+from urllib.parse import quote
+
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Project(BaseModel):
+    repo: str
+    base_branch: str = "main"
+    profile: str = "python"
+    require_deployment: bool = False
+    install_dependencies: bool = False
+    coolify_uuid: str = ""
+
+    @model_validator(mode="after")
+    def validate_project(self):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repo):
+            raise ValueError("repo must be owner/name")
+        if self.profile not in {"python", "node"}:
+            raise ValueError("profile must be python or node")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", self.base_branch) or ".." in self.base_branch:
+            raise ValueError("invalid base branch")
+        return self
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    database_url: str
-    openrouter_api_key: str
-    telegram_bot_token: str
-    github_token: str
+    database_url: str = "sqlite+aiosqlite:///./factory.db"
+    database_host: str = ""
+    database_password: str = ""
+    openrouter_api_key: str = ""
+    telegram_bot_token: str = ""
+    github_token: str = ""
     github_owner: str = "degitalintelligence"
     lab_repo: str = "telegram-lab"
-    lead_model: str
-    developer_model: str
-    reviewer_model: str
-    max_iterations: int = 3
-    max_dev_steps: int = 30
+    lead_model: str = ""
+    developer_model: str = ""
+    reviewer_model: str = ""
+    projects_json: str = ""
+    telegram_allowed_user_ids: str = ""
+    api_token: str = ""
+    max_iterations: int = Field(default=4, ge=1, le=10)
+    max_dev_steps: int = Field(default=60, ge=1, le=200)
+    max_llm_calls: int = Field(default=150, ge=1, le=1000)
+    max_total_tokens: int = Field(default=600_000, ge=1)
+    max_cost_usd: float = Field(default=5.0, gt=0)
+    max_output_tokens: int = Field(default=8192, ge=256, le=32768)
+    max_prompt_chars: int = Field(default=180_000, ge=1000)
+    llm_timeout_seconds: int = Field(default=120, ge=5, le=600)
+    task_timeout_seconds: int = Field(default=3600, ge=30)
+    worker_concurrency: int = Field(default=1, ge=1, le=4)
+    worker_enabled: bool = True
+    lease_seconds: int = Field(default=90, ge=30)
+    max_recoveries: int = Field(default=2, ge=0, le=10)
     workspace_root: Path = Path("/workspaces")
+    sandbox_url: str = "http://sandbox:8090"
+    sandbox_token: str = ""
+    command_timeout_seconds: int = Field(default=180, ge=5, le=600)
+    coolify_url: str = ""
+    coolify_token: str = ""
+
+    @model_validator(mode="after")
+    def database_credentials(self):
+        if self.database_host:
+            if not self.database_password:
+                raise ValueError("DATABASE_PASSWORD is required with DATABASE_HOST")
+            self.database_url = f"postgresql+asyncpg://ai_factory:{quote(self.database_password, safe='')}@{self.database_host}:5432/ai_factory"
+        return self
+
+    def projects(self) -> dict[str, Project]:
+        data = (
+            json.loads(self.projects_json)
+            if self.projects_json
+            else {"lab": {"repo": f"{self.github_owner}/{self.lab_repo}"}}
+        )
+        if (
+            not isinstance(data, dict)
+            or not data
+            or not all(re.fullmatch(r"[a-z0-9_-]{1,40}", k) for k in data)
+        ):
+            raise ValueError("PROJECTS_JSON must map project aliases to policies")
+        return {k: Project.model_validate(v) for k, v in data.items()}
+
+    def allowed_users(self) -> set[int]:
+        return {int(x.strip()) for x in self.telegram_allowed_user_ids.split(",") if x.strip()}
+
+    def validate_runtime(self):
+        self.projects()
+        if self.telegram_bot_token and not self.allowed_users():
+            raise ValueError("TELEGRAM_ALLOWED_USER_IDS is required; bot access fails closed")
+        if self.worker_enabled:
+            missing = [
+                name
+                for name in (
+                    "github_token",
+                    "openrouter_api_key",
+                    "lead_model",
+                    "developer_model",
+                    "reviewer_model",
+                    "sandbox_token",
+                )
+                if not getattr(self, name)
+            ]
+            if missing:
+                raise ValueError("Missing worker settings: " + ", ".join(missing))
+
 
 settings = Settings()

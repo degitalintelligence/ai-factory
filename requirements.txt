@@ -8,3 +8,5 @@ pydantic-settings==2.10.1
 SQLAlchemy==2.0.43
 asyncpg==0.30.0
 pytest==8.4.2
+aiosqlite==0.22.1
+PyYAML==6.0.3

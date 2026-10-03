@@ -1,32 +1,100 @@
 services:
+  workspace-init:
+    build:
+      context: .
+      target: control
+    user: "0:0"
+    command: ["chown", "-R", "10001:10001", "/workspaces"]
+    restart: "no"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    network_mode: none
+    volumes:
+      - ai_factory_workspaces:/workspaces
+
   ai-factory:
     build:
       context: .
+      target: control
     restart: unless-stopped
+    init: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    pids_limit: 128
     environment:
-      DATABASE_URL: postgresql+asyncpg://ai_factory:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/ai_factory
+      DATABASE_HOST: postgres
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
+      TELEGRAM_ALLOWED_USER_IDS: ${TELEGRAM_ALLOWED_USER_IDS:?Set your numeric Telegram user ID}
       GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
       GITHUB_OWNER: ${GITHUB_OWNER:-degitalintelligence}
       LAB_REPO: ${LAB_REPO:-telegram-lab}
+      PROJECTS_JSON: ${PROJECTS_JSON:-}
       LEAD_MODEL: ${LEAD_MODEL:?LEAD_MODEL is required}
       DEVELOPER_MODEL: ${DEVELOPER_MODEL:?DEVELOPER_MODEL is required}
       REVIEWER_MODEL: ${REVIEWER_MODEL:?REVIEWER_MODEL is required}
-      MAX_ITERATIONS: ${MAX_ITERATIONS:-3}
-      MAX_DEV_STEPS: ${MAX_DEV_STEPS:-30}
+      API_TOKEN: ${API_TOKEN:-}
+      SANDBOX_URL: http://sandbox:8090
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:?Generate a separate long random sandbox token}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-4}
+      MAX_DEV_STEPS: ${MAX_DEV_STEPS:-60}
+      MAX_LLM_CALLS: ${MAX_LLM_CALLS:-150}
+      MAX_TOTAL_TOKENS: ${MAX_TOTAL_TOKENS:-600000}
+      MAX_COST_USD: ${MAX_COST_USD:-5}
+      TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-3600}
       WORKSPACE_ROOT: /workspaces
+      COOLIFY_URL: ${COOLIFY_URL:-}
+      COOLIFY_TOKEN: ${COOLIFY_TOKEN:-}
     depends_on:
+      workspace-init:
+        condition: service_completed_successfully
       postgres:
+        condition: service_healthy
+      sandbox:
         condition: service_healthy
     volumes:
       - ai_factory_workspaces:/workspaces
-    expose:
-      - "8080"
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=15)"]
+      interval: 30s
+      timeout: 20s
+      start_period: 45s
+      retries: 3
+    networks: [control]
+
+  sandbox:
+    build:
+      context: .
+      target: sandbox
+    restart: unless-stopped
+    init: true
+    # These exceptions belong ONLY to the credential-free runner, for nested user namespaces.
+    security_opt: ["seccomp=unconfined", "apparmor=unconfined", "no-new-privileges:true"]
+    cap_drop: [ALL]
+    mem_limit: 3g
+    cpus: 2
+    pids_limit: 128
+    read_only: true
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=536870912"]
+    environment:
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:?SANDBOX_TOKEN is required}
+      SANDBOX_INSTALL_DEPS: ${SANDBOX_INSTALL_DEPS:-false}
+    expose: ["8090"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=12)"]
+      interval: 30s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
+    networks: [control, egress]
 
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    mem_limit: 1g
     environment:
       POSTGRES_DB: ai_factory
       POSTGRES_USER: ai_factory
@@ -38,7 +106,11 @@ services:
       retries: 20
     volumes:
       - ai_factory_postgres:/var/lib/postgresql/data
+    networks: [control]
 
+networks:
+  control:
+  egress:
 volumes:
   ai_factory_postgres:
   ai_factory_workspaces:

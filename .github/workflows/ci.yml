@@ -1,0 +1,75 @@
+name: Engine CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  engine:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: factory_ci
+          POSTGRES_USER: factory_ci
+          POSTGRES_PASSWORD: factory_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U factory_ci -d factory_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_POSTGRES_URL: postgresql+asyncpg://factory_ci:factory_ci@localhost:5432/factory_ci
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check app sandbox tests scripts
+      - run: ruff format --check app sandbox tests scripts
+      - run: python -m pytest -q
+  sandbox:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build real runner image
+        run: docker build --target sandbox -t factory-sandbox:ci .
+      - name: Verify namespace isolation and failure gates
+        env:
+          SANDBOX_TOKEN: ci-only-local-sandbox-token
+        run: |
+          docker run -d --name factory-sandbox --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt no-new-privileges:true --cap-drop ALL --memory 3g --pids-limit 128 --read-only --tmpfs /tmp:rw,nosuid,nodev,size=536870912 -e SANDBOX_TOKEN -p 127.0.0.1:8090:8090 factory-sandbox:ci
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8090/health; then break; fi
+            sleep 2
+          done
+          python scripts/sandbox_smoke.py
+      - name: Runner logs
+        if: failure()
+        run: docker logs factory-sandbox
+  compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate Compose interpolation
+        env:
+          POSTGRES_PASSWORD: ci-only
+          OPENROUTER_API_KEY: ci-only
+          TELEGRAM_BOT_TOKEN: ci-only
+          TELEGRAM_ALLOWED_USER_IDS: "123456"
+          GITHUB_TOKEN: ci-only
+          SANDBOX_TOKEN: ci-only
+          LEAD_MODEL: ci-only
+          DEVELOPER_MODEL: ci-only
+          REVIEWER_MODEL: ci-only
+        run: docker compose config --quiet
+      - run: docker build --target control -t factory-control:ci .

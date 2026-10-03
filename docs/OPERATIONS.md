@@ -1,0 +1,60 @@
+# Operations: Oracle ARM / Ubuntu 24.04 / Coolify
+
+## Upgrade from V0.1
+
+1. Let running V0.1 tasks finish before changing the resource branch; its old background jobs did not have durable leases. Take a PostgreSQL backup and retain the current image/commit for rollback.
+2. Keep the same Coolify Compose resource/project. Preserve named volumes `ai_factory_postgres` and `ai_factory_workspaces`; do not delete volumes or recreate the resource under a new project name.
+3. Add `TELEGRAM_ALLOWED_USER_IDS` (your numeric user ID, comma-separated for multiple operators) and a newly generated `SANDBOX_TOKEN`. Keep your existing `POSTGRES_PASSWORD`, model IDs, GitHub/OpenRouter/Telegram credentials. Do not put credentials in build arguments.
+4. Set the reviewed V0.2 branch/commit and redeploy using `docker-compose.yaml`. `workspace-init` adjusts ownership of the existing workspace volume for UID 10001. The app applies additive migrations and keeps V0.1 task rows.
+5. Check `postgres`, `sandbox`, then `ai-factory` readiness. The control endpoint `/health` means process alive; `/ready` means DB, worker, Telegram (if enabled) and sandbox are responding.
+6. Send `/start`, `/projects`, then a small `/new` acceptance task. Confirm that `/status` identifies the target repo and `/report` contains passing test/review evidence. Confirm the PR in GitHub before merging it.
+
+Existing V0.1 task rows remain historical: they have no stored owner/policy/source digest. Do not use them for automatic feedback/deployment; start a V0.2 task. The operator API can still inspect the old records. Existing Postgres passwords must remain unchanged unless changed inside Postgres too—changing an environment variable does not change credentials in an initialized volume.
+
+Compose uses `DATABASE_HOST` and `DATABASE_PASSWORD`; the application URL-encodes the password instead of interpolating it unsafely into a DSN. Direct local use may still set `DATABASE_URL`.
+
+## Sandbox readiness troubleshooting
+
+The runner needs Linux unprivileged user namespaces. The Compose runner alone has `seccomp=unconfined` and `apparmor=unconfined` to permit nested namespaces; the credential-bearing control service keeps the default Docker profiles. No `privileged: true`, host network, host PID namespace, host directory mount or Docker socket is needed.
+
+Inspect `sandbox` logs and `/health`. On namespace setup failure, leave the service blocked. Check Docker/rootless/user-namespace policies and Ubuntu's AppArmor restrictions for this runner on your host. Do not disable security globally and do not add a direct-host command fallback. If host policy forbids this isolation profile, run the sandbox on a separate appropriately configured Linux machine over a protected connection, using `SANDBOX_URL`/`SANDBOX_TOKEN`. Never expose the runner publicly.
+
+The runner receives only `SANDBOX_TOKEN` and the dependency-download toggle. Do not inject GitHub, OpenRouter, Telegram, production DB or Coolify credentials into it. Test subprocesses receive neither variable.
+
+## Dependency and stack setup
+
+Python default gate: compileall plus pytest (empty test collection fails). Runner image already includes the factory's pinned Python dependencies. For target-specific wheels, set both `SANDBOX_INSTALL_DEPS=true` and project `install_dependencies=true`. Requirements are installed afresh per snapshot, so declare runtime and test dependencies explicitly. Builds from source are disabled.
+
+Node default gate: `npm test`, followed by `npm run build --if-present`. Supply a meaningful test script and a lockfile for `npm ci --ignore-scripts`. No-test shell scripts that return zero must be rejected in review. Frameworks requiring postinstall/native build scripts need a prebuilt sandbox image; the engine does not silently enable them.
+
+Sandbox tests are offline; mock external Telegram/payment/database APIs. Temporary fixtures use pytest `tmp_path` or in-memory databases. A real restart/recreation test must be included for persistent product features, and deployment smoke tests must verify its actual mounted storage.
+
+## Budgets and queue controls
+
+Defaults: one worker, four review iterations, 60 developer steps per iteration, 150 model calls, 600k aggregate provider-reported tokens, $5 reported cost and one hour per attempt. Choose model IDs explicitly in Coolify; no hardcoded premium provider or silent fallback can increase spending.
+
+Each malformed-output retry consumes a call and records returned usage. Network failures can be billed by the provider without returned usage. Reported cost can therefore be partial. Use a provider-level credit limit for a strict dollar ceiling. `/retry` retains call/token/cost totals; reaching the budget requires a deliberately new bounded task or an operator policy change, not an automatic budget reset.
+
+`/cancel` is cooperative; a running model/sandbox request may finish and consume cost. Cancellation does not undo a completed Git push/PR or a deployment. Check the terminal task status. Restart recovery is bounded; after repeated failures inspect logs instead of repeatedly restarting the container.
+
+Keep a single Telegram polling replica. If scaling the worker code into additional processes, disable Telegram in additional control instances; use PostgreSQL (not SQLite), retain shared task workspace storage, and provision enough sandbox capacity. The default sandbox accepts one job at a time; unsupported concurrency receives HTTP 429.
+
+## HTTP operator interface
+
+Set a separate `API_TOKEN`. Empty token means endpoints fail closed. Use `Authorization: Bearer ...` for `/tasks`, `/tasks/{id}`, `/tasks/{id}/events` and `/tasks/{id}/artifacts`. POST `/tasks` with `requirement`, `project` and optional `idempotency_key`. Reuse a key only for the same request. POST `/tasks/{id}/{cancel|retry|answer|approve|feedback}` with a JSON `message`. The token grants operator-wide access: do not distribute it to customers.
+
+## Optional Coolify release integration
+
+Create the target application in Coolify once and configure secrets/domains/persistent volumes there. Register its UUID as `coolify_uuid` in the project policy, set `COOLIFY_URL` and a scoped `COOLIFY_TOKEN`, and disable that target's auto-deploy. This release does not automatically provision resources or set production secrets.
+
+After reviewing and merging a generated PR, send `/deploy <task-id> <full-merged-commit-sha>`. The engine checks identity/CI/tree integrity and pins the application to that commit. Subsequent deployments require new explicit approved task releases because the pin remains set. `/deployment <id>` fetches the remote status and verifies the reported commit when supplied.
+
+If status is `unknown`, inspect Coolify's deployment history before doing anything else; the record intentionally blocks automatic duplicate submission. If a deployment failed, diagnose logs and prepare a corrected new task. Do not treat an HTTP response or queued UUID as successful deployment.
+
+## Backup, retention and rollback
+
+Back up Postgres daily and before upgrades using Coolify's database backup facilities or `pg_dump` executed with credentials supplied securely by the operator. Also back up the workspace volume if you need to recover unpushed changes. Store backups outside the VPS and periodically restore into a disposable instance. Task artifacts are stored in PostgreSQL; text traces can grow with usage, so monitor disk space and add an operator-approved retention policy. This release does not delete old evidence/workspaces automatically.
+
+To roll back the factory release, stop task intake, let/cancel active work, retain a backup, and redeploy the previous image/commit against the existing volume. Added DB columns/tables are compatible with V0.1 reads; V0.1 does not understand new statuses, ownership or recovery. Avoid downgrading while V0.2 tasks are active. A backup restore is a separate deliberate data decision; never delete volumes as a troubleshooting shortcut.
+
+For a target application rollback, use a previously validated immutable image/commit in Coolify and assess migration/data compatibility first. The factory never automatically restores a database or rolls back a stateful release.
