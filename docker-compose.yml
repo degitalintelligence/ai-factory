@@ -1,0 +1,42 @@
+services:
+  ai-factory:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_OWNER: ${GITHUB_OWNER}
+      LAB_REPO: ${LAB_REPO}
+      LEAD_MODEL: ${LEAD_MODEL}
+      DEVELOPER_MODEL: ${DEVELOPER_MODEL}
+      REVIEWER_MODEL: ${REVIEWER_MODEL}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-3}
+      MAX_DEV_STEPS: ${MAX_DEV_STEPS:-30}
+      WORKSPACE_ROOT: /workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ai_factory_workspaces:/workspaces
+    ports:
+      - "8080:8080"
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ai_factory
+      POSTGRES_USER: ai_factory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_factory -d ai_factory"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ai_factory_postgres:/var/lib/postgresql/data
+volumes:
+  ai_factory_postgres:
+  ai_factory_workspaces:
