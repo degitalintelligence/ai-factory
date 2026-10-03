@@ -60,17 +60,36 @@ async def run_task(task_id: int, notify) -> None:
                 plan=plan,
                 reviewer_feedback=feedback,
             )
-            diff = await asyncio.to_thread(workspace.diff)
+
+            status_before_tests = await asyncio.to_thread(workspace.status_porcelain)
             tests = await asyncio.to_thread(workspace.default_tests)
+            status_after_tests = await asyncio.to_thread(workspace.status_porcelain)
+            hygiene_issues = await asyncio.to_thread(
+                workspace.hygiene_issues,
+                status_before_tests,
+                status_after_tests,
+            )
+            diff = await asyncio.to_thread(workspace.diff)
 
             await _update_task(task_id, status=TaskStatus.REVIEWING.value)
-            await notify(f"Task #{task_id}: Reviewer checking diff + tests…")
+            await notify(f"Task #{task_id}: Reviewer checking diff + tests + repo hygiene…")
             review = await review_change(
                 requirement=task.requirement,
                 plan=plan,
                 diff=diff,
                 test_output=tests,
+                hygiene_issues=hygiene_issues,
             )
+
+            # Deterministic policy gate: the LLM reviewer cannot approve past
+            # known hygiene violations.
+            if hygiene_issues:
+                review.approved = False
+                review.issues = list(dict.fromkeys(hygiene_issues + review.issues))
+                review.summary = (
+                    "Rejected by deterministic repository hygiene gate. "
+                    + review.summary
+                )
 
             if review.approved:
                 await asyncio.to_thread(workspace.commit_and_push, f"AI Factory task #{task_id}")
@@ -81,7 +100,8 @@ async def run_task(task_id: int, notify) -> None:
                     body=(
                         f"Requirement:\n\n{task.requirement}\n\n"
                         f"Lead plan:\n\n{plan.model_dump_json(indent=2)}\n\n"
-                        f"Reviewer:\n\n{review.summary}"
+                        f"Reviewer:\n\n{review.summary}\n\n"
+                        "Repository hygiene gate: PASS"
                     ),
                 )
                 await _update_task(
@@ -90,7 +110,7 @@ async def run_task(task_id: int, notify) -> None:
                     pr_url=pr_url,
                     last_message=review.summary,
                 )
-                await notify(f"✅ Task #{task_id} passed review. PR created:\n{pr_url}")
+                await notify(f"✅ Task #{task_id} passed review + hygiene gate. PR created:\n{pr_url}")
                 return
 
             feedback = review.issues or [review.summary]
