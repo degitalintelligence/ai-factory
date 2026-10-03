@@ -22,7 +22,7 @@ async def developer_loop(*, workspace: Workspace, requirement: str, plan: LeadPl
     feedback = reviewer_feedback or []
     system = """You are an autonomous software developer working in a restricted repository workspace.
 You may choose exactly one action per response and MUST return JSON only:
-{"action":"list_files|read_file|write_file|run_command|git_diff|finish",
+{"action":"list_files|read_file|write_file|delete_file|run_command|git_diff|finish",
  "path":null,
  "content":null,
  "command":null,
@@ -33,6 +33,10 @@ Rules:
 - Never access secrets, network, parent directories, or .git internals.
 - Commands are restricted to pytest and Python compile checks.
 - Before finish, inspect git_diff and run relevant tests.
+- Tests must not leave runtime/generated artifacts in the repository.
+- Runtime data such as SQLite databases, logs, caches, .env files, and compiled files must not be committed.
+- Use temporary/in-memory test storage and update .gitignore when runtime files are expected.
+- If reviewer feedback asks to remove an artifact, use delete_file.
 - write_file content must contain the COMPLETE replacement file.
 - Do not use markdown fences around JSON."""
     context = (
@@ -55,6 +59,8 @@ Rules:
                 result = workspace.read_file(action.path or "")
             elif action.action == "write_file":
                 result = workspace.write_file(action.path or "", action.content or "")
+            elif action.action == "delete_file":
+                result = workspace.delete_file(action.path or "")
             elif action.action == "run_command":
                 result = workspace.run_command(action.command or "")
             elif action.action == "git_diff":
@@ -68,17 +74,27 @@ Rules:
         history.append(f"ACTION: {action.model_dump_json()}\nRESULT:\n{result}")
     raise RuntimeError("Developer exceeded MAX_DEV_STEPS.")
 
-async def review_change(*, requirement: str, plan: LeadPlan, diff: str, test_output: str) -> ReviewResult:
+async def review_change(
+    *,
+    requirement: str,
+    plan: LeadPlan,
+    diff: str,
+    test_output: str,
+    hygiene_issues: list[str],
+) -> ReviewResult:
     system = """You are an independent code reviewer.
-Be skeptical. Judge only against the requirement, plan, diff, and test evidence.
-Reject incomplete, unsafe, obviously broken, or untested work.
+Be skeptical. Judge only against the requirement, plan, diff, test evidence, and repository hygiene evidence.
+Reject incomplete, unsafe, obviously broken, untested, or repository-dirty work.
+Generated/runtime artifacts such as SQLite databases, logs, caches, .env files, compiled files, or test leftovers must not be committed.
+Tests that leave new repository artifacts are a rejection condition.
 Return JSON only:
 {"approved": true|false, "summary":"...", "issues":["..."]}"""
     user = (
         f"REQUIREMENT:\n{requirement}\n\n"
         f"PLAN:\n{plan.model_dump_json(indent=2)}\n\n"
         f"DIFF:\n{diff}\n\n"
-        f"TEST OUTPUT:\n{test_output}"
+        f"TEST OUTPUT:\n{test_output}\n\n"
+        f"REPOSITORY HYGIENE ISSUES:\n{json.dumps(hygiene_issues, indent=2)}"
     )
     return await json_completion(
         model=settings.reviewer_model,
