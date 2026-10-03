@@ -31,14 +31,26 @@ SUSPICIOUS_ARTIFACT_DIRS = {
     ".ruff_cache",
 }
 
+
 class WorkspaceError(RuntimeError):
     pass
 
-def _status_path(line: str) -> str:
+
+def _parse_status_line(line: str) -> tuple[str, str]:
+    status = line[:2] if len(line) >= 2 else ""
     path = line[3:] if len(line) >= 4 else ""
     if " -> " in path:
         path = path.split(" -> ", 1)[1]
-    return path.strip()
+    return status, path.strip()
+
+
+def _status_path(line: str) -> str:
+    return _parse_status_line(line)[1]
+
+
+def _is_deletion_status(status: str) -> bool:
+    return "D" in status
+
 
 def is_suspicious_artifact(path: str) -> bool:
     p = Path(path)
@@ -47,6 +59,7 @@ def is_suspicious_artifact(path: str) -> bool:
     if p.suffix.lower() in SUSPICIOUS_ARTIFACT_SUFFIXES:
         return True
     return any(part in SUSPICIOUS_ARTIFACT_DIRS for part in p.parts)
+
 
 class Workspace:
     def __init__(self, task_id: int, repo_full_name: str, branch: str):
@@ -67,11 +80,15 @@ class Workspace:
             raise WorkspaceError(result.stderr or result.stdout)
         return result
 
-    def prepare(self) -> None:
+    def prepare(self, *, existing_branch: bool = False) -> None:
         if self.path.exists():
             shutil.rmtree(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        clone_url = f"https://x-access-token:{settings.github_token}@github.com/{self.repo_full_name}.git"
+
+        clone_url = (
+            f"https://x-access-token:{settings.github_token}@github.com/"
+            f"{self.repo_full_name}.git"
+        )
         subprocess.run(
             ["git", "clone", clone_url, str(self.path)],
             check=True,
@@ -81,7 +98,14 @@ class Workspace:
         )
         self._run(["git", "config", "user.email", "ai-factory@local"])
         self._run(["git", "config", "user.name", "AI Factory"])
-        self._run(["git", "checkout", "-b", self.branch])
+
+        if existing_branch:
+            self._run(["git", "fetch", "origin", self.branch])
+            self._run(
+                ["git", "checkout", "-B", self.branch, f"origin/{self.branch}"]
+            )
+        else:
+            self._run(["git", "checkout", "-b", self.branch])
 
     def list_files(self) -> str:
         files: list[str] = []
@@ -118,11 +142,17 @@ class Workspace:
         args = shlex.split(command)
         if not args:
             raise WorkspaceError("Empty command.")
-        allowed = any(tuple(args[: len(prefix)]) == prefix for prefix in ALLOWED_COMMAND_PREFIXES)
+        allowed = any(
+            tuple(args[: len(prefix)]) == prefix
+            for prefix in ALLOWED_COMMAND_PREFIXES
+        )
         if not allowed:
             raise WorkspaceError(f"Command not allowed: {command}")
         result = self._run(args, check=False)
-        return f"exit={result.returncode}\nSTDOUT:\n{result.stdout[-12000:]}\nSTDERR:\n{result.stderr[-12000:]}"
+        return (
+            f"exit={result.returncode}\nSTDOUT:\n{result.stdout[-12000:]}\n"
+            f"STDERR:\n{result.stderr[-12000:]}"
+        )
 
     def diff(self) -> str:
         return self._run(["git", "diff"], check=False).stdout[:50000]
@@ -133,29 +163,57 @@ class Workspace:
             check=False,
         ).stdout
 
+    def tracked_suspicious_artifacts(self) -> list[str]:
+        output = self._run(["git", "ls-files"], check=False).stdout
+        artifacts: list[str] = []
+        for path in output.splitlines():
+            if not path or not is_suspicious_artifact(path):
+                continue
+            # A tracked suspicious file that the developer has deleted is a fix,
+            # not a new hygiene violation.
+            if (self.path / path).exists():
+                artifacts.append(path)
+        return sorted(artifacts)
+
     def hygiene_issues(self, before_tests: str, after_tests: str) -> list[str]:
-        before_paths = {
+        before_entries = {
             _status_path(line)
             for line in before_tests.splitlines()
             if line.strip()
         }
         after_lines = [line for line in after_tests.splitlines() if line.strip()]
-        after_paths = {_status_path(line) for line in after_lines}
+        after_entries = {
+            _status_path(line)
+            for line in after_lines
+        }
 
         issues: list[str] = []
 
-        for path in sorted(after_paths - before_paths):
+        for path in sorted(after_entries - before_entries):
             issues.append(
                 f"Tests created or dirtied repository artifact: {path}. "
                 "Tests must not leave new working-tree artifacts."
             )
 
-        for path in sorted(after_paths):
-            if is_suspicious_artifact(path):
+        for line in after_lines:
+            status, path = _parse_status_line(line)
+            if (
+                path
+                and not _is_deletion_status(status)
+                and is_suspicious_artifact(path)
+            ):
                 issues.append(
-                    f"Suspicious runtime/generated artifact present in git status: {path}. "
-                    "Use temp/in-memory storage or ignore runtime data instead of committing it."
+                    f"Suspicious runtime/generated artifact present in git status: "
+                    f"{path}. Use temp/in-memory storage or ignore runtime data "
+                    "instead of committing it."
                 )
+
+        for path in self.tracked_suspicious_artifacts():
+            issues.append(
+                f"Suspicious runtime/generated artifact is tracked by Git: {path}. "
+                "Remove it from the repository and add an appropriate ignore rule "
+                "if it is runtime data."
+            )
 
         return list(dict.fromkeys(issues))
 
@@ -171,13 +229,22 @@ class Workspace:
 
     def assert_safe_to_commit(self) -> None:
         status = self.status_porcelain()
-        suspicious = sorted(
-            {
-                _status_path(line)
-                for line in status.splitlines()
-                if line.strip() and is_suspicious_artifact(_status_path(line))
-            }
-        )
+        suspicious: list[str] = []
+
+        for line in status.splitlines():
+            if not line.strip():
+                continue
+            file_status, path = _parse_status_line(line)
+            if (
+                path
+                and not _is_deletion_status(file_status)
+                and is_suspicious_artifact(path)
+            ):
+                suspicious.append(path)
+
+        suspicious.extend(self.tracked_suspicious_artifacts())
+        suspicious = sorted(set(suspicious))
+
         if suspicious:
             raise WorkspaceError(
                 "Refusing to commit suspicious runtime/generated artifacts: "
@@ -187,7 +254,9 @@ class Workspace:
     def commit_and_push(self, message: str) -> None:
         self.assert_safe_to_commit()
         self._run(["git", "add", "-A"])
-        status = self._run(["git", "status", "--porcelain"], check=False).stdout.strip()
+        status = self._run(
+            ["git", "status", "--porcelain"], check=False
+        ).stdout.strip()
         if not status:
             raise WorkspaceError("No changes to commit.")
         self._run(["git", "commit", "-m", message])
