@@ -5,7 +5,7 @@
 1. Let running V0.1 tasks finish before changing the resource branch; its old background jobs did not have durable leases. Take a PostgreSQL backup and retain the current image/commit for rollback.
 2. Keep the same Coolify Compose resource/project. Preserve named volumes `ai_factory_postgres` and `ai_factory_workspaces`; do not delete volumes or recreate the resource under a new project name.
 3. Add `TELEGRAM_ALLOWED_USER_IDS` (your numeric user ID, comma-separated for multiple operators) and a newly generated `SANDBOX_TOKEN`. Keep your existing `POSTGRES_PASSWORD`, model IDs, GitHub/OpenRouter/Telegram credentials. Do not put credentials in build arguments.
-4. Set the reviewed V0.2 branch/commit and redeploy using `docker-compose.yaml`. `workspace-init` adjusts ownership of the existing workspace volume for UID 10001. The app applies additive migrations and keeps V0.1 task rows.
+4. On the Ubuntu Docker host, run `sudo bash scripts/install-sandbox-profile.sh` from this reviewed checkout once. This loads `deploy/apparmor/ai-factory-sandbox` under its own profile name and changes no global sysctl. Then set the reviewed V0.2 branch/commit and redeploy using `docker-compose.yaml`. `workspace-init` adjusts ownership of the existing workspace volume for UID 10001. The app applies additive migrations and keeps V0.1 task rows.
 5. Check `postgres`, `sandbox`, then `ai-factory` readiness. The control endpoint `/health` means process alive; `/ready` means DB, worker, Telegram (if enabled) and sandbox are responding.
 6. Send `/start`, `/projects`, then a small `/new` acceptance task. Confirm that `/status` identifies the target repo and `/report` contains passing test/review evidence. Confirm the PR in GitHub before merging it.
 
@@ -15,7 +15,9 @@ Compose uses `DATABASE_HOST` and `DATABASE_PASSWORD`; the application URL-encode
 
 ## Sandbox readiness troubleshooting
 
-The runner needs Linux unprivileged user namespaces. The Compose runner alone has `seccomp=unconfined` and `apparmor=unconfined` to permit nested namespaces; the credential-bearing control service keeps the default Docker profiles. No `privileged: true`, host network, host PID namespace, host directory mount or Docker socket is needed.
+The runner needs Linux unprivileged user namespaces. The Compose runner alone has `seccomp=unconfined` and `apparmor=ai-factory-sandbox` to permit nested namespaces; the credential-bearing control service keeps the default Docker profiles. No `privileged: true`, host network, host PID namespace, host directory mount or Docker socket is needed.
+
+Ubuntu 24.04 can reject loopback setup with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` even with the generic unconfined Docker profile. The supplied explicit profile grants `userns` to this runner only. Install it on the host before deployment; Docker intentionally fails if the named profile is absent. On hosts without AppArmor restrictions, the operator may set `SANDBOX_APPARMOR_PROFILE=unconfined`, but Ubuntu should retain the named profile.
 
 Inspect `sandbox` logs and `/health`. On namespace setup failure, leave the service blocked. Check Docker/rootless/user-namespace policies and Ubuntu's AppArmor restrictions for this runner on your host. Do not disable security globally and do not add a direct-host command fallback. If host policy forbids this isolation profile, run the sandbox on a separate appropriately configured Linux machine over a protected connection, using `SANDBOX_URL`/`SANDBOX_TOKEN`. Never expose the runner publicly.
 

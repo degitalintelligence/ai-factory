@@ -35,7 +35,7 @@ No force-push, reset, or deletion of an existing workspace occurs. New task bran
 - Git uses temporary askpass with clean remote URLs, disabled hooks/global config and bounded subprocess duration. Tokens never enter the Git remote or command argument list.
 - File tools reject traversal, Git internals, sensitive env/credential paths, symlinks and oversize files. Runtime database/log/cache files and recognizable credentials block publication.
 - Command allowlists are a usability boundary, not a sandbox: pytest/npm can execute arbitrary source. Bubblewrap provides separate filesystem/PID/network/IPC/user namespaces; no control files, host checkout, Git metadata, Docker socket or control credentials are bound into the child.
-- Runner container has no control secrets, DB credentials or workspace mount. It is non-root, capability-dropped, read-only and resource-limited. Its Docker seccomp/AppArmor exceptions permit namespace setup only on that runner. The child receives a fresh filesystem and cleared environment. No insecure execution fallback exists.
+- Runner container has no control secrets, DB credentials or workspace mount. It is non-root, capability-dropped, read-only and resource-limited. Its Docker seccomp exception and explicit `ai-factory-sandbox` AppArmor profile permit namespace setup only on that runner; the profile is installed on the host without changing global sysctl policy. The child receives a fresh filesystem and cleared environment. No insecure execution fallback exists.
 - Dependency download is an operator opt-in; wheel-only pip and npm with install scripts disabled get network during setup. Test commands always lose network. This does not make dependencies trustworthy: runtime tests still execute them inside the sandbox.
 - Log redaction/pattern scans are defense in depth, not a guarantee against every credential format. Credentials belong in Coolify secrets, not requirements/source/docs.
 
@@ -57,3 +57,5 @@ A lost deployment response becomes `unknown` and is not blindly retried. This pr
 - SQLAlchemy locking: https://docs.sqlalchemy.org/en/20/core/selectable.html
 - Coolify deploy: https://coolify.io/docs/api/endpoints/deployments/deploy-by-tag-or-uuid
 - Coolify application configuration: https://coolify.io/docs/api/endpoints/applications/get-application-by-uuid
+
+- Ubuntu namespace policy: https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007

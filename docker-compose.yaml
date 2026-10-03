@@ -72,7 +72,7 @@ services:
     restart: unless-stopped
     init: true
     # These exceptions belong ONLY to the credential-free runner, for nested user namespaces.
-    security_opt: ["seccomp=unconfined", "apparmor=unconfined", "no-new-privileges:true"]
+    security_opt: ["seccomp=unconfined", "apparmor=${SANDBOX_APPARMOR_PROFILE:-ai-factory-sandbox}", "no-new-privileges:true"]
     cap_drop: [ALL]
     mem_limit: 3g
     cpus: 2

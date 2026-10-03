@@ -30,6 +30,8 @@ SANDBOX_TOKEN=AN_INDEPENDENT_RANDOM_SECRET
 
 Generate a secret locally using `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Put it in Coolify, never in a task or Git.
 
+On the Ubuntu Docker host, install the supplied runner-specific AppArmor profile once: `sudo bash scripts/install-sandbox-profile.sh` from this checkout. It permits the runner to create isolated namespaces without disabling the host-wide restrictions.
+
 The new `sandbox` service must become healthy before the control service starts. Its namespace check fails closed if the host cannot provide isolation. Neither service mounts a Docker socket. Do not run generated Python directly in the credential-bearing control container.
 
 ## First useful task
@@ -93,7 +95,7 @@ For local API development, set `WORKER_ENABLED=false`, leave the Telegram token 
 
 ## Current limits
 
-V0.2 is a bounded software engine, not an unlimited autonomous team. Source snapshots are UTF-8, up to 4 MB/2,500 files, with a 110 KB complete review diff. Binary assets, empty repositories, monorepo-scale changes, arbitrary shells, networked tests, infrastructure provisioning and automatically creating Coolify resources are outside this release. Split larger work into separate tasks. No automatic merge or production rollback is performed.
+V0.2 is a bounded software engine, not an unlimited autonomous team. Source snapshots are UTF-8, up to 200 KB per file and 4 MB/2,500 files total, with a 110 KB complete review diff. Binary assets, empty repositories, monorepo-scale changes, arbitrary shells, networked tests, infrastructure provisioning and automatically creating Coolify resources are outside this release. Split larger work into separate tasks. No automatic merge or production rollback is performed.
 
 Deployment validation covers file structure and review, not an actual Docker build of every target. Target CI and post-deployment smoke tests remain necessary. Reported dollar limits are checked between model calls and can overshoot by one call; if a provider omits cost, `/status` marks the total partial and token/call/time limits still apply. Set an OpenRouter key credit limit for a hard spend ceiling.
 
