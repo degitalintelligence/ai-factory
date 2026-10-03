@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import logging
 import os
 import shutil
 import signal
@@ -269,5 +270,6 @@ def health():
             10,
         )
     if result.exit_code != 0:
-        raise HTTPException(503, "Linux user namespaces unavailable; see docs/OPERATIONS.md")
+        logging.getLogger(__name__).error("Sandbox namespace probe failed: %s", result.output[:2000])
+        raise HTTPException(503, "Sandbox probe failed; inspect runner logs and docs/OPERATIONS.md")
     return {"status": "ok", "isolation": "bubblewrap", "network": "disabled for tests"}

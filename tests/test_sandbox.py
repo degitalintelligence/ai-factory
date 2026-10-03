@@ -16,7 +16,8 @@ def test_sandbox_rejects_unsafe_upload_paths(path):
         server.RunRequest(files={path: "x"}, commands=[["pytest"]])
 
 
-def test_sandbox_argv_has_no_secrets_and_network_isolated(tmp_path):
+def test_sandbox_argv_has_no_secrets_and_network_isolated(tmp_path, monkeypatch):
+    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/" + name)
     args = server.bwrap_args(tmp_path, ["python", "-m", "pytest"])
     assert "--unshare-all" in args and "--clearenv" in args and "--share-net" not in args
     assert "/app" not in args and "/workspaces" not in args
