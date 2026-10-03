@@ -11,8 +11,42 @@ ALLOWED_COMMAND_PREFIXES = (
     ("python", "-m", "py_compile"),
 )
 
+SUSPICIOUS_ARTIFACT_NAMES = {
+    ".env",
+    ".coverage",
+    ".DS_Store",
+}
+SUSPICIOUS_ARTIFACT_SUFFIXES = {
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    ".log",
+    ".pid",
+    ".pyc",
+}
+SUSPICIOUS_ARTIFACT_DIRS = {
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+}
+
 class WorkspaceError(RuntimeError):
     pass
+
+def _status_path(line: str) -> str:
+    path = line[3:] if len(line) >= 4 else ""
+    if " -> " in path:
+        path = path.split(" -> ", 1)[1]
+    return path.strip()
+
+def is_suspicious_artifact(path: str) -> bool:
+    p = Path(path)
+    if p.name in SUSPICIOUS_ARTIFACT_NAMES:
+        return True
+    if p.suffix.lower() in SUSPICIOUS_ARTIFACT_SUFFIXES:
+        return True
+    return any(part in SUSPICIOUS_ARTIFACT_DIRS for part in p.parts)
 
 class Workspace:
     def __init__(self, task_id: int, repo_full_name: str, branch: str):
@@ -69,6 +103,15 @@ class Workspace:
         target.write_text(content, encoding="utf-8")
         return f"Wrote {path}"
 
+    def delete_file(self, path: str) -> str:
+        target = self._safe_path(path)
+        if not target.exists():
+            return f"File already absent: {path}"
+        if not target.is_file():
+            raise WorkspaceError(f"Not a file: {path}")
+        target.unlink()
+        return f"Deleted {path}"
+
     def run_command(self, command: str) -> str:
         if any(token in command for token in (";", "|", "&&", "||", ">", "<", "$(")):
             raise WorkspaceError("Shell operators are not allowed.")
@@ -84,6 +127,38 @@ class Workspace:
     def diff(self) -> str:
         return self._run(["git", "diff"], check=False).stdout[:50000]
 
+    def status_porcelain(self) -> str:
+        return self._run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+            check=False,
+        ).stdout
+
+    def hygiene_issues(self, before_tests: str, after_tests: str) -> list[str]:
+        before_paths = {
+            _status_path(line)
+            for line in before_tests.splitlines()
+            if line.strip()
+        }
+        after_lines = [line for line in after_tests.splitlines() if line.strip()]
+        after_paths = {_status_path(line) for line in after_lines}
+
+        issues: list[str] = []
+
+        for path in sorted(after_paths - before_paths):
+            issues.append(
+                f"Tests created or dirtied repository artifact: {path}. "
+                "Tests must not leave new working-tree artifacts."
+            )
+
+        for path in sorted(after_paths):
+            if is_suspicious_artifact(path):
+                issues.append(
+                    f"Suspicious runtime/generated artifact present in git status: {path}. "
+                    "Use temp/in-memory storage or ignore runtime data instead of committing it."
+                )
+
+        return list(dict.fromkeys(issues))
+
     def default_tests(self) -> str:
         outputs = []
         for cmd in (["python", "-m", "compileall", "."], ["pytest", "-q"]):
@@ -94,7 +169,23 @@ class Workspace:
             )
         return "\n\n".join(outputs)
 
+    def assert_safe_to_commit(self) -> None:
+        status = self.status_porcelain()
+        suspicious = sorted(
+            {
+                _status_path(line)
+                for line in status.splitlines()
+                if line.strip() and is_suspicious_artifact(_status_path(line))
+            }
+        )
+        if suspicious:
+            raise WorkspaceError(
+                "Refusing to commit suspicious runtime/generated artifacts: "
+                + ", ".join(suspicious)
+            )
+
     def commit_and_push(self, message: str) -> None:
+        self.assert_safe_to_commit()
         self._run(["git", "add", "-A"])
         status = self._run(["git", "status", "--porcelain"], check=False).stdout.strip()
         if not status:
