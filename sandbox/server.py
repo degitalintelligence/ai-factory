@@ -67,7 +67,15 @@ def bwrap_args(root: Path, command: list[str], network=False):
         "--fsize=16777216",
         "--",
         "bwrap",
-        "--unshare-all",
+        # `--unshare-all` uses `--unshare-user-try`; that can silently continue
+        # without a user namespace and fail later while mounting /proc. User
+        # namespaces are a hard requirement for this runner, so fail early.
+        "--unshare-user",
+        "--unshare-ipc",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
         "--die-with-parent",
         "--new-session",
         "--cap-drop",
@@ -77,7 +85,7 @@ def bwrap_args(root: Path, command: list[str], network=False):
         "/usr",
         "/usr",
     ]
-    for directory in ("/lib", "/lib64", "/bin", "/sbin"):
+    for directory in ("/usr/local", "/lib", "/lib64", "/bin", "/sbin"):
         if Path(directory).exists():
             args += ["--ro-bind", directory, directory]
     args += [
