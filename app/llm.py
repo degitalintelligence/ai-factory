@@ -14,6 +14,29 @@ T = TypeVar("T", bound=BaseModel)
 run_context: ContextVar[tuple[int, str] | None] = ContextVar("run_context", default=None)
 
 
+def validation_detail(exc: ValueError, schema: type[BaseModel]) -> str:
+    """Describe errors without copying model output, unknown keys, or input values."""
+    if isinstance(exc, ValidationError):
+        details = []
+        for error in exc.errors(include_input=False, include_url=False)[:8]:
+            field = error["loc"][0] if error["loc"] else "object"
+            field = field if field in schema.model_fields else "object"
+            required_error = str(error.get("ctx", {}).get("error", ""))
+            if required_error in {
+                "path is required",
+                "content is required",
+                "old_text is required",
+                "command is required",
+            }:
+                details.append(required_error)
+                continue
+            details.append(f"{field}: {error['type']}")
+        return "schema_validation: " + "; ".join(details)
+    if isinstance(exc, json.JSONDecodeError):
+        return f"invalid_json: line {exc.lineno}, column {exc.colno}"
+    return str(exc)  # Only locally constructed response-state errors reach here.
+
+
 async def json_completion(*, model: str, system: str, user: str, schema: type[T]) -> T:
     if not settings.openrouter_api_key or not model:
         raise RuntimeError("OpenRouter API key/model is not configured")
@@ -36,6 +59,8 @@ async def json_completion(*, model: str, system: str, user: str, schema: type[T]
         max_retries=0,
     ) as client:
         for attempt in range(3):
+            if sum(len(m["content"]) for m in messages) > settings.max_prompt_chars:
+                raise RuntimeError("Context budget exceeded during structured-output retry")
             if context:
                 await store.reserve_call(
                     *context,
@@ -76,19 +101,47 @@ async def json_completion(*, model: str, system: str, user: str, schema: type[T]
             if context:
                 await store.record_usage(*context, tokens, cost)
             try:
-                if not response.choices or response.choices[0].finish_reason == "length":
-                    raise ValueError("Response truncated; return a smaller action")
-                content = response.choices[0].message.content or ""
-                if content.startswith("```json") and content.rstrip().endswith("```"):
-                    content = content[7:].rstrip()[:-3]
+                if not response.choices:
+                    raise ValueError("missing_choices: provider returned no completion")
+                choice = response.choices[0]
+                if choice.finish_reason == "length":
+                    raise ValueError("truncated: output token limit reached; return a smaller action")
+                if choice.message.refusal or choice.finish_reason == "content_filter":
+                    raise ValueError("refusal: provider declined this response; do not bypass its policy")
+                content = (choice.message.content or "").strip()
+                if not content:
+                    raise ValueError("empty_content: provider returned no JSON text")
+                # Accept a single fenced JSON document, never extract JSON from prose.
+                lines = content.splitlines()
+                if len(lines) >= 3 and lines[0] in {"```json", "```"} and lines[-1] == "```":
+                    content = "\n".join(lines[1:-1])
                 return schema.model_validate(json.loads(content))
             except (ValidationError, ValueError) as exc:
+                detail = validation_detail(exc, schema)
+                diagnostic = {
+                    "schema": schema.__name__,
+                    "model": model,
+                    "attempt": attempt + 1,
+                    "max_output_tokens": settings.max_output_tokens,
+                    "detail": detail,
+                }
+                if context:
+                    await store.artifact(context[0], "llm_validation", json.dumps(diagnostic))
+                    await store.event(
+                        context[0], "llm_validation", f"{schema.__name__} attempt {attempt + 1}/3: {detail}"
+                    )
                 if attempt == 2:
-                    raise RuntimeError("Model returned invalid structured output after 3 attempts") from exc
+                    raise RuntimeError(
+                        f"{schema.__name__}: invalid structured output after 3 attempts ({detail}); see /report"
+                    ) from exc
                 messages.append(
                     {
                         "role": "user",
-                        "content": "Previous answer failed schema validation. Return valid JSON with all required fields; no commentary.",
+                        "content": f"Previous answer was rejected: {detail}. "
+                        "Regenerate one complete JSON object matching the supplied schema and action rules. "
+                        "Use exact field names at the top level; no wrappers, arrays, extra fields or commentary. "
+                        "Include required fields with correct types. Keep the response small. "
+                        "No action from the rejected response was executed.",
                     }
                 )
     raise RuntimeError("LLM completion failed")
