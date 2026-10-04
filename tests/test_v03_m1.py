@@ -2,7 +2,7 @@ import pytest
 
 from app import main
 from app.agents import normalize_lead_plan
-from app.config import settings
+from app.config import Settings, settings
 from app.schemas import LeadPlan
 from app.skills import SKILLS, select_skills
 
@@ -47,6 +47,19 @@ def test_model_alias_resolves_without_hardcoding_it_in_agent_calls(monkeypatch):
     monkeypatch.setattr(settings, "model_aliases_json", '{"bunny-alpha":"provider/model-v1"}')
     monkeypatch.setattr(settings, "lead_model", "bunny-alpha")
     assert settings.model_for("lead") == "provider/model-v1"
+
+
+def test_blank_api_operator_user_id_means_unset_not_a_parse_error():
+    """Coolify/Compose forward an empty variable as ""; Settings must still start."""
+    config = Settings(_env_file=None, api_token="", api_operator_user_id="")
+    assert config.api_operator_user_id is None
+    assert Settings(_env_file=None, api_operator_user_id=" 7 ").api_operator_user_id == 7
+
+
+def test_blank_principal_still_fails_closed_when_the_api_token_is_set():
+    config = Settings(_env_file=None, worker_enabled=False, api_token="t", api_operator_user_id="   ")
+    with pytest.raises(ValueError, match="API_OPERATOR_USER_ID"):
+        config.validate_runtime()
 
 
 def test_v03_channel_neutral_routes_exist():
