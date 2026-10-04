@@ -50,7 +50,7 @@ async def repository_context(workspace, task):
         )
     inspected = []
     referenced = re.findall(
-        r"(?<!https://)(?<!http://)(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\\.(?:py|js|ts|json|toml|ini|md|yaml|yml)",
+        r"(?<!https://)(?<!http://)(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|js|ts|json|toml|ini|md|yaml|yml)",
         task.requirement,
     )
     if is_self:
