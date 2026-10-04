@@ -189,12 +189,23 @@ async def run_task(task_id, notify=None, owner=None):
             await store.artifact(
                 task_id, "post_publication", json.dumps({"pr_url": url, "issues": published})
             )
-            note = (
-                "\nPost-publication verification: all evidence sections present."
-                if not published
-                else "\nPost-publication verification needs operator attention:\n- " + "\n- ".join(published)
+            if published:
+                # Fail closed. The PR already exists, so its URL must stay durable for
+                # reconciliation, but the task must not claim success while the published PR
+                # does not match the reviewed evidence. A retry re-reads the same PR and
+                # re-runs this verification instead of creating another one.
+                await store.update(task_id, owner, pr_url=url)
+                raise RuntimeError(
+                    "Post-publication verification failed; the PR is published but does not "
+                    "match the reviewed evidence. Inspect /report, correct it, then /retry:\n- "
+                    + "\n- ".join(published)
+                )
+            await transition(
+                "pr_created",
+                f"Passed gates. PR: {url}\n{summary}\n"
+                "Post-publication verification: all evidence sections present.",
+                pr_url=url,
             )
-            await transition("pr_created", f"Passed gates. PR: {url}\n{summary}{note}", pr_url=url)
 
         # The commit and approval record are durable BEFORE a push or PR API request.
         if task.head_sha and task.review_digest:
