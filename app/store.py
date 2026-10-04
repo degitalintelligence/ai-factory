@@ -25,6 +25,7 @@ from app.schemas import (
     OUTCOME_STATE,
     DecisionMessageType,
     DecisionState,
+    ImprovementOutcome,
     MemoryState,
     MemoryView,
     MemoryWrite,
@@ -852,6 +853,77 @@ class Store:
         return None
 
     # --- Context and Memory Plane ---
+
+    async def record_outcome(self, task_id, outcome: ImprovementOutcome, tenant=DEFAULT_TENANT):
+        """Measure a completed self-improvement and retain the lesson (requirement v0.3 §9).
+
+        The improvement cycle ends with Observe outcome → Rollback atau retain, not at the
+        merged PR. One measurement is exactly one outcome artifact, one timeline event, and
+        one shared lesson in memory keyed to the task. A different measurement for the same
+        change is refused — the numbers of one change are history, and a revised measurement
+        belongs to a fresh self-improvement task.
+        """
+        key = f"improvement.task-{task_id}"
+        value = (
+            f"{outcome.conclusion} | before: {outcome.before[:1500]} | after: {outcome.after[:1500]}"
+            f" | evidence: {'; '.join(outcome.evidence)[:600]}"
+            + (f" | window: {outcome.window[:200]}" if outcome.window else "")
+            + (f" | notes: {outcome.notes[:600]}" if outcome.notes else "")
+        )
+        if secret_present(value):
+            raise ValueError("Remove credentials from the measurement; store them outside memory")
+        payload = redact(outcome.model_dump_json())
+        async with self.sessions() as s:
+            task = await s.get(Task, task_id)
+            if not task:
+                raise ValueError("Task not found")
+            if task.kind != "self_improvement":
+                raise ValueError("Outcomes are recorded on self_improvement tasks only")
+            if task.status != "completed":
+                raise ValueError(f"Task #{task_id} is {task.status}; measure the outcome after completion")
+            existing = await s.scalar(
+                select(Artifact).where(Artifact.task_id == task_id, Artifact.kind == "improvement_outcome")
+            )
+            if existing is not None and existing.content != payload:
+                raise ValueError(
+                    "An outcome is already recorded for this task; a revised measurement "
+                    "belongs in a new self-improvement task"
+                )
+            if existing is None:
+                s.add(Artifact(task_id=task_id, kind="improvement_outcome", content=payload))
+                s.add(
+                    Event(
+                        task_id=task_id,
+                        kind="outcome",
+                        message=redact(
+                            f"Outcome recorded: {outcome.conclusion}; lesson stored as memory '{key}'"
+                        ),
+                    )
+                )
+                await s.commit()
+            else:
+                # A repeated identical measurement is the same one action: return the
+                # retained lesson instead of superseding it with a v2 of itself.
+                row = await s.scalar(
+                    select(MemoryItem).where(
+                        MemoryItem.tenant == tenant,
+                        MemoryItem.key == key,
+                        MemoryItem.scope == "lesson",
+                        MemoryItem.state == MemoryState.ACTIVE,
+                    )
+                )
+                if row is not None and row.value == value:
+                    return row
+        lesson = MemoryWrite(
+            key=key,
+            value=value,
+            scope="lesson",
+            source="self-improvement outcome",
+            evidence_ref=f"task:{task_id}",
+        )
+        # The lesson is shared inside the tenant (no owner): retained learning is how
+        # the next brief inherits what this change actually did, not just what it promised.
+        return await self.remember(lesson, task_id=task_id, tenant=tenant)
 
     async def remember(self, item: MemoryWrite, owner=None, task_id=None, tenant=DEFAULT_TENANT):
         """Store one memory, superseding any earlier active version of the same key.

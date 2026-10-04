@@ -20,6 +20,7 @@ from app.db import engine, init_db, utcnow
 from app.schemas import (
     ClarificationRequest,
     DecisionRequest,
+    ImprovementOutcome,
     ImprovementRequest,
     IntentRequest,
     PlanApprovalRequest,
@@ -351,6 +352,32 @@ async def create_improvement(request: ImprovementRequest, operator_id=Depends(au
         return result
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/v1/improvements/{task_id}/outcome", dependencies=[Depends(authorize)])
+async def record_improvement_outcome(task_id: int, outcome: ImprovementOutcome):
+    """Close the improvement loop: measure the change, retain the lesson, retain or roll back."""
+    try:
+        lesson = await store.record_outcome(task_id, outcome)
+    except ValueError as exc:
+        message = str(exc)
+        if message == "Task not found":
+            raise HTTPException(404, message) from exc
+        if "credentials" in message:
+            raise HTTPException(422, message) from exc
+        raise HTTPException(409, message) from exc
+    return {
+        "task_id": task_id,
+        "conclusion": outcome.conclusion,
+        "memory_key": lesson.key,
+        "lesson_memory_id": lesson.id,
+        "lesson_version": lesson.version,
+        "next_action": (
+            "Revert the change per the brief's rollback plan and confirm the rollback."
+            if outcome.conclusion == "rollback"
+            else "Keep the change; the next brief inherits this lesson."
+        ),
+    }
 
 
 class MemoryLockRequest(BaseModel):
