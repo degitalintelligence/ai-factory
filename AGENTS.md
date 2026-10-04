@@ -3,6 +3,11 @@
 > Single source of operational rules for this repository.
 > Product identity: LioBot = AI Factory.
 > This repository is the LioBot core engine. Read this file before changing code.
+>
+> **Requirement authority:** `LIOBOT_CORE_V0_3_REQUIREMENTS.md` is the current product
+> and engineering requirement. It amends `AI_FACTORY_FULL_REQUIREMENTS.md` and
+> `AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md` and is read before them. Where V0.3 and an
+> earlier document disagree, V0.3 wins. See §3 for the full precedence order.
 
 ## 0. Project at a glance
 
@@ -11,12 +16,16 @@
 - Role: control plane, orchestration engine, policy/gates, worker, evidence store, sandbox client, and channel adapters.
 - Test repository: degitalintelligence/telegram-lab.
 - Important boundary: telegram-lab is a test laboratory and acceptance harness only.
-- Current baseline: V0.2 bounded software engine.
+- Current baseline: V0.2 bounded software engine. V0.3 Chief of Staff layer is the approved
+  target and is not yet implemented; treat roadmap behaviour as roadmap.
 - Runtime: Python 3.12, FastAPI, async SQLAlchemy, Pydantic, PostgreSQL for multi-worker operation, SQLite only for local/unit tests.
 - Channels today: Telegram control interface and optional authenticated HTTP API.
 - Execution: control service, disposable worker leases, and a separate credential-free sandbox service.
 - Release: GitHub PR publication and explicit full-commit-SHA Coolify deployment.
-- Current model convention: Lead, Developer, and Reviewer use stealth/space-bunny-alpha unless Dedi explicitly approves a tested configuration change.
+- Current model convention: Lead, Developer, and Reviewer use the configured alias `bunny-alpha`
+  (provider model `stealth/space-bunny-alpha`) unless Dedi explicitly approves a tested
+  configuration change. The alias is resolved through environment configuration only; never
+  hard-code it in business logic.
 
 Generated caches, local databases, runtime workspaces, credentials, and Docker
 volumes are not source files.
@@ -28,7 +37,10 @@ Before writing or changing code, every agent must:
 1. Read this AGENTS.md completely.
 2. Read README.md.
 3. Read relevant sections of docs/ARCHITECTURE.md, docs/VERIFICATION.md, and docs/OPERATIONS.md.
-4. Read the supplied product requirements and current amendment. The amendment is authoritative for the identity and boundary of LioBot.
+4. Read `LIOBOT_CORE_V0_3_REQUIREMENTS.md`, then the amendment
+   `AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md`, then the supplied product requirements.
+   V0.3 is authoritative for product identity, product boundary, capability levels,
+   decision categories, memory model, and acceptance criteria.
 5. Inspect the current module and test structure before choosing a file.
 6. Search for existing state transitions, schemas, gates, and tests before adding a duplicate.
 7. Establish the current branch, HEAD SHA, working-tree changes, and target project policy.
@@ -76,12 +88,13 @@ These decisions are locked unless Dedi explicitly changes them.
 When documents or prompts conflict, use this order:
 
 1. The latest explicit instruction from Dedi.
-2. AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md, when present.
-3. This AGENTS.md for repository operation and safety.
-4. AI_FACTORY_FULL_REQUIREMENTS.md, including its normative correction section.
-5. README.md and docs.
-6. Existing implementation and historical notes.
-7. Agent assumptions last.
+2. LIOBOT_CORE_V0_3_REQUIREMENTS.md, the current product and engineering requirement.
+3. AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md, where V0.3 is silent.
+4. This AGENTS.md for repository operation and safety.
+5. AI_FACTORY_FULL_REQUIREMENTS.md, including its normative correction section.
+6. README.md and docs.
+7. Existing implementation and historical notes.
+8. Agent assumptions last.
 
 The old wording that AI Factory builds LioBot as an application in a target
 repository is obsolete. A target repository may be telegram-lab for proof and
@@ -102,6 +115,19 @@ publication, and explicit deployment of an existing registered Coolify target.
 
 It is not yet an unlimited autonomous company, unrestricted shell agent,
 automatic production deployer, or generic workflow engine.
+
+V0.3 (`LIOBOT_CORE_V0_3_REQUIREMENTS.md`) is the approved target and moves the
+product to a Chief of Staff and orchestration engine. Its intent resolution,
+context assembly, skill registry, scoped memory, improvement proposal
+lifecycle, budget warning, and `/v1` API surface are roadmap until implemented
+and covered by tests. Do not describe them as working behaviour.
+
+Implement V0.3 in the milestone order given in that document (M1 core
+orchestration, M2 decision experience, M3 memory and evaluator, M4
+self-improvement). Do not start M4 before M1 to M3 pass their acceptance test.
+The V0.2 guardrails in this file remain mandatory throughout: removing or
+weakening one requires an improvement proposal and regression test, not a
+refactor.
 
 ### 4.2 Work that belongs in this repository
 
@@ -188,8 +214,14 @@ deployment credentials.
 ### 6.1 Model policy
 
 - Configure Lead, Developer, and Reviewer explicitly through environment variables.
-- Current standard is stealth/space-bunny-alpha for all three roles.
+- Current standard is the alias `bunny-alpha`, resolved to provider model
+  `stealth/space-bunny-alpha`, for all three roles. The alias exists so the
+  provider model can change without a code change; keep it configurable and
+  never hard-code it in business logic.
+- Record the alias and the resolved provider model for every call.
 - Do not silently switch provider, model, temperature, output limit, or fallback path.
+- A fallback model is permitted only when policy explicitly allows it, and the
+  fallback must be recorded in the call audit.
 - Any model change requires a bounded regression task, cost/risk assessment, and Dedi approval when it affects spending, data, or safety.
 - Record role, model, call count, token usage, reported cost, timeout, and validation failure category.
 - Provider-reported cost may be partial. Call, token, and wall-clock limits still apply.
@@ -356,6 +388,11 @@ Dedi must not need raw logs to understand progress. Each important update states
 
 Standard message types are UPDATE, NEED_INFO, DECISION_REQUIRED,
 APPROVAL_REQUIRED, WARNING, BLOCKED, COMPLETED, and LEARNING_PROPOSAL.
+
+V0.3 adds the decision categories `risk_escalation`, `clarification_needed`,
+`blocked`, `recommendation`, `learning_proposal`, and `incident`. They are
+roadmap until the Decision Inbox categories ship; do not invent them in the
+current message set.
 
 ### 9.3 Decision Request and Decision Inbox
 
@@ -663,9 +700,13 @@ model prompts or code comments.
 | LioBot versus AI Factory identity | RESOLVED | They are one product. |
 | telegram-lab role | RESOLVED | Test harness and acceptance target only. |
 | Merge and production deployment | RESOLVED | Human-controlled. |
-| Default model | RESOLVED | stealth/space-bunny-alpha for Lead, Developer, Reviewer through config. |
+| V0.3 versus amendment V1.1 authority | RESOLVED | `LIOBOT_CORE_V0_3_REQUIREMENTS.md` is current and wins; V1.1 applies only where V0.3 is silent. |
+| Default model | RESOLVED | Alias `bunny-alpha` (provider model `stealth/space-bunny-alpha`) for Lead, Developer, Reviewer through config. Record alias and resolved model per call. |
+| V0.3 capability levels L0 to L3 | RESOLVED | L0 read, L1 plan/draft in isolated workspace, L2 non-production change and staging deploy per project policy, L3 production, external message, financial transaction, credential. L3 always requires Dedi approval. An agent must not skip a level because it feels confident. |
+| V0.3 minimum data model and `/v1` API | ROADMAP | Add only when the milestone that needs it is active, with migration and contract tests. Business logic must remain usable without Telegram. |
 | Final Dedi interface | OPEN | Telegram, dashboard, or both; all adapters share one core inbox/state. |
 | Context/memory backend | OPEN | Choose only with permission, provenance, freshness, and retrieval tests. |
+| Memory tenant isolation key | OPEN | Decide whether free-text `scope` is the tenant boundary or `owner` becomes a real filter with a tenant or organization column before scoped memory is implemented. |
 | Skill registry and Team Planner implementation | ROADMAP | Do not invent a generic platform before a concrete skill/task needs it. |
 | ai-factory self-target registry alias | OPEN | Add explicitly with branch, policy, budget, and approval rules before self-editing core. |
 | Domain skills beyond Engineering | ROADMAP | One domain at a time, with least-privilege connectors and staging evidence. |
@@ -728,6 +769,12 @@ Before reporting completion:
 ---
 
 *Last reviewed: 2026-10-04. Owner: Dedi Setiadi.*
+
+*Amendment 2026-10-04: recorded `LIOBOT_CORE_V0_3_REQUIREMENTS.md` as the current
+requirement with precedence over amendment V1.1; resolved the `bunny-alpha` alias against
+provider model `stealth/space-bunny-alpha`; recorded V0.3 capability levels L0 to L3 as
+binding; labelled the V0.3 data model, `/v1` API, and Decision Inbox categories as roadmap;
+opened a memory tenant-isolation decision. No runtime behaviour changed.*
 
 
 
