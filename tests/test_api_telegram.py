@@ -18,6 +18,7 @@ from app.telegram_control import (
 
 async def test_api_auth_and_idempotent_creation(db, monkeypatch):
     monkeypatch.setattr(settings, "api_token", "operator-test-token")
+    monkeypatch.setattr(settings, "api_operator_user_id", 7)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
         assert (await client.get("/health")).status_code == 200
         assert (await client.get("/tasks")).status_code == 401
@@ -38,6 +39,33 @@ async def test_api_disabled_or_wrong_token_denies_access(db, monkeypatch, token)
     monkeypatch.setattr(settings, "api_token", token)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
         assert (await client.get("/tasks", headers={"Authorization": "Bearer x"})).status_code == 401
+
+
+async def test_api_refuses_a_valid_token_with_no_principal(db, monkeypatch):
+    """A decision recorded with no principal is unattributable, so it fails closed."""
+    monkeypatch.setattr(settings, "api_token", "t")
+    monkeypatch.setattr(settings, "api_operator_user_id", None)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
+        response = await client.get("/tasks", headers={"Authorization": "Bearer t"})
+    assert response.status_code == 401
+
+
+def test_startup_refuses_an_api_token_without_a_principal(monkeypatch):
+    monkeypatch.setattr(settings, "api_token", "t")
+    monkeypatch.setattr(settings, "api_operator_user_id", None)
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "worker_enabled", False)
+    with pytest.raises(ValueError, match="API_OPERATOR_USER_ID"):
+        settings.validate_runtime()
+
+
+def test_startup_refuses_invalid_role_clearance(monkeypatch):
+    """Bad clearance JSON must fail at startup, not on the first memory read."""
+    monkeypatch.setattr(settings, "role_clearance_json", '{"lead":"top-secret"}')
+    monkeypatch.setattr(settings, "telegram_bot_token", "")
+    monkeypatch.setattr(settings, "worker_enabled", False)
+    with pytest.raises(ValueError, match="ROLE_CLEARANCE_JSON"):
+        settings.validate_runtime()
 
 
 def update(user=7, kind="private"):
@@ -89,6 +117,7 @@ def texts(event):
 
 async def test_decision_lifecycle_is_identical_in_both_channels(db, monkeypatch):
     monkeypatch.setattr(settings, "api_token", "t")
+    monkeypatch.setattr(settings, "api_operator_user_id", 7)
     monkeypatch.setattr(settings, "telegram_allowed_user_ids", "7")
     headers = {"Authorization": "Bearer t"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
@@ -117,6 +146,7 @@ async def test_decision_lifecycle_is_identical_in_both_channels(db, monkeypatch)
 
 async def test_an_unparseable_decision_answer_is_refused_in_both_channels(db, monkeypatch):
     monkeypatch.setattr(settings, "api_token", "t")
+    monkeypatch.setattr(settings, "api_operator_user_id", 7)
     monkeypatch.setattr(settings, "telegram_allowed_user_ids", "7")
     headers = {"Authorization": "Bearer t"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:

@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.contracts import context_slice, remember
 from app.db import MemoryItem, utcnow
 from app.schemas import DecisionState, MemoryState, MemoryWrite, Sensitivity
@@ -24,7 +25,7 @@ async def test_memory_requires_a_source(db):
 
 async def test_stored_memory_carries_provenance_freshness_and_permission(db):
     stored = await remember(item(evidence_ref="requirements#17", confidence=0.8), owner=7)
-    [view] = (await db.recall(role="lead"))[0]
+    [view] = (await db.recall(role="lead", owner=7))[0]
     assert view.key == "deploy.target"
     assert view.source == "requirements section 17"
     assert view.evidence_ref == "requirements#17"
@@ -279,3 +280,72 @@ async def test_same_memory_key_can_be_scoped_to_distinct_projects(db):
     await remember(item(key="deploy.target", scope="lab", value="lab-web"))
     await remember(item(key="deploy.target", scope="quant", value="quant-web"))
     assert {v.value for v in (await db.recall(role="lead"))[0]} == {"lab-web", "quant-web"}
+
+
+# --- Tenant and owner isolation -------------------------------------------------
+
+
+async def test_one_tenant_can_never_read_another_tenants_memory(db):
+    await remember(item(key="deploy.target", value="acme-web"), tenant="acme")
+    await remember(item(key="deploy.target", value="globex-web"), tenant="globex")
+
+    assert [v.value for v in (await db.recall(role="lead", tenant="acme"))[0]] == ["acme-web"]
+    assert [v.value for v in (await db.recall(role="lead", tenant="globex"))[0]] == ["globex-web"]
+
+
+async def test_two_tenants_may_hold_the_same_active_key_and_scope(db):
+    """The active-key uniqueness is per tenant; one tenant must not evict another's row."""
+    await remember(item(key="deploy.target", value="acme-web"), tenant="acme")
+    await remember(item(key="deploy.target", value="globex-web"), tenant="globex")
+
+    assert [h.value for h in await db.memory_history("deploy.target", tenant="globex")] == ["globex-web"]
+
+
+async def test_memory_history_is_scoped_to_tenant_and_owner(db):
+    await remember(item(key="deploy.target", value="acme-web"), tenant="acme")
+
+    assert await db.memory_history("deploy.target", tenant="globex") == []
+
+
+async def test_a_persons_memory_is_invisible_to_another_person(db):
+    await remember(item(key="private.note", value="private-note"), owner=7)
+    await remember(item(key="shared.note", value="shared-note"))
+
+    mine = {v.value for v in (await db.recall(role="lead", owner=7))[0]}
+    theirs = {v.value for v in (await db.recall(role="lead", owner=8))[0]}
+    assert mine == {"private-note", "shared-note"}
+    assert theirs == {"shared-note"}
+
+
+async def test_an_anonymous_recall_returns_only_shared_memory(db):
+    """No principal means no owner-scoped memory, even for the most permissive role."""
+    await remember(item(key="deploy.target", value="private-note"), owner=7)
+
+    assert (await db.recall(role="lead"))[0] == []
+
+
+async def test_owner_narrows_recall_further_than_role_clearance(db, monkeypatch):
+    """Role clearance alone must not be enough to read another owner's memory."""
+    await remember(item(key="payroll", value="band 3", sensitivity=Sensitivity.RESTRICTED), owner=7)
+    monkeypatch.setattr(settings, "role_clearance_json", '{"lead":"restricted"}')
+
+    assert [v.value for v in (await db.recall(role="lead", owner=7))[0]] == ["band 3"]
+    assert (await db.recall(role="lead", owner=8))[0] == []
+
+
+async def test_another_tenant_cannot_correct_or_retract_a_memory(db):
+    stored = await remember(item(value="acme-web"), tenant="acme")
+
+    with pytest.raises(ValueError, match="Memory not found"):
+        await db.correct_memory(stored.id, "stolen-web", source="intrusion", tenant="globex")
+    with pytest.raises(ValueError, match="Memory not found"):
+        await db.retract_memory(stored.id, "intrusion", tenant="globex")
+
+    assert (await db.recall(role="lead", tenant="acme"))[0][0].value == "acme-web"
+
+
+async def test_credentials_in_provenance_fields_are_refused(db):
+    with pytest.raises(ValueError, match="Remove credentials"):
+        await remember(item(source="requirements section 17 api_key=abcd1234efgh5678"))
+    with pytest.raises(ValueError, match="Remove credentials"):
+        await remember(item(evidence_ref="https://example.test/x?token=abcd1234efgh5678"))

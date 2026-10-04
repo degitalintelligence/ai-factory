@@ -153,6 +153,10 @@ class MemoryItem(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     key: Mapped[str] = mapped_column(String(200), index=True)
     value: Mapped[str] = mapped_column(Text)
+    # tenant is the hard isolation boundary; owner narrows further within one tenant.
+    # A memory written by one tenant must never be recalled by another, so every read
+    # filters on tenant and an absent tenant fails closed rather than matching everything.
+    tenant: Mapped[str] = mapped_column(String(120), default="default", server_default="default", index=True)
     scope: Mapped[str] = mapped_column(String(120), default="", server_default="", index=True)
     sensitivity: Mapped[str] = mapped_column(String(20), default="internal", server_default="internal")
     source: Mapped[str] = mapped_column(String(300), default="", server_default="")
@@ -187,20 +191,28 @@ def _default_clause(server_default):
 
 
 async def init_db(db_engine=None):
-    """Additive V0.1 migration. Never deletes old task rows or volumes."""
+    """Additive startup migration. Never deletes old task, memory, or evidence rows.
+
+    Existing databases gain new columns through ALTER TABLE ADD COLUMN with their
+    declared default, so a historical memory row written before tenant isolation
+    existed becomes tenant "default" rather than being dropped or left null.
+    """
     target = db_engine or engine
     async with target.begin() as conn:
         if target.dialect.name == "postgresql":
             await conn.execute(text("SELECT pg_advisory_xact_lock(72803102)"))
         tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
-        if "tasks" in tables:
-            columns = await conn.run_sync(lambda c: {x["name"] for x in inspect(c).get_columns("tasks")})
-            for column in Task.__table__.columns:
+        for model in (Task, MemoryItem):
+            if model.__tablename__ not in tables:
+                continue
+            name = model.__tablename__
+            columns = await conn.run_sync(lambda c, n=name: {x["name"] for x in inspect(c).get_columns(n)})
+            for column in model.__table__.columns:
                 if column.name in columns:
                     continue
                 sql_type = column.type.compile(dialect=target.dialect)
                 default = _default_clause(column.server_default)
-                await conn.execute(text(f'ALTER TABLE tasks ADD COLUMN "{column.name}" {sql_type}{default}'))
+                await conn.execute(text(f'ALTER TABLE {name} ADD COLUMN "{column.name}" {sql_type}{default}'))
         await conn.run_sync(Base.metadata.create_all)
         await conn.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_idempotency ON tasks (idempotency_key)")
@@ -211,7 +223,7 @@ async def init_db(db_engine=None):
                 await conn.execute(
                     text(
                         "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_active "
-                        "ON memory_items (key, scope) WHERE state = 'active'"
+                        "ON memory_items (tenant, key, scope) WHERE state = 'active'"
                     )
                 )
         except IntegrityError:
