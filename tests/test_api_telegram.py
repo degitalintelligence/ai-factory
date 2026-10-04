@@ -7,7 +7,7 @@ import pytest
 from app.config import settings
 from app.contracts import decision_inbox
 from app.main import app
-from app.schemas import MemoryWrite
+from app.schemas import MemoryWrite, SelfImprovementBrief
 from app.telegram_control import (
     decide_handler,
     improve_handler,
@@ -279,4 +279,58 @@ async def test_memory_lock_endpoint_freezes_for_the_operator(db, monkeypatch):
         again = await client.post(f"/v1/memory/{stored.id}/lock", headers=headers, json={})
         assert again.status_code == 200 and again.json()["locked"] is True
         missing = await client.post("/v1/memory/99999/lock", headers=headers, json={})
+        assert missing.status_code == 404
+
+
+async def test_improvement_outcome_endpoint_closes_the_loop(db, monkeypatch):
+    monkeypatch.setattr(settings, "api_token", "operator-test-token")
+    monkeypatch.setattr(settings, "api_operator_user_id", 7)
+    retry_brief = {
+        "problem": "Prompt retries loop three times on malformed JSON",
+        "evidence": ["events for task 41 show 3 retries"],
+        "hypothesis": "Tightening the schema will cut retries",
+        "scope": "Reword the developer prompt only",
+        "baseline": "3 retries per malformed response, 41 tasks observed",
+        "touched_areas": ["app/agents.py"],
+        "rollback_plan": "Revert the prompt commit",
+    }
+    task = await db.create(
+        "Improve the retry parser",
+        kind="self_improvement",
+        brief=SelfImprovementBrief(**retry_brief),
+    )
+    await db.update(task.id, status="completed")
+    headers = {"Authorization": "Bearer operator-test-token"}
+    measurement = {
+        "before": "3 retries per malformed response",
+        "after": "1 retry per malformed response across 20 tasks",
+        "evidence": ["model_runs show retries 3->1"],
+        "conclusion": "retain",
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
+        wrong = {"Authorization": "Bearer not-the-token"}
+        assert (
+            await client.post(f"/v1/improvements/{task.id}/outcome", headers=wrong, json=measurement)
+        ).status_code == 401
+        ok = await client.post(f"/v1/improvements/{task.id}/outcome", headers=headers, json=measurement)
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body["conclusion"] == "retain"
+        assert body["memory_key"] == f"improvement.task-{task.id}"
+        assert body["lesson_version"] == 1
+        # A repeated identical measurement is the same one action.
+        again = await client.post(f"/v1/improvements/{task.id}/outcome", headers=headers, json=measurement)
+        assert again.status_code == 200 and again.json()["lesson_memory_id"] == body["lesson_memory_id"]
+        # A task that never shipped cannot be measured.
+        pending = await db.create(
+            "Improve the retry parser again",
+            kind="self_improvement",
+            brief=SelfImprovementBrief(**retry_brief),
+        )
+        response = await client.post(
+            f"/v1/improvements/{pending.id}/outcome", headers=headers, json=measurement
+        )
+        assert response.status_code == 409
+        assert "measure the outcome after completion" in response.json()["detail"]
+        missing = await client.post("/v1/improvements/99999/outcome", headers=headers, json=measurement)
         assert missing.status_code == 404

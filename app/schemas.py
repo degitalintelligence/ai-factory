@@ -188,6 +188,30 @@ class SelfImprovementBrief(BaseModel):
         return bool(self.sensitive_areas)
 
 
+class OutcomeConclusion(StrEnum):
+    """What the measurement decided: keep the change or undo it (requirement v0.3 §9)."""
+
+    RETAIN = "retain"
+    ROLLBACK = "rollback"
+
+
+class ImprovementOutcome(BaseModel):
+    """Before/after measurement of a completed self-improvement.
+
+    The cycle is not finished when the PR merges: the outcome is observed, measured
+    against the brief's baseline, and either retained or rolled back. `before` and
+    `after` are the measured numbers (quality, reliability, latency, token/cost,
+    failure mode) and `evidence` links to the artifacts they came from.
+    """
+
+    before: str = Field(min_length=1, max_length=4000)
+    after: str = Field(min_length=1, max_length=4000)
+    evidence: list[str] = Field(min_length=1)
+    conclusion: OutcomeConclusion
+    window: str = Field(default="", max_length=300)
+    notes: str = Field(default="", max_length=2000)
+
+
 class Sensitivity(StrEnum):
     PUBLIC = "public"
     INTERNAL = "internal"

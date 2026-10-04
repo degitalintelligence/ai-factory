@@ -4,7 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.contracts import create_self_improvement
-from app.schemas import SelfImprovementBrief, TaskKind, TaskRequest
+from app.schemas import ImprovementOutcome, SelfImprovementBrief, TaskKind, TaskRequest
 
 
 def brief(**overrides):
@@ -18,6 +18,17 @@ def brief(**overrides):
         "rollback_plan": "Revert the prompt commit",
     }
     return SelfImprovementBrief(**{**payload, **overrides})
+
+
+def outcome(**overrides):
+    payload = {
+        "before": "3 retries per malformed response",
+        "after": "1 retry per malformed response across 20 tasks",
+        "evidence": ["model_runs show retries 3->1", "task events show no schema failures"],
+        "conclusion": "retain",
+        "window": "20 tasks after merge",
+    }
+    return ImprovementOutcome(**{**payload, **overrides})
 
 
 def test_brief_rejects_every_missing_mandatory_field():
@@ -97,3 +108,56 @@ async def test_store_refuses_self_improvement_without_a_brief(db):
 
 async def test_normal_tasks_default_to_engineering(db):
     assert (await db.create("Change the return value")).kind == "engineering"
+
+
+# --- Outcome measurement closes the loop (requirement v0.3 §9) -------------------
+
+
+async def completed_self_improvement(db):
+    task = await db.create("Improve the retry parser", kind="self_improvement", brief=brief())
+    await db.update(task.id, status="completed")
+    return task
+
+
+async def test_outcome_measurement_is_recorded_after_completion(db):
+    task = await completed_self_improvement(db)
+    lesson = await db.record_outcome(task.id, outcome())
+    # One artifact, one timeline event, one shared retained lesson.
+    stored = {a.kind: a.content for a in await db.artifacts(task.id)}
+    assert '"conclusion":"retain"' in stored["improvement_outcome"]
+    assert any("Outcome recorded: retain" in e.message for e in await db.events(task.id))
+    assert lesson.key == f"improvement.task-{task.id}" and lesson.scope == "lesson"
+    assert lesson.state == "active" and lesson.version == 1
+    assert lesson.owner is None  # retained learning is shared inside the tenant
+    assert lesson.evidence_ref == f"task:{task.id}"
+
+
+async def test_outcome_requires_a_completed_task(db):
+    task = await db.create("Improve the retry parser", kind="self_improvement", brief=brief())
+    with pytest.raises(ValueError, match="measure the outcome after completion"):
+        await db.record_outcome(task.id, outcome())
+
+
+async def test_outcome_applies_only_to_self_improvement(db):
+    task = await db.create("Normal engineering work")
+    await db.update(task.id, status="completed")
+    with pytest.raises(ValueError, match="self_improvement tasks only"):
+        await db.record_outcome(task.id, outcome())
+
+
+async def test_a_repeated_outcome_is_one_action_and_a_revised_one_is_refused(db):
+    task = await completed_self_improvement(db)
+    first = await db.record_outcome(task.id, outcome())
+    again = await db.record_outcome(task.id, outcome())
+    assert again.id == first.id and again.version == 1  # no supersede churn
+    with pytest.raises(ValueError, match="already recorded"):
+        await db.record_outcome(task.id, outcome(conclusion="rollback"))
+
+
+async def test_outcome_rejects_a_secret_in_the_measurement(db):
+    task = await completed_self_improvement(db)
+    leak = outcome(after="token ghp_ABCDEFGHIJKLMNOPQRSTUVWX leaked into logs")
+    with pytest.raises(ValueError, match="credentials"):
+        await db.record_outcome(task.id, leak)
+    # Nothing was recorded: no artifact, no event, no lesson.
+    assert not [a for a in await db.artifacts(task.id) if a.kind == "improvement_outcome"]
