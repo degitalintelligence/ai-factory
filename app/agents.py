@@ -64,6 +64,11 @@ async def developer_loop(
 ):
     history = []
     inspected = False
+    last_signature = None
+    repeated_steps = 0
+    non_mutation_steps = 0
+    mutations = {"write_file", "replace_text", "delete_file"}
+    developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
     system = (
         BOUNDARY
         + """You are the developer. Use exactly one structured action at a time.
@@ -85,18 +90,25 @@ Implement meaningful acceptance tests, failure paths, configuration docs and com
 For deployment: Dockerfile (non-root), .dockerignore, .env.example (empty placeholders), Compose with healthchecks,
 restart policy and named volumes where stateful; docs/DEPLOYMENT.md with environment, health, backup and rollback.
 Never deploy or push; the orchestrator owns those actions. Use finish only after inspecting the diff.
+Do not repeat identical reads or finish attempts. After understanding the scope, make a targeted mutation or report a concrete blocker.
 If requirements cannot be met within the environment, report the limitation in note and let review reject it.
 """
     )
-    context = f"REQUIREMENT:\n{requirement}\nPLAN:\n{plan.model_dump_json()}\nFEEDBACK:\n{json.dumps(reviewer_feedback or [])}\nFILE INDEX:\n{workspace.list_files()}"
+    context_prefix = (
+        f"REQUIREMENT:\n{requirement}\nPLAN:\n{plan.model_dump_json()}\n"
+        f"FEEDBACK:\n{json.dumps(reviewer_feedback or [])}\nFILE INDEX:\n"
+    )
+    file_index = workspace.list_files()
+    index_budget = max(0, developer_context_chars - len(context_prefix))
+    context = context_prefix + file_index[:index_budget]
     schema_chars = len(json.dumps(DeveloperAction.model_json_schema()))
     for step in range(settings.max_dev_steps):
         if checkpoint:
             await checkpoint()
         # Keep the newest records that fit the prompt budget; drop oldest records when over budget.
-        budget = settings.max_prompt_chars - len(system) - schema_chars - len(context) - 500
+        budget = developer_context_chars - len(system) - schema_chars - len(context) - 500
         window = []
-        for record in reversed(history[-14:]):
+        for record in reversed(history[-10:]):
             cost = len(record) + 1
             if budget < cost and window:
                 break
@@ -137,10 +149,32 @@ If requirements cannot be met within the environment, report the limitation in n
         compact = action.model_copy(
             update={"content": f"[{len(action.content)} characters]" if action.content else None}
         )
-        record = f"ACTION: {compact.model_dump_json()}\nRESULT:\n{str(result)[:12000]}"
+        record = f"ACTION: {compact.model_dump_json()}\nRESULT:\n{str(result)[:6000]}"
         history.append(record)
         if trace:
             await trace(step + 1, record)
+        successful_mutation = action.action in mutations and not str(result).startswith("ERROR")
+        if successful_mutation:
+            non_mutation_steps = 0
+            last_signature = None
+            repeated_steps = 0
+        else:
+            non_mutation_steps += 1
+            signature = f"{action.action}|{action.path or ''}|{str(result)[:500]}"
+            if signature == last_signature:
+                repeated_steps += 1
+            else:
+                repeated_steps = 1
+            last_signature = signature
+            if repeated_steps >= settings.max_developer_stall_steps:
+                raise RuntimeError(
+                    f"Developer stalled: repeated {action.action} on {action.path or 'the same target'}"
+                )
+            if non_mutation_steps >= settings.max_developer_stall_steps:
+                raise RuntimeError(
+                    f"Developer stalled: no successful file mutation in {non_mutation_steps} steps; "
+                    "inspect the task trace and split the task"
+                )
     raise RuntimeError("Developer exceeded MAX_DEV_STEPS; inspect tool trace and split/clarify task")
 
 
