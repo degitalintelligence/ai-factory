@@ -21,7 +21,7 @@
 - Runtime: Python 3.12, FastAPI, async SQLAlchemy, Pydantic, PostgreSQL for multi-worker operation, SQLite only for local/unit tests.
 - Channels today: Telegram control interface and optional authenticated HTTP API.
 - Execution: control service, disposable worker leases, and a separate credential-free sandbox service.
-- Release: GitHub PR publication and explicit full-commit-SHA Coolify deployment.
+- Release: GitHub PR publication, non-deploy publication acknowledgement, and explicit full-commit-SHA Coolify deployment.
 - Current model convention: Lead, Developer, and Reviewer use the configured alias `bunny-alpha`
   (provider model `stealth/space-bunny-alpha`) unless Dedi explicitly approves a tested
   configuration change. The alias is resolved through environment configuration only; never
@@ -111,7 +111,7 @@ create a DECISION_REQUIRED item for Dedi instead of choosing silently.
 
 V0.2 is a bounded software engine. It supports repository-aware planning,
 bounded implementation, isolated tests, independent review, evidence, PR
-publication, and explicit deployment of an existing registered Coolify target.
+publication, acknowledgement of merged PRs for non-deployable targets, and explicit deployment of an existing registered Coolify target.
 
 It is not yet an unlimited autonomous company, unrestricted shell agent,
 automatic production deployer, or generic workflow engine.
@@ -423,6 +423,7 @@ received
 -> reviewing
 -> publishing
 -> pr_created
+-> completed (for non-deployable projects after /publish)
 -> deployment_pending (optional)
 -> deploying
 -> deployed / deployment_unknown / deployment_failed
@@ -470,6 +471,7 @@ Current Telegram commands:
 | /cancel | cooperative cancellation |
 | /retry | bounded retry with retained lifetime budget |
 | /feedback | revise an existing open PR |
+| /publish | acknowledge a merged PR for a non-deployable project |
 | /deploy | explicit deployment by full merged SHA |
 | /deployment | reconcile a deployment |
 
@@ -775,8 +777,6 @@ requirement with precedence over amendment V1.1; resolved the `bunny-alpha` alia
 provider model `stealth/space-bunny-alpha`; recorded V0.3 capability levels L0 to L3 as
 binding; labelled the V0.3 data model, `/v1` API, and Decision Inbox categories as roadmap;
 opened a memory tenant-isolation decision. No runtime behaviour changed.*
-
-
 
 
 

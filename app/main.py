@@ -136,6 +136,7 @@ def task_view(t):
         "reviewing": "LioBot is independently reviewing evidence.",
         "publishing": "LioBot is reconciling the approved publication.",
         "pr_created": "Review the PR and decide whether to merge/deploy.",
+        "completed": "Publication is acknowledged; no further action is required.",
         "failed": "Inspect the report/logs, then create a new bounded retry if appropriate.",
         "cancelled": "No action is running; create a new intent if the work is still needed.",
     }
@@ -217,6 +218,7 @@ class ActionRequest(BaseModel):
 
 
 @app.post("/tasks/{task_id}/{action}", dependencies=[Depends(authorize)])
+@app.post("/v1/tasks/{task_id}/{action}", dependencies=[Depends(authorize)])
 async def action(task_id: int, action: str, request: ActionRequest):
     try:
         return {"message": await perform_action(task_id, action, request.message)}
