@@ -43,10 +43,7 @@ async def test_self_context_is_compact_and_targeted(monkeypatch):
     monkeypatch.setattr(orchestrator.store, "list", fail_if_previous_tasks_are_loaded)
     task = SimpleNamespace(
         policy_json='{"repo":"owner/repo"}',
-        requirement=(
-            "Implement app/deployment_preflight.py and "
-            "tests/test_deployment_preflight.py"
-        ),
+        requirement=("Implement app/deployment_preflight.py and tests/test_deployment_preflight.py"),
         repo="owner/repo",
         id=1,
         kind="self_improvement",
