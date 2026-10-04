@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import settings
 from app.db import Task, _default_clause, init_db, utcnow
+from app.schemas import SelfImprovementBrief
 from app.store import BudgetExceeded, TaskStopped, plan_hash
 
 
@@ -21,15 +22,59 @@ async def test_idempotency_and_project_routing(db):
         await db.create("Edit another repository", "unregistered")
 
 
+async def test_queued_task_already_reserves_its_repository(db):
+    first = await db.create("First queued feature")
+    with pytest.raises(ValueError, match="One active task per repository"):
+        await db.create("Second feature on the same repository")
+    assert (await db.claim("worker-a")).id == first.id
+    assert await db.claim("worker-b") is None
+
+
 async def test_serializes_same_repo_but_allows_other_repos(db):
     a = await db.create("First feature")
-    b = await db.create("Second feature")
     c = await db.create("Other feature", "other")
     assert (await db.claim("worker-a")).id == a.id
     assert (await db.claim("worker-b")).id == c.id
     assert await db.claim("worker-c") is None
+    # An open PR keeps the repository reserved: a later branch must not race it.
     await db.update(a.id, "worker-a", status="pr_created", lease_owner=None, lease_until=None)
-    assert (await db.claim("worker-c")).id == b.id
+    assert await db.claim("worker-c") is None
+
+
+@pytest.mark.parametrize("status", ["waiting_input", "awaiting_approval", "pr_created"])
+async def test_paused_or_published_task_blocks_a_claim_on_the_same_repository(db, status):
+    first = await db.create("First gated feature")
+    await db.update(first.id, status=status, cancel_requested=False)
+    # A stale queued row from before the reservation rule must still be refused.
+    async with db.sessions() as s, s.begin():
+        s.add(
+            Task(
+                requirement="Queued before the reservation rule",
+                status="received",
+                repo=first.repo,
+                base_branch="main",
+                project="lab",
+                branch="ai-factory/task-legacy",
+            )
+        )
+    assert await db.claim("worker") is None
+
+
+async def test_claim_refuses_a_task_with_no_branch(db):
+    task = await db.create("Half-written intake")
+    await db.update(task.id, branch=None)
+    assert await db.claim("worker") is None
+
+
+async def test_intake_rolls_back_when_the_brief_cannot_be_stored(db):
+    class ExplodingBrief:
+        def model_dump_json(self):
+            raise RuntimeError("brief serialization failed")
+
+    with pytest.raises(RuntimeError, match="brief serialization failed"):
+        await db.create("Improve the parser", kind="self_improvement", brief=ExplodingBrief())
+    assert await db.list() == []
+    assert await db.claim("worker") is None
 
 
 async def test_expired_lease_recovers_and_fences_old_worker(db):
@@ -141,3 +186,62 @@ async def test_idempotent_retry_returns_the_original_task_while_active(db):
     assert again.id == first.id and again.status == "planning"
     with pytest.raises(ValueError, match="different request"):
         await db.create("Different requirement", idempotency_key="telegram:9")
+
+
+async def test_idempotency_key_binds_the_whole_request_not_only_the_requirement(db):
+    brief = SelfImprovementBrief(
+        problem="Parser drops unknown fields",
+        evidence=["test_parser failed 3 times"],
+        hypothesis="Tolerate unknown keys",
+        scope="app/agents.py",
+        baseline="Strict schema",
+        rollback_plan="Revert the schema change",
+    )
+    first = await db.create(
+        "Improve the parser",
+        "lab",
+        chat_id=42,
+        user_id=7,
+        idempotency_key="api:1",
+        kind="self_improvement",
+        brief=brief,
+    )
+    # The same key with the same request stays idempotent, even while the task is active.
+    await db.claim("worker")
+    again = await db.create(
+        "Improve the parser",
+        "lab",
+        chat_id=42,
+        user_id=7,
+        idempotency_key="api:1",
+        kind="self_improvement",
+        brief=brief,
+    )
+    assert again.id == first.id
+    for changed in (
+        {"project": "other"},
+        {"chat_id": 43},
+        {"user_id": 8},
+        {"kind": "engineering", "brief": None},
+    ):
+        with pytest.raises(ValueError, match="different request"):
+            await db.create(
+                "Improve the parser",
+                changed.get("project", "lab"),
+                chat_id=changed.get("chat_id", 42),
+                user_id=changed.get("user_id", 7),
+                idempotency_key="api:1",
+                kind=changed.get("kind", "self_improvement"),
+                brief=changed.get("brief", brief),
+            )
+    other_brief = brief.model_copy(update={"hypothesis": "Reject unknown keys"})
+    with pytest.raises(ValueError, match="different request"):
+        await db.create(
+            "Improve the parser",
+            "lab",
+            chat_id=42,
+            user_id=7,
+            idempotency_key="api:1",
+            kind="self_improvement",
+            brief=other_brief,
+        )
