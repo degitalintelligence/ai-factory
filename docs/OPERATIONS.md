@@ -33,6 +33,13 @@ Sandbox tests are offline; mock external Telegram/payment/database APIs. Tempora
 
 ## Budgets and queue controls
 
+## Model aliases
+
+The v0.3 default uses `bunny-alpha` for Lead, Developer, and Reviewer. The
+operator may map it through `MODEL_ALIASES_JSON`; the repository default maps
+it to `stealth/space-bunny-alpha`. Alias changes are configuration changes
+and require the same review and approval discipline as any model/provider change.
+
 ### Structured model output failures
 
 `/report <id>` and `/logs <id>` include `llm_validation` diagnostics for each rejected completion after this update. These identify the schema/role, attempt, and error category: malformed JSON, schema fields, empty content, missing choices, refusal, or truncated output. Report artifacts also record the configured model and output token limit. Raw responses, unknown field names, and input values are deliberately excluded. Earlier failures cannot be reconstructed from these new diagnostics.
@@ -41,7 +48,7 @@ The engine sends specific validation feedback on retry and documents the Develop
 
 After deploying a fix, retry the failed task once and inspect its new diagnostics if it fails again. For `truncated`, inspect the configured output limit and task size before adjusting them; reasoning models may consume output budget before returning JSON. No automatic token-limit increase or model switch is performed. A passing mocked regression suite does not establish live compatibility with a provider: verify one real task through tests, independent review and PR creation.
 
-Defaults: one worker, four review iterations, 60 developer steps per iteration, 150 model calls, 600k aggregate provider-reported tokens, $5 reported cost and one hour per attempt. Choose model IDs explicitly in Coolify; no hardcoded premium provider or silent fallback can increase spending.
+Defaults: one worker, four review iterations, 36 developer steps per iteration, 8 consecutive stall steps, 150 model calls, 600k aggregate provider-reported tokens, $5 reported cost and one hour per attempt. Developer context is capped separately from the global prompt budget. Budget warnings are emitted at 60%, 80%, and 95%; exhaustion never resets through `/retry`. Choose model IDs or the `bunny-alpha` alias explicitly in Coolify; no silent provider fallback can increase spending.
 
 Each malformed-output retry consumes a call and records returned usage. Network failures can be billed by the provider without returned usage. Reported cost can therefore be partial. Use a provider-level credit limit for a strict dollar ceiling. `/retry` retains call/token/cost totals; reaching the budget requires a deliberately new bounded task or an operator policy change, not an automatic budget reset.
 
