@@ -83,10 +83,19 @@ ai-factory only when the task explicitly targets the registered self-improvement
 For other requirements, build only in the explicitly registered target repository.
 """
 
+# Prompt versions are recorded with every model run. Bump a version whenever the
+# corresponding system or user prompt changes, so a stored run can be traced back to the
+# exact instructions that produced it.
+PROMPT_VERSION_LEAD = "lead-v1"
+PROMPT_VERSION_DEVELOPER = "developer-v1"
+PROMPT_VERSION_REVIEWER = "reviewer-v1"
+
 
 async def lead_plan(requirement: str, context: str = "") -> LeadPlan:
     plan = await json_completion(
         model=settings.model_for("lead"),
+        role="lead",
+        prompt_version=PROMPT_VERSION_LEAD,
         schema=LeadPlan,
         system=BOUNDARY
         + """You are the engineering lead. Inspect the provided repository context and produce an implementable plan.
@@ -171,6 +180,8 @@ If requirements cannot be met within the environment, report the limitation in n
             budget -= cost
         action = await json_completion(
             model=settings.model_for("developer"),
+            role="developer",
+            prompt_version=PROMPT_VERSION_DEVELOPER,
             system=system,
             user=context + "\nTOOL HISTORY:\n" + "\n".join(reversed(window)),
             schema=DeveloperAction,
@@ -245,6 +256,8 @@ async def review_change(
     )
     return await json_completion(
         model=settings.model_for("reviewer"),
+        role="reviewer",
+        prompt_version=PROMPT_VERSION_REVIEWER,
         schema=ReviewResult,
         system=BOUNDARY
         + """You are the independent code reviewer. You did NOT author this code.

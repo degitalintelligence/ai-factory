@@ -5,6 +5,7 @@ from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
 
 from app.contracts import decision_inbox, raise_decision, resolve_decision
 from app.db import Decision, utcnow
@@ -259,3 +260,64 @@ async def test_repeated_identical_answer_does_not_duplicate_the_task_event(db):
 
     messages = [e.message for e in await db.events(task.id) if e.kind == "decision"]
     assert sum(f"Decision #{decision.id} -> rejected" in m for m in messages) == 1
+
+
+async def test_a_repeated_approval_request_returns_the_same_open_card(db):
+    task = await gated_task(db)
+
+    first = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+    again = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+
+    # A retry or a worker recovery must not stack a second card the operator has to answer.
+    assert again.id == first.id
+    assert [d.id for d in await decision_inbox(state="open")] == [first.id]
+
+
+async def test_the_database_refuses_a_second_open_approval_for_one_task(db):
+    """The store check is a convenience; the invariant itself is enforced by the schema."""
+    task = await gated_task(db)
+    await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+
+    with pytest.raises(IntegrityError):
+        async with db.sessions() as s, s.begin():
+            s.add(
+                Decision(
+                    task_id=task.id,
+                    project=task.project,
+                    kind=DecisionMessageType.APPROVAL_REQUIRED,
+                    title="A second card for the same plan",
+                    state="open",
+                )
+            )
+
+
+async def test_a_resolved_card_frees_the_task_for_one_new_approval(db):
+    task = await gated_task(db)
+    first = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+    await resolve_decision(first.id, "reject", user_id=7)
+
+    second = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+
+    assert second.id != first.id
+    assert [d.id for d in await decision_inbox(state="open")] == [second.id]
+
+
+async def test_a_lost_insert_race_returns_the_winners_card(db, monkeypatch):
+    """A concurrent request commits between our check and our insert.
+
+    The partial unique index is the authority; the loser must recover by reading
+    the winner's card instead of surfacing the integrity error to the operator.
+    SQLite shares one connection, so the race is simulated deterministically here;
+    test_postgres.py proves it against real row locks in CI.
+    """
+    task = await gated_task(db)
+    winner = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+
+    async def losing_insert(task_, reason, digest):
+        raise IntegrityError("INSERT INTO decisions", {}, Exception("UNIQUE constraint failed"))
+
+    monkeypatch.setattr(db, "_create_approval_card", losing_insert)
+    loser = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+
+    assert loser.id == winner.id
+    assert [d.id for d in await decision_inbox(state="open")] == [winner.id]

@@ -103,10 +103,18 @@ class Settings(BaseSettings):
             raise ValueError("MODEL_ALIASES_JSON must map non-empty aliases to model IDs")
         return data
 
-    def model_for(self, role: str) -> str:
+    def configured_model(self, role: str) -> str:
+        """The operator-configured model name for a role, before alias resolution.
+
+        Kept separate from model_for() so a call can be audited with both the alias the
+        operator configured and the provider model that actually ran.
+        """
         if role not in {"lead", "developer", "reviewer"}:
             raise ValueError("Unknown model role")
-        configured = getattr(self, f"{role}_model")
+        return getattr(self, f"{role}_model")
+
+    def model_for(self, role: str) -> str:
+        configured = self.configured_model(role)
         return self.model_aliases().get(configured, configured)
 
     def projects(self) -> dict[str, Project]:

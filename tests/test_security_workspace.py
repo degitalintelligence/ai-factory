@@ -33,7 +33,12 @@ def test_symlink_escape_and_git_write_blocked(repo, tmp_path):
     workspace, git = repo
     external = tmp_path / "secret"
     external.write_text("never expose")
-    (workspace.path / "link").symlink_to(external)
+    try:
+        (workspace.path / "link").symlink_to(external)
+    except OSError as exc:
+        # Creating a symlink on Windows needs an elevated privilege or developer mode.
+        # Skipping here keeps the Linux sandbox job as the authority for this check.
+        pytest.skip(f"symlink creation is not permitted on this host: {exc}")
     with pytest.raises(WorkspaceError, match="Symlinks"):
         workspace.read_file("link")
     with pytest.raises(ValueError):

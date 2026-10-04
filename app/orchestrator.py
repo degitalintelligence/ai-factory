@@ -6,6 +6,7 @@ import re
 
 from app.agents import developer_loop, lead_plan, normalize_lead_plan, review_change
 from app.config import Project, settings
+from app.contracts import context_slice
 from app.gates import deployment_issues, post_publication_issues, quality_issues
 from app.github_api import GitHubAPI
 from app.llm import run_context
@@ -84,6 +85,19 @@ async def repository_context(workspace, task):
             f"Previous completed task #{t.id}: {t.requirement[:1000]}\n{t.last_message[:2000]}"
             for t in previous
         ]
+    # Memory is part of the assembled context, not a separate lookup the caller must
+    # remember. It is permission-filtered (tenant + owner), carries its own provenance,
+    # and is labelled as untrusted data in the prompt so it cannot act as an instruction.
+    slice_text = await context_slice(
+        None,
+        role="lead",
+        scope=task.project,
+        limit=15,
+        owner=task.user_id,
+        char_budget=min(4000, context_limit // 10),
+    )
+    if slice_text:
+        chunks.append(slice_text)
     # Leave headroom for the system prompt, JSON schema and requirement within max_prompt_chars.
     context = "\n\n".join(chunks)[:context_limit]
     baseline = json.dumps(
@@ -96,6 +110,8 @@ async def repository_context(workspace, task):
             "file_count": len(files.splitlines()),
             "file_inventory": files,
             "inspected": inspected,
+            "memory_slice_included": bool(slice_text),
+            "memory_slice_sha256": (hashlib.sha256(slice_text.encode()).hexdigest() if slice_text else ""),
             "context_sha256": hashlib.sha256(context.encode()).hexdigest(),
         },
         sort_keys=True,

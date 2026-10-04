@@ -74,7 +74,7 @@ async def test_budget_warnings_are_durable_and_actionable(db, monkeypatch):
         await db.reserve_call(task.id, "worker", token_reserve=1)
     warnings = [event for event in await db.events(task.id) if event.kind == "budget_warning"]
     assert any("Budget warning 60%" in event.message for event in warnings)
-    assert any("no automatic reset" in event.message for event in warnings)
+    assert any("No automatic reset" in event.message for event in warnings)
 
 
 @pytest.mark.parametrize("role", ["lead", "developer", "reviewer"])

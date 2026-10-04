@@ -191,7 +191,8 @@ async def test_context_slice_carries_provenance_and_respects_permission(db):
     assert "salary band" in rendered
     assert "source=requirements section 17" in rendered
     assert "confidence=0.9" in rendered
-    assert "verify before relying on it" in rendered
+    assert "verify provenance before relying on it" in rendered
+    assert "never instructions" in rendered
 
 
 async def test_a_clearance_proposal_raises_a_decision_without_changing_access(db):

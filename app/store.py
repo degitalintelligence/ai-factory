@@ -14,6 +14,7 @@ from app.db import (
     Decision,
     Event,
     MemoryItem,
+    ModelRun,
     SessionLocal,
     Task,
     utcnow,
@@ -33,6 +34,10 @@ from app.security import redact, secret_present
 # The single tenant a deployment owns. Memory is isolated per tenant; this value is the
 # boundary a read must match, never a wildcard.
 DEFAULT_TENANT = "default"
+
+# Utilization of the binding budget envelope that raises a durable, actionable warning
+# before the hard stop. The envelope, not the raw policy ceiling, is what these measure.
+BUDGET_WARNING_THRESHOLDS = (0.60, 0.80, 0.95)
 
 
 class TaskStopped(RuntimeError):
@@ -314,44 +319,124 @@ class Store:
         await self.update(task_id, owner, lease_until=utcnow() + timedelta(seconds=settings.lease_seconds))
 
     @staticmethod
-    def _budget_ratio(task):
-        ratios = (
-            task.llm_calls / settings.max_llm_calls,
-            task.tokens / settings.max_total_tokens,
-            task.cost_usd / settings.max_cost_usd,
+    def _plan_budget(task):
+        """The budget the Lead requested for this task, or {} when there is no plan yet."""
+        try:
+            plan = json.loads(task.plan_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        budget = plan.get("budget") if isinstance(plan, dict) else None
+        return budget if isinstance(budget, dict) else {}
+
+    @classmethod
+    def budget_envelope(cls, task):
+        """The effective ceiling for one task: the tighter of policy and requested budget.
+
+        The planner's budget is a request, not an authority, so it can only lower the
+        operator-configured ceiling — a plan can never raise it. Returning the binding
+        limit explicitly is what makes a budget number explainable after the fact instead
+        of a ratio against an unknown bound.
+        """
+        plan = cls._plan_budget(task)
+        return {
+            "max_llm_calls": int(
+                min(settings.max_llm_calls, plan.get("max_llm_calls") or settings.max_llm_calls)
+            ),
+            "max_total_tokens": int(
+                min(settings.max_total_tokens, plan.get("max_tokens") or settings.max_total_tokens)
+            ),
+            "max_cost_usd": float(
+                min(settings.max_cost_usd, plan.get("max_cost_usd") or settings.max_cost_usd)
+            ),
+        }
+
+    @classmethod
+    def _budget_ratio(cls, task, envelope=None):
+        limits = envelope or cls.budget_envelope(task)
+        return max(
+            task.llm_calls / limits["max_llm_calls"],
+            task.tokens / limits["max_total_tokens"],
+            task.cost_usd / limits["max_cost_usd"],
         )
-        return max(ratios)
+
+    @classmethod
+    def _degradation_plan(cls, task, envelope=None):
+        """What to do next when a budget is running out, before the hard stop.
+
+        v0.3 asks for automatic degradation instead of a bare error, so the closest
+        dimension names its own remedy: shrink the input that drives it.
+        """
+        limits = envelope or cls.budget_envelope(task)
+        if task.tokens / limits["max_total_tokens"] >= 0.80:
+            return (
+                "Degrade now: narrow the inspected file set and the tool-history window, or "
+                "split the requirement into a smaller bounded task."
+            )
+        if task.llm_calls / limits["max_llm_calls"] >= 0.80:
+            return (
+                "Degrade now: reduce parallelism to one worker step at a time, lower "
+                "max_dev_steps, or request an approved budget increase before continuing."
+            )
+        return (
+            "Degrade now: request an approved budget increase, or create a new bounded "
+            "task; usage is never reset by /retry."
+        )
 
     async def _emit_budget_warnings(self, task_id, owner, before, after):
-        for threshold in (0.60, 0.80, 0.95):
-            if before < threshold <= self._budget_ratio(after):
+        envelope = self.budget_envelope(after)
+        for threshold in BUDGET_WARNING_THRESHOLDS:
+            if before < threshold <= self._budget_ratio(after, envelope):
                 percent = int(threshold * 100)
                 message = (
-                    f"Budget warning {percent}%: calls={after.llm_calls}/{settings.max_llm_calls}, "
-                    f"tokens={after.tokens}/{settings.max_total_tokens}, "
-                    f"reported_cost=${after.cost_usd:.4f}/${settings.max_cost_usd:.2f}. "
-                    "Next: reduce context/parallelism or use a new bounded task; no automatic reset."
+                    f"Budget warning {percent}%: calls={after.llm_calls}/{envelope['max_llm_calls']}, "
+                    f"tokens={after.tokens}/{envelope['max_total_tokens']}, "
+                    f"reported_cost=${after.cost_usd:.4f}/${envelope['max_cost_usd']:.2f}. "
+                    f"{self._degradation_plan(after, envelope)} "
+                    "No automatic reset: /retry retains lifetime usage."
                 )
                 await self.event(task_id, "budget_warning", message)
 
+    async def budget_status(self, task_id):
+        """Durable budget envelope, consumption, and the next action for /status and /report."""
+        task = await self.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        envelope = self.budget_envelope(task)
+        return {
+            "envelope": envelope,
+            "requested": self._plan_budget(task),
+            "used": {"llm_calls": task.llm_calls, "tokens": task.tokens, "cost_usd": task.cost_usd},
+            "utilization": self._budget_ratio(task, envelope),
+            "cost_incomplete": task.cost_incomplete,
+            "warning_thresholds": list(BUDGET_WARNING_THRESHOLDS),
+            "exhausted": (
+                task.llm_calls >= envelope["max_llm_calls"]
+                or task.tokens >= envelope["max_total_tokens"]
+                or task.cost_usd >= envelope["max_cost_usd"]
+            ),
+            "degradation": self._degradation_plan(task, envelope),
+        }
+
     async def reserve_call(self, task_id, owner, token_reserve=None):
         task = await self.check(task_id, owner)
+        envelope = self.budget_envelope(task)
         if (
-            task.llm_calls >= settings.max_llm_calls
-            or task.tokens + (token_reserve or settings.max_output_tokens) > settings.max_total_tokens
-            or task.cost_usd >= settings.max_cost_usd
+            task.llm_calls >= envelope["max_llm_calls"]
+            or task.tokens + (token_reserve or settings.max_output_tokens) > envelope["max_total_tokens"]
+            or task.cost_usd >= envelope["max_cost_usd"]
         ):
             raise BudgetExceeded(
                 "Task LLM budget exhausted; use /report and /logs, then create a new bounded task "
                 "or obtain an approved policy change. /retry does not reset lifetime usage."
             )
-        before = self._budget_ratio(task)
+        before = self._budget_ratio(task, envelope)
         await self.update(task_id, owner, llm_calls=task.llm_calls + 1)
         await self._emit_budget_warnings(task_id, owner, before, await self.get(task_id))
 
     async def record_usage(self, task_id, owner, tokens, cost):
         task = await self.check(task_id, owner)
-        before = self._budget_ratio(task)
+        envelope = self.budget_envelope(task)
+        before = self._budget_ratio(task, envelope)
         await self.update(
             task_id,
             owner,
@@ -361,7 +446,66 @@ class Store:
         )
         await self._emit_budget_warnings(task_id, owner, before, await self.get(task_id))
 
+    async def record_model_run(
+        self,
+        task_id,
+        *,
+        role="",
+        model_alias="",
+        model="",
+        prompt_version="",
+        prompt_sha256="",
+        schema_name="",
+        attempt=1,
+        outcome="ok",
+        detail="",
+        tokens=0,
+        cost_usd=None,
+        latency_ms=0,
+    ):
+        """Append one immutable per-call record.
+
+        The task counters are lifetime aggregates that survive retries but cannot be
+        decomposed afterwards, so this is where the per-call evidence lives: which role
+        ran, which alias resolved to which provider model, which prompt version was sent,
+        how long it took, and how it ended. Rows are only ever inserted.
+        """
+        async with self.sessions() as s:
+            s.add(
+                ModelRun(
+                    task_id=task_id,
+                    role=role,
+                    model_alias=model_alias,
+                    model=model,
+                    prompt_version=prompt_version,
+                    prompt_sha256=prompt_sha256,
+                    schema_name=schema_name,
+                    attempt=attempt,
+                    outcome=outcome,
+                    detail=redact(detail)[:2000],
+                    tokens=tokens,
+                    cost_usd=cost_usd,
+                    cost_reported=cost_usd is not None,
+                    latency_ms=latency_ms,
+                )
+            )
+            await s.commit()
+
+    async def model_runs(self, task_id, limit=200):
+        async with self.sessions() as s:
+            return list(
+                await s.scalars(
+                    select(ModelRun).where(ModelRun.task_id == task_id).order_by(ModelRun.id).limit(limit)
+                )
+            )
+
     async def cancel(self, task_id):
+        """Request cooperative cancellation. Repeating it changes nothing.
+
+        The flag is the state, so a second request from another channel must not append a
+        second event: the audit trail would then claim two distinct operator decisions where
+        only one was ever made.
+        """
         async with self.sessions() as s, s.begin():
             task = await s.get(Task, task_id, with_for_update=True)
             if not task:
@@ -372,6 +516,9 @@ class Store:
                 raise ValueError("Superseded task is terminal; create a fresh task")
             if task.status in {"pr_created", "completed"}:
                 raise ValueError("Published task is terminal; cancellation cannot undo publication")
+            if task.cancel_requested:
+                # Already requested: keep the original flag and event, refresh nothing.
+                return
             task.cancel_requested = True
             if task.status not in ACTIVE:
                 task.status = "cancelled"
@@ -495,8 +642,28 @@ class Store:
         Retries and worker recovery must not create duplicate inbox items for the
         same task, so the task row is locked before the open-card check. The plan
         hash is included in the evidence so the approval is bound to the exact plan
-        that will be resumed.
+        that will be resumed. When a concurrent request wins the insert, the
+        partial unique index rejects the loser; the loser then re-reads the
+        winner's card instead of surfacing an integrity error.
         """
+        try:
+            return await self._create_approval_card(task, reason, plan_digest)
+        except IntegrityError:
+            return await self._open_approval_card(task.id)
+
+    async def _open_approval_card(self, task_id):
+        async with self.sessions() as s, s.begin():
+            return await s.scalar(
+                select(Decision)
+                .where(
+                    Decision.task_id == task_id,
+                    Decision.state == DecisionState.OPEN,
+                    Decision.kind == DecisionMessageType.APPROVAL_REQUIRED,
+                )
+                .order_by(Decision.id.desc())
+            )
+
+    async def _create_approval_card(self, task, reason, plan_digest):
         async with self.sessions() as s, s.begin():
             await s.scalar(select(Task.id).where(Task.id == task.id).with_for_update())
             existing = await s.scalar(
