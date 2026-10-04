@@ -15,6 +15,7 @@ async def test_contract_exposes_the_documented_action_set():
         "answer",
         "feedback",
         "deploy",
+        "publish",
         "deployment",
     }
 

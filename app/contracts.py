@@ -14,7 +14,8 @@ from app.store import store
 
 TASK_ACTIONS = ("cancel", "retry", "approve", "answer", "feedback")
 DEPLOY_ACTIONS = ("deploy", "deployment")
-ALL_ACTIONS = (*TASK_ACTIONS, *DEPLOY_ACTIONS)
+PUBLISH_ACTIONS = ("publish",)
+ALL_ACTIONS = (*TASK_ACTIONS, *DEPLOY_ACTIONS, *PUBLISH_ACTIONS)
 
 
 def _reject_unknown(task_id, action):
@@ -34,6 +35,9 @@ async def perform_action(task_id, action, message=""):
             return f"Deployment {record.status}: {record.deployment_uuid}\n{record.message}"
         record = await service.status(task_id)
         return f"Deployment: {record.status}\nCommit: {record.commit_sha}\n{record.message}"
+    if action in PUBLISH_ACTIONS:
+        record = await DeploymentService().publish(task_id, message)
+        return f"Publication {record.status}\nCommit: {record.commit_sha}\n{record.message}"
     if action not in TASK_ACTIONS:
         _reject_unknown(task_id, action)
     if action == "cancel":

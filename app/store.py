@@ -298,8 +298,8 @@ class Store:
             task = await s.get(Task, task_id, with_for_update=True)
             if not task:
                 raise ValueError("Task not found")
-            if task.status == "pr_created":
-                raise ValueError("PR already published; cancellation cannot undo publication")
+            if task.status in {"pr_created", "completed"}:
+                raise ValueError("Published task is terminal; cancellation cannot undo publication")
             task.cancel_requested = True
             if task.status not in ACTIVE:
                 task.status = "cancelled"

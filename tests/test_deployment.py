@@ -6,7 +6,11 @@ from app.deployment import DeploymentService
 
 @pytest.fixture
 async def deployment_task(db, monkeypatch):
-    monkeypatch.setattr(settings, "projects_json", '{"lab":{"repo":"owner/repo","coolify_uuid":"app123"}}')
+    monkeypatch.setattr(
+        settings,
+        "projects_json",
+        '{"lab":{"repo":"owner/repo","require_deployment":true,"coolify_uuid":"app123"}}',
+    )
     task = await db.create("Prepare deployable app")
     await db.update(
         task.id, status="pr_created", pr_url="https://github.com/owner/repo/pull/1", head_sha="a" * 40
@@ -97,3 +101,50 @@ async def test_ambiguous_deployment_is_not_retried_automatically(db, deployment_
     with pytest.raises(ValueError, match="already requested"):
         await service.deploy(deployment_task.id, "b" * 40)
     assert service.calls.count(("POST", "deploy")) == 1
+
+
+@pytest.fixture
+async def publication_task(db, monkeypatch):
+    monkeypatch.setattr(settings, "projects_json", '{"lab":{"repo":"owner/repo"}}')
+    task = await db.create("Acknowledge the test harness publication")
+    await db.update(
+        task.id, status="pr_created", pr_url="https://github.com/owner/repo/pull/1", head_sha="a" * 40
+    )
+    return await db.get(task.id)
+
+
+async def test_publish_completes_non_deploy_project_without_calling_coolify(db, publication_task):
+    service = FakeService(db.sessions)
+    record = await service.publish(publication_task.id, "b" * 40)
+
+    assert record.status == "published"
+    assert record.deployment_uuid is None
+    assert service.calls == []
+    assert (await db.get(publication_task.id)).status == "completed"
+    events = await db.events(publication_task.id)
+    assert any(event.kind == "publication" for event in events)
+
+    # The command is idempotent after the durable terminal transition.
+    repeated = await service.publish(publication_task.id, "b" * 40)
+    assert repeated.commit_sha == record.commit_sha
+    assert repeated.status == "published"
+
+
+async def test_deploy_alias_publishes_non_deploy_project_without_coolify(db, publication_task):
+    service = FakeService(db.sessions)
+    record = await service.deploy(publication_task.id, "b" * 40)
+    assert record.status == "published"
+    assert service.calls == []
+
+
+async def test_publish_rejects_project_that_requires_deployment(db, deployment_task):
+    service = FakeService(db.sessions)
+    with pytest.raises(ValueError, match="requires deployment"):
+        await service.publish(deployment_task.id, "b" * 40)
+
+
+async def test_completed_publication_is_terminal(db, publication_task):
+    service = FakeService(db.sessions)
+    await service.publish(publication_task.id, "b" * 40)
+    with pytest.raises(ValueError, match="terminal"):
+        await db.cancel(publication_task.id)

@@ -1,4 +1,4 @@
-"""Explicit, commit-bound deployment of an existing registered Coolify application."""
+"""Explicit, commit-bound publication and deployment of reviewed PRs."""
 
 import re
 
@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.db import Deployment, SessionLocal
+from app.db import Deployment, Event, SessionLocal, Task
 from app.github_api import GitHubAPI
 from app.store import store
 
@@ -37,16 +37,19 @@ class DeploymentService:
         async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
             return await send(client)
 
-    async def deploy(self, task_id, approved_sha):
+    async def _validated_release(self, task_id, approved_sha):
         task = await store.get(task_id)
         if not task or task.status != "pr_created" or not task.pr_url or not task.head_sha:
-            raise ValueError("Deployment requires a reviewed, published V0.2 task")
+            raise ValueError("Release requires a reviewed, published PR task")
         if not re.fullmatch(r"[a-f0-9]{40}", approved_sha):
             raise ValueError("Provide the full 40-character merged commit SHA")
         policy = settings.projects().get(task.project)
-        if not policy or policy.repo != task.repo or not policy.coolify_uuid:
-            raise ValueError("No registered Coolify application for this project")
-        number = int(task.pr_url.rstrip("/").split("/")[-1])
+        if not policy or policy.repo != task.repo:
+            raise ValueError("Project policy does not match the task repository")
+        try:
+            number = int(task.pr_url.rstrip("/").split("/")[-1])
+        except (AttributeError, ValueError):
+            raise ValueError("Task PR URL is invalid") from None
         pr = await self.github.pull(task.repo, number)
         if (
             not pr.get("merged")
@@ -55,7 +58,7 @@ class DeploymentService:
         ):
             raise ValueError("PR must be merged and both reviewed head and approved merge SHA must match")
         if await self.github.branch_sha(task.repo, task.base_branch) != approved_sha:
-            raise ValueError("Approved commit is no longer the current base; re-review before deployment")
+            raise ValueError("Approved commit is no longer the current base; re-review before release")
         reviewed = await self.github.request("GET", f"{task.repo}/git/commits/{task.head_sha}")
         merged = await self.github.request("GET", f"{task.repo}/git/commits/{approved_sha}")
         if reviewed["tree"]["sha"] != merged["tree"]["sha"]:
@@ -73,6 +76,74 @@ class DeploymentService:
             )
         ):
             raise ValueError("GitHub checks are incomplete or failing")
+        return task, policy
+
+    async def _existing_record(self, task_id):
+        async with self.sessions() as s:
+            return await s.scalar(select(Deployment).where(Deployment.task_id == task_id))
+
+    async def _record_publication(self, task, approved_sha):
+        """Acknowledge a merged PR for a project with no deployment target."""
+        message = "Merged PR acknowledged; project has no Coolify deployment target."
+        try:
+            async with self.sessions() as s, s.begin():
+                row = await s.get(Task, task.id, with_for_update=True)
+                if not row:
+                    raise ValueError("Task not found")
+                existing = await s.scalar(select(Deployment).where(Deployment.task_id == task.id))
+                if existing:
+                    if existing.commit_sha != approved_sha or existing.status != "published":
+                        raise ValueError(
+                            "A different publication is already recorded; use /deployment to reconcile"
+                        )
+                    return existing
+                record = Deployment(
+                    task_id=task.id,
+                    commit_sha=approved_sha,
+                    status="published",
+                    message=message,
+                )
+                row.status = "completed"
+                row.last_message = f"{message} Commit: {approved_sha}"
+                row.cancel_requested = False
+                row.lease_owner = None
+                row.lease_until = None
+                s.add(record)
+                s.add(
+                    Event(
+                        task_id=task.id,
+                        kind="publication",
+                        message=f"Publication acknowledged for merged commit {approved_sha}; no Coolify target.",
+                    )
+                )
+                await s.flush()
+                return record
+        except IntegrityError:
+            existing = await self._existing_record(task.id)
+            if existing and existing.commit_sha == approved_sha and existing.status == "published":
+                return existing
+            raise ValueError("Publication already recorded; use /deployment to reconcile") from None
+
+    async def publish(self, task_id, approved_sha):
+        """Finalize a merged PR without invoking Coolify for a non-deploy project."""
+        task = await store.get(task_id)
+        if task and task.status == "completed":
+            existing = await self._existing_record(task_id)
+            if existing and existing.commit_sha == approved_sha and existing.status == "published":
+                return existing
+        task, policy = await self._validated_release(task_id, approved_sha)
+        if policy.require_deployment:
+            raise ValueError("Project policy requires deployment; use /deploy instead")
+        return await self._record_publication(task, approved_sha)
+
+    async def deploy(self, task_id, approved_sha):
+        task, policy = await self._validated_release(task_id, approved_sha)
+        # Backward-compatible alias: /deploy can acknowledge a merged PR when the
+        # project policy explicitly says it has no deployment target.
+        if not policy.require_deployment:
+            return await self._record_publication(task, approved_sha)
+        if not policy.coolify_uuid:
+            raise ValueError("No registered Coolify application for this project")
         app = await self.coolify("GET", f"applications/{policy.coolify_uuid}")
         repo = app.get("git_repository", "").removesuffix(".git").removeprefix("https://github.com/")
         if repo != task.repo or app.get("git_branch") != task.base_branch:
@@ -121,7 +192,7 @@ class DeploymentService:
         async with self.sessions() as s:
             record = await s.scalar(select(Deployment).where(Deployment.task_id == task_id))
             if not record:
-                raise ValueError("No deployment requested")
+                raise ValueError("No deployment or publication recorded")
             if record.deployment_uuid:
                 result = await self.coolify("GET", f"deployments/{record.deployment_uuid}")
                 if not result.get("commit") and result.get("status") == "finished":

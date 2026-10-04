@@ -1,6 +1,6 @@
 # AI Factory V0.2
 
-An operating engine for building software from Telegram requirements: **repository-aware planning → implementation → isolated tests → independent review → repair → GitHub PR → explicit, commit-bound Coolify deployment**.
+An operating engine for building software from Telegram requirements: **repository-aware planning → implementation → isolated tests → independent review → repair → GitHub PR → explicit publication or commit-bound Coolify deployment**.
 
 LioBot = AI Factory. This repository is the LioBot core product and its bounded
 engineering engine. `telegram-lab` is a test/acceptance harness only; it is not a
@@ -69,11 +69,15 @@ Configure `PROJECTS_JSON` in Coolify (empty retains the default lab):
     "repo": "degitalintelligence/telegram-lab",
     "base_branch": "main",
     "profile": "python",
-    "require_deployment": true,
+    "require_deployment": false,
     "install_dependencies": true
   }
 }
 ```
+
+The lab project is an acceptance harness and therefore acknowledges merged PRs
+without deploying them. Set require_deployment: true and register coolify_uuid
+only for a project that has a real Coolify application.
 
 Dependency installation requires both project `install_dependencies: true` and server `SANDBOX_INSTALL_DEPS=true`. Python installs wheels only; Node uses a committed lockfile and `npm ci --ignore-scripts`. Tests themselves have no network. Projects requiring native build/install scripts need a prebuilt, operator-maintained sandbox image.
 
@@ -93,6 +97,7 @@ To add another product, create its repository with an initial commit, grant the 
 | `/cancel <id>` | Request cancellation; cannot undo an already published PR |
 | `/retry <id>` | Retry failed/cancelled work; lifetime LLM usage is retained |
 | `/feedback <id> <revision>` | Replan, test and review changes on the same open PR |
+| `/publish <id> <40-character-merged-SHA>` | Acknowledge a merged PR for a project without a deployment target |
 | `/deploy <id> <40-character-merged-SHA>` | Explicitly deploy a registered, reviewed release |
 | `/deployment <id>` | Reconcile Coolify status; success of business behavior still needs smoke testing |
 

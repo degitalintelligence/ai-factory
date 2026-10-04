@@ -16,8 +16,10 @@ flowchart TD
   Tests --> Review[Independent review and deterministic gates]
   Review -->|Fix needed| Dev
   Review -->|Pass| Publish[Commit and idempotent PR publication]
-  Publish --> Human[Human merge and deployment command]
-  Human --> Deploy[Verify commit and trigger Coolify]
+  Publish --> Human[Human merge and release command]
+  Human --> Release{Deploy required?}
+  Release -->|No| Complete[Record merged publication]
+  Release -->|Yes| Deploy[Verify commit and trigger Coolify]
 ```
 
 ## Queue and recovery
@@ -47,7 +49,7 @@ The control workspace is hashed before/after sandbox testing and again immediate
 
 ## Deployment boundary
 
-Generation and live release are distinct durable operations. A deployment request requires a human-provided full merged SHA, a PR whose head still equals the reviewed commit, identical reviewed/merged trees, current target branch SHA, successful existing GitHub checks and an explicitly registered Coolify app/repository/branch with auto-deploy disabled. The engine pins `git_commit_sha` and verifies it before submitting one deployment.
+Generation and release are distinct durable operations. A release request requires a human-provided full merged SHA, a PR whose head still equals the reviewed commit, identical reviewed/merged trees, current target branch SHA and successful existing GitHub checks. A project with require_deployment: false records the merged publication and completes the task without calling Coolify; a deployment-required project additionally needs an explicitly registered Coolify app/repository/branch with auto-deploy disabled. The engine pins git_commit_sha and verifies it before submitting one deployment.
 
 A lost deployment response becomes `unknown` and is not blindly retried. This prevents duplicate releases but requires operator reconciliation. A Coolify `finished` status is reported as such; it does not claim application acceptance or justify automated rollback of stateful data.
 

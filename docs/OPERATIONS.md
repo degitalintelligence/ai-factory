@@ -66,6 +66,8 @@ Create the target application in Coolify once and configure secrets/domains/pers
 
 After reviewing and merging a generated PR, send `/deploy <task-id> <full-merged-commit-sha>`. The engine checks identity/CI/tree integrity and pins the application to that commit. Subsequent deployments require new explicit approved task releases because the pin remains set. `/deployment <id>` fetches the remote status and verifies the reported commit when supplied.
 
+For a test-only or otherwise non-deployable project, send `/publish <task-id> <full-merged-commit-sha>` instead. The engine performs the same PR, branch, tree and check validation, records the merged commit in the release ledger, transitions the task to `completed`, and does not call Coolify. `/deploy` remains a backward-compatible alias for this acknowledgement when the project policy has `require_deployment: false`.
+
 If status is `unknown`, inspect Coolify's deployment history before doing anything else; the record intentionally blocks automatic duplicate submission. If a deployment failed, diagnose logs and prepare a corrected new task. Do not treat an HTTP response or queued UUID as successful deployment.
 
 ## Backup, retention and rollback
