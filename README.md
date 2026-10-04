@@ -29,7 +29,8 @@ still only an adapter and `telegram-lab` remains the acceptance harness.
 - Separate OpenRouter models for Lead, Developer and Reviewer. Structured responses, bounded retries, token/call/time budgets and provider-reported cost tracking.
 - Developer tools: inspect, search, replace/write/delete files, review a complete diff, run sandbox checks.
 - Deterministic gates: failing/absent tests, generated databases, credentials, symlink escapes, changed source after review, incomplete acceptance mapping and oversized diff cannot be approved by a model.
-- High-risk plan approval bound to its hash; clarification, cancellation, retry and feedback to an existing open PR.
+- Post-publication verification is fail-closed: a PR that does not match the reviewed evidence leaves the task in `failed` with the exact issues, not `pr_created`. A retry re-checks the same PR.
+- High-risk plan approval bound to its hash; clarification, cancellation, retry and feedback to an existing open PR. Only an approval decision can resume a gated task; rejecting, asking, or deferring settles it and releases its repository.
 - Full target deployment pack when requested: Dockerfile, Compose, environment example, persistent volumes, healthchecks, deployment/backup/rollback runbook.
 - Optional deployment of an **existing registered Coolify application** after an explicit command, merged PR, matching reviewed tree, matching full commit SHA and successful existing GitHub checks.
 - Private Telegram allowlist, task ownership, optional bearer-protected HTTP API, health/readiness endpoints.

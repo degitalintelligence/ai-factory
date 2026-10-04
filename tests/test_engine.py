@@ -18,7 +18,9 @@ def engine_fakes(repo, monkeypatch):
         "develop": 0,
         "pushes": 0,
         "prs": 0,
+        "pr_calls": 0,
         "fail_publish": False,
+        "mangle_body": 0,
         "test_exit": 0,
         "risk": "low",
         "questions": [],
@@ -37,7 +39,13 @@ def engine_fakes(repo, monkeypatch):
                 state["fail_publish"] = False
                 raise RuntimeError("Lost GitHub connection after push")
             state["prs"] = 1
-            state["pr_body"] = kwargs["body"]
+            state["pr_calls"] += 1
+            body = kwargs["body"]
+            if state["mangle_body"]:
+                state["mangle_body"] -= 1
+                # Simulate GitHub publishing a body that lost a required evidence section.
+                body = body.replace("## Test evidence", "## Tests")
+            state["pr_body"] = body
             return "https://github.com/owner/repo/pull/1"
 
         async def pull(self, repo, number):
@@ -208,6 +216,39 @@ async def test_plan_waits_before_execution_when_needed(db, engine_fakes, reason,
         assert len(cards) == 1 and cards[0].task_id == task.id
         await resolve_decision(cards[0].id, "approve", user_id=7)
         assert (await db.get(task.id)).status == "received"
+
+
+async def test_post_publication_failure_is_not_reported_as_a_pass(db, engine_fakes):
+    state, refs = engine_fakes
+    state["mangle_body"] = 1
+    task = await execute(db, (await db.create("Publish with incomplete PR evidence")).id)
+
+    assert task.status == "failed"
+    assert "Post-publication verification failed" in task.last_message
+    assert "## Test evidence" in task.last_message
+    assert "Passed gates" not in task.last_message
+    # The PR exists and must stay reconcilable, but the task never claimed success.
+    assert task.pr_url == "https://github.com/owner/repo/pull/1"
+    artifact = json.loads(
+        next(a.content for a in await db.artifacts(task.id) if a.kind == "post_publication")
+    )
+    assert artifact["pr_url"] == task.pr_url
+    assert artifact["issues"]
+
+
+async def test_post_publication_failure_reconciles_the_same_pr_on_retry(db, engine_fakes):
+    state, refs = engine_fakes
+    state["mangle_body"] = 1
+    task = await execute(db, (await db.create("Publish then correct the PR")).id)
+    assert task.status == "failed" and task.head_sha
+
+    await db.resume(task.id, "retry")
+    task = await execute(db, task.id, "second")
+
+    assert task.status == "pr_created"
+    assert task.pr_url == "https://github.com/owner/repo/pull/1"
+    assert state["pr_calls"] == 2  # create_pr reconciles the existing PR instead of duplicating it
+    assert state["pushes"] == state["develop"] == 1
 
 
 async def test_base_drift_prevents_publication(db, engine_fakes):

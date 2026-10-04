@@ -37,7 +37,58 @@ that carries this document.
 
 ---
 
+## 0. Remediation status — 2026-10-04
+
+Python 3.12.10 was installed, `.venv` created from `requirements-dev.txt`, and the suite was
+executed. **All five blockers and H1 are fixed, committed, and covered by regression tests.**
+The findings below are retained unchanged as the original record; this section is the
+current state.
+
+| ID | Status | Commit | Regression coverage |
+|---|---|---|---|
+| B1 | FIXED | `3aeeb66` | `test_intake_rolls_back_when_the_brief_cannot_be_stored`; claim guard rejects `branch IS NULL` |
+| B2 | FIXED | `3aeeb66` | `test_queued_task_already_reserves_its_repository` plus same-repo / other-repo / blocking-state matrix |
+| B3 | FIXED | `7de1edb` | `test_a_non_approval_outcome_releases_the_gated_task_and_its_repository` (reject/ask/defer) |
+| B4 | FIXED | `7de1edb` | `test_a_generic_decision_never_resumes_an_approval_task` |
+| B5 | FIXED | `bdc2ea3` | `test_post_publication_failure_is_not_reported_as_a_pass`, `test_post_publication_failure_reconciles_the_same_pr_on_retry` |
+| H1 | FIXED | `7de1edb` | `test_decision_and_task_transition_roll_back_together`, `test_repeated_identical_answer_does_not_duplicate_audit_events` |
+| H2 | PARTIAL — see below | `3aeeb66` | `test_idempotency_key_binds_the_full_request` |
+| H3–H9, M1–M7 | OPEN | — | Not started |
+
+Verification at the tip of this branch:
+
+```text
+ruff check app sandbox tests scripts      -> All checks passed
+ruff format --check app sandbox tests scripts -> 40 files already formatted
+python -m pytest -q                       -> 211 passed, 1 failed, 1 skipped
+```
+
+The single failure is `tests/test_security_workspace.py::test_symlink_escape_and_git_write_blocked`,
+which cannot create a symlink on Windows without Developer Mode or
+`SeCreateSymbolicLinkPrivilege` (`OSError: [WinError 1314]`). It is a pre-existing
+environment limitation, not a code regression, and it was deliberately not skipped or
+weakened. The 1 skip is the PostgreSQL integration test, which requires `TEST_POSTGRES_URL`.
+
+**H2 is intentionally partial.** The idempotency comparison now binds `requirement`,
+`project`, `chat_id`, `user_id`, `kind`, and the serialized self-improvement brief. It
+deliberately does **not** compare `policy_json`: the policy snapshot is server-side state
+that may legitimately change between two identical retries, and a stale task is stopped by
+the existing policy-revocation check rather than by refusing the retry. This is a deliberate
+narrowing of finding H2 and is recorded here rather than silently dropped.
+
+**Not verified locally.** Docker is unavailable on the review machine, so the real sandbox
+smoke test, AppArmor profile checks, namespace probes, Compose validation, and both image
+builds were not executed. The PostgreSQL concurrency proof — including the advisory-lock
+serialization that B2 depends on — also only runs in CI. Per `AGENTS.md` §18, these remain
+required CI gates before this work is treated as production-verified.
+
+---
+
 ## 1. Verification status — read this first
+
+> **Superseded by section 0.** This section records the state of the original review pass,
+> when no Python interpreter was available. Ruff and pytest have since been run; see
+> section 0 for current results. The reasoning below is kept as the original record.
 
 The following required checks from `AGENTS.md` §17–18 were **not executed**:
 
@@ -517,6 +568,10 @@ than a silent rename.
 
 ## 8. Recommended remediation order
 
+> **Status 2026-10-04:** steps 1–4 are complete and committed (`3aeeb66`, `7de1edb`,
+> `bdc2ea3`). Step 5 is complete except for the deliberate `policy_json` exclusion recorded
+> in section 0. The remaining steps below are still open.
+
 Each step is independently reviewable and reversible. Steps 1–5 are the blockers.
 
 1. **Make `create()` single-transaction.** Use `flush()` for the id, one `commit()`. Add
@@ -575,6 +630,10 @@ These cannot be resolved from the code and require an explicit decision per `AGE
 ---
 
 ## 10. Reviewer's closing note
+
+> **Updated 2026-10-04.** The single most important next action named below — running the
+> verification suite — has been done. All five blockers and H1 are fixed and committed; see
+> section 0. The original note is preserved after this line.
 
 No merge, deployment, or credential change is requested or implied by this document. No
 production state was inspected. The single most important next action is not any individual
