@@ -99,6 +99,7 @@ To add another product, create its repository with an initial commit, grant the 
 | `/retry <id>` | Retry failed/cancelled work; lifetime LLM usage is retained |
 | `/feedback <id> <revision>` | Replan, test and review changes on the same open PR |
 | `/publish <id> <40-character-merged-SHA>` | Acknowledge a merged PR for a project without a deployment target |
+| `/supersede <id> <reason>` | Close a stale merged PR checkpoint so a fresh review can run |
 | `/deploy <id> <40-character-merged-SHA>` | Explicitly deploy a registered, reviewed release |
 | `/deployment <id>` | Reconcile Coolify status; success of business behavior still needs smoke testing |
 

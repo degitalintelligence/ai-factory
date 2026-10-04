@@ -68,6 +68,8 @@ After reviewing and merging a generated PR, send `/deploy <task-id> <full-merged
 
 For a test-only or otherwise non-deployable project, send `/publish <task-id> <full-merged-commit-sha>` instead. The engine performs the same PR, branch, tree and check validation, records the merged commit in the release ledger, transitions the task to `completed`, and does not call Coolify. `/deploy` remains a backward-compatible alias for this acknowledgement when the project policy has `require_deployment: false`.
 
+If the PR was merged but the base branch advanced before release, do not reuse the stale SHA. Send `/supersede <task-id> <reason>`. The engine verifies that the reviewed PR was merged unchanged, that the current base still contains that merge, records an auditable `superseded` terminal state without publishing or deploying, and releases the repository reservation for a fresh bounded review.
+
 If status is `unknown`, inspect Coolify's deployment history before doing anything else; the record intentionally blocks automatic duplicate submission. If a deployment failed, diagnose logs and prepare a corrected new task. Do not treat an HTTP response or queued UUID as successful deployment.
 
 ## Backup, retention and rollback

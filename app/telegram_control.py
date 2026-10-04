@@ -62,7 +62,7 @@ async def owned_task(update, context):
 async def start_handler(update, context):
     await reply(
         update,
-        "LioBot by AI Factory — operator interface\n\n/new <requirement>\n/new <project> | <requirement>\n/projects — registered repositories\n/tasks — queue\n/status <id>\n/plan <id>\n/logs <id>\n/report <id>\n/cancel <id>\n/retry <id>\n/answer <id> <clarification>\n/approve <id> <plan-hash>\n/feedback <id> <revision>\n/deploy <id> <full-merged-sha>\n/publish <id> <full-merged-sha> — acknowledge a merged non-deploy project\n/deployment <id>\n/inbox [state] [project] — decision inbox\n/decide <id> <approve|reject|ask|defer>\n/improve problem:...; evidence:...; hypothesis:...; scope:...; baseline:...; rollback:...\n\nCode → isolated tests → independent review → PR. Merges are human-controlled.\nThis Telegram bot is a channel adapter; decisions are stored in the core inbox, not in chat.",
+        "LioBot by AI Factory — operator interface\n\n/new <requirement>\n/new <project> | <requirement>\n/projects — registered repositories\n/tasks — queue\n/status <id>\n/plan <id>\n/logs <id>\n/report <id>\n/cancel <id>\n/retry <id>\n/answer <id> <clarification>\n/approve <id> <plan-hash>\n/feedback <id> <revision>\n/deploy <id> <full-merged-sha>\n/publish <id> <full-merged-sha> — acknowledge a merged non-deploy project\n/supersede <id> <reason> — close a stale merged PR before fresh review\n/deployment <id>\n/inbox [state] [project] — decision inbox\n/decide <id> <approve|reject|ask|defer>\n/improve problem:...; evidence:...; hypothesis:...; scope:...; baseline:...; rollback:...\n\nCode → isolated tests → independent review → PR. Merges are human-controlled.\nThis Telegram bot is a channel adapter; decisions are stored in the core inbox, not in chat.",
     )
 
 
@@ -266,6 +266,16 @@ def build_telegram_app():
         "improve": improve_handler,
     }.items():
         app.add_handler(CommandHandler(command, handler))
-    for command in ("cancel", "retry", "answer", "approve", "feedback", "deploy", "publish", "deployment"):
+    for command in (
+        "cancel",
+        "retry",
+        "answer",
+        "approve",
+        "feedback",
+        "deploy",
+        "publish",
+        "supersede",
+        "deployment",
+    ):
         app.add_handler(CommandHandler(command, action_handler))
     return app

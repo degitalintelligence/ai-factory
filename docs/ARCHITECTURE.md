@@ -28,7 +28,7 @@ flowchart TD
 
 Claims take a short PostgreSQL advisory transaction lock, then use row locking and a compare-and-set update. A second task for the same repository waits while the first has an active lease. Every update by a worker is fenced by its lease owner and expiry. Workers heartbeat during model calls and long tests. An expired task is requeued up to `MAX_RECOVERIES`; cancelled tasks remain cancelled. A shutdown/restart resumes at a durable stage boundary and can repeat development work in the preserved checkout, not at an exact model-token or tool-step boundary.
 
-No force-push, reset, or deletion of an existing workspace occurs. New task branches are deterministic. A reviewed source digest and local commit SHA are saved **before** push. If the response is lost after a push or PR creation, a retry reconciles the branch/PR rather than recoding or opening duplicate PRs. A moved base, changed source, or closed/merged feedback PR stops publication.
+No force-push, reset, or deletion of an existing workspace occurs. New task branches are deterministic. A reviewed source digest and local commit SHA are saved **before** push. If the response is lost after a push or PR creation, a retry reconciles the branch/PR rather than recoding or opening duplicate PRs. A moved base, changed source, or closed/merged feedback PR stops publication. A merged PR whose base later advanced can be explicitly superseded after ancestry and tree checks; superseding records no publication or deployment and releases the repository reservation for a fresh review.
 
 ## Trust boundaries
 
