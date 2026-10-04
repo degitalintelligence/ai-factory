@@ -58,7 +58,9 @@ Keep a single Telegram polling replica. If scaling the worker code into addition
 
 ## HTTP operator interface
 
-Set a separate `API_TOKEN` and, when using HTTP approvals, set `API_OPERATOR_USER_ID` to the numeric operator identity recorded in the audit trail. Empty token means endpoints fail closed. The decision answer body accepts only `answer`; callers cannot spoof `user_id`. Use `Authorization: Bearer ...` for `/tasks`, `/tasks/{id}`, `/tasks/{id}/events` and `/tasks/{id}/artifacts`. POST `/tasks` with `requirement`, `project` and optional `idempotency_key`. Reuse a key only for the same request. POST `/tasks/{id}/{cancel|retry|answer|approve|feedback}` with a JSON `message`. The token grants operator-wide access: do not distribute it to customers.
+Set a separate `API_TOKEN` and, when it is set, `API_OPERATOR_USER_ID` is **required**: startup fails closed without it, and every request is rejected with 401 rather than acting as nobody. That numeric identity is what the audit trail records for an approval, deployment, or memory read, and it comes from the server-side credential — the request body cannot name a different actor. Empty token means endpoints fail closed. The decision answer body accepts only `answer`; callers cannot spoof `user_id`. Use `Authorization: Bearer ...` for `/tasks`, `/tasks/{id}`, `/tasks/{id}/events`, `/tasks/{id}/artifacts` and `/v1/memory/search`. POST `/tasks` with `requirement`, `project` and optional `idempotency_key`. Reuse a key only for the same request. POST `/tasks/{id}/{cancel|retry|answer|approve|feedback}` with a JSON `message`. The token grants operator-wide access: do not distribute it to customers.
+
+`ROLE_CLEARANCE_JSON` maps each agent role to one of `public`, `internal`, `confidential`, `restricted` and is validated at startup, so a typo fails closed instead of silently widening or narrowing memory access. It never overrides ownership: a memory owned by a person is readable only by that person, and a read with no principal returns only shared unowned memory.
 
 ## Optional Coolify release integration
 

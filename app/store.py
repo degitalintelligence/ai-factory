@@ -28,7 +28,11 @@ from app.schemas import (
     MemoryView,
     MemoryWrite,
 )
-from app.security import redact
+from app.security import redact, secret_present
+
+# The single tenant a deployment owns. Memory is isolated per tenant; this value is the
+# boundary a read must match, never a wildcard.
+DEFAULT_TENANT = "default"
 
 
 class TaskStopped(RuntimeError):
@@ -656,15 +660,16 @@ class Store:
 
     # --- Context and Memory Plane ---
 
-    async def remember(self, item: MemoryWrite, owner=None, task_id=None):
+    async def remember(self, item: MemoryWrite, owner=None, task_id=None, tenant=DEFAULT_TENANT):
         """Store one memory, superseding any earlier active version of the same key.
 
         A correction never overwrites history: the old row is kept and marked superseded,
-        so what was previously believed stays auditable.
+        so what was previously believed stays auditable. The unique active key is scoped to
+        (tenant, key, scope), so one tenant never supersedes another tenant's memory.
         """
         if item.locked and owner is None:
             raise ValueError("Locked memories require an owner")
-        if redact(item.value) != item.value:
+        if secret_present(item.value) or secret_present(item.source) or secret_present(item.evidence_ref):
             raise ValueError("Remove credentials before storing this as memory")
         async with self.sessions() as s:
             previous = list(
@@ -672,6 +677,7 @@ class Store:
                     select(MemoryItem)
                     .where(
                         MemoryItem.key == item.key,
+                        MemoryItem.tenant == tenant,
                         MemoryItem.scope == item.scope,
                         MemoryItem.state == MemoryState.ACTIVE,
                     )
@@ -696,6 +702,7 @@ class Store:
             row = MemoryItem(
                 key=item.key,
                 value=item.value,
+                tenant=tenant,
                 scope=item.scope,
                 sensitivity=item.sensitivity,
                 source=item.source,
@@ -724,19 +731,32 @@ class Store:
             await s.refresh(row)
             return row
 
-    async def recall(self, keys=None, role=None, scope=None, limit=25):
+    async def recall(self, keys=None, role=None, scope=None, limit=25, owner=None, tenant=DEFAULT_TENANT):
         """Return a permission-aware slice. Never returns a whole-table dump.
 
         `role` is an agent role resolved through the audited clearance config. An
         unknown role gets nothing, so a typo cannot widen access.
+
+        `tenant` is the hard isolation boundary and is always applied. `owner` narrows
+        further: a memory owned by a person is visible only to that owner, while an
+        unowned memory is shared inside the tenant. A read for one owner can never
+        return another owner's memory, whatever the role clearance allows.
         """
         clearance = CLEARANCE.get(settings.role_clearance().get(role, "none"), -1)
         async with self.sessions() as s:
-            query = select(MemoryItem).where(MemoryItem.state == MemoryState.ACTIVE)
+            query = select(MemoryItem).where(
+                MemoryItem.state == MemoryState.ACTIVE,
+                MemoryItem.tenant == tenant,
+            )
             if keys:
                 query = query.where(MemoryItem.key.in_(keys))
             if scope is not None:
                 query = query.where(or_(MemoryItem.scope == scope, MemoryItem.scope == ""))
+            if owner is not None:
+                query = query.where(or_(MemoryItem.owner == owner, MemoryItem.owner.is_(None)))
+            else:
+                # Without a principal, only unowned shared memory is readable.
+                query = query.where(MemoryItem.owner.is_(None))
             rows = list(await s.scalars(query.order_by(MemoryItem.id.desc())))
         allowed = [r for r in rows if CLEARANCE.get(r.sensitivity, 0) <= clearance]
         now = utcnow()
@@ -764,11 +784,13 @@ class Store:
             expires_at=row.expires_at.isoformat() if row.expires_at else None,
         )
 
-    async def correct_memory(self, memory_id, value, source, owner=None, task_id=None):
+    async def correct_memory(self, memory_id, value, source, owner=None, task_id=None, tenant=DEFAULT_TENANT):
         """Replace a memory's value with a new version, keeping the previous one auditable."""
+        if secret_present(value) or secret_present(source):
+            raise ValueError("Remove credentials before storing this as memory")
         async with self.sessions() as s:
             row = await s.get(MemoryItem, memory_id, with_for_update=True)
-            if not row:
+            if not row or row.tenant != tenant:
                 raise ValueError("Memory not found")
             if row.locked:
                 if owner != row.owner:
@@ -777,11 +799,10 @@ class Store:
                 raise ValueError("Only the memory owner can correct this memory")
             if row.state != MemoryState.ACTIVE:
                 raise ValueError(f"Memory is {row.state}; correct the active version instead")
-            if redact(value) != value:
-                raise ValueError("Remove credentials before storing this as memory")
             replacement = MemoryItem(
                 key=row.key,
                 value=value,
+                tenant=row.tenant,
                 scope=row.scope,
                 sensitivity=row.sensitivity,
                 source=source,
@@ -817,11 +838,11 @@ class Store:
             await s.refresh(replacement)
             return replacement
 
-    async def retract_memory(self, memory_id, reason, owner=None, task_id=None):
+    async def retract_memory(self, memory_id, reason, owner=None, task_id=None, tenant=DEFAULT_TENANT):
         """Close a memory without deleting it. The row and its reason remain auditable."""
         async with self.sessions() as s:
             row = await s.get(MemoryItem, memory_id, with_for_update=True)
-            if not row:
+            if not row or row.tenant != tenant:
                 raise ValueError("Memory not found")
             if row.locked and owner != row.owner:
                 raise ValueError("Locked memories can only be retracted by their owner")
@@ -840,14 +861,22 @@ class Store:
             await s.refresh(row)
             return row
 
-    async def memory_history(self, key):
-        """Every version of a key, newest first, so a correction can be inspected."""
+    async def memory_history(self, key, owner=None, tenant=DEFAULT_TENANT):
+        """Every version of a key, newest first, so a correction can be inspected.
+
+        Scoped exactly like recall: another tenant's key is invisible, and within the
+        tenant only the owner and shared memory are returned.
+        """
         async with self.sessions() as s:
-            rows = list(
-                await s.scalars(
-                    select(MemoryItem).where(MemoryItem.key == key).order_by(MemoryItem.version.desc())
-                )
+            query = select(MemoryItem).where(
+                MemoryItem.key == key,
+                MemoryItem.tenant == tenant,
             )
+            if owner is not None:
+                query = query.where(or_(MemoryItem.owner == owner, MemoryItem.owner.is_(None)))
+            else:
+                query = query.where(MemoryItem.owner.is_(None))
+            rows = list(await s.scalars(query.order_by(MemoryItem.version.desc())))
             now = utcnow()
             return [self._view(r, now) for r in rows]
 

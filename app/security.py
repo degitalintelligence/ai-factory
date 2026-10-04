@@ -4,12 +4,25 @@ from pathlib import PurePosixPath
 from app.config import settings
 
 SECRET_PATTERNS = [
-    r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----",
     r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b",
+    r"\bglpat-[A-Za-z0-9_-]{20,}\b",
+    r"\bxox[abposr]-[A-Za-z0-9-]{10,}\b",
     r"\bsk-(?:or-v1-)?[A-Za-z0-9_-]{20,}\b",
+    r"\bAKIA[0-9A-Z]{16}\b",
+    r"\bASIA[0-9A-Z]{16}\b",
+    r"\bAIza[0-9A-Za-z_-]{35}\b",
+    r"\bdop_v1_[a-f0-9]{64}\b",
+    r"\b(?:eyJ[A-Za-z0-9_-]{10,}\.){2}[A-Za-z0-9_-]{10,}\b",  # JWT
     r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b",
     # scheme://user:password@host — credentials embedded in connection strings.
     r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@",
+    # key=value pairs for any credential-bearing setting name. The value must look like a
+    # credential (no spaces, at least 8 characters) so ordinary prose is not mangled.
+    r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key)\b\s*[=:]\s*\S{8,}",
+    r"(?i)\bauthorization\b\s*:\s*(?:bearer|basic|token)\s+\S{8,}",
+    # PEM/OpenSSH public keys are not secret but do not belong in a PR body or memory.
+    r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PUBLIC KEY-----",
 ]
 
 

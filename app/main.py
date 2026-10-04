@@ -74,10 +74,18 @@ app = FastAPI(title="LioBot by AI Factory", version="0.3.0", lifespan=lifespan, 
 
 
 def authorize(authorization: str = Header(default="")):
+    """Authenticate one operator request and return the principal it acts as.
+
+    The principal comes from the server-side credential, never from the request body, so
+    a caller cannot attribute an approval or deployment to somebody else. It fails closed:
+    a bearer token with no configured principal is rejected rather than acting as nobody.
+    """
     if not settings.api_token or not hmac.compare_digest(
         authorization.encode(), f"Bearer {settings.api_token}".encode()
     ):
         raise HTTPException(401, "Unauthorized")
+    if settings.api_operator_user_id is None:
+        raise HTTPException(401, "API_OPERATOR_USER_ID is required when API_TOKEN is set")
     return settings.api_operator_user_id
 
 
@@ -349,9 +357,12 @@ async def search_memory(
     role: str = "",
     scope: str | None = None,
     limit: int = 25,
+    operator_id=Depends(authorize),
 ):
     if not 1 <= limit <= 100:
         raise HTTPException(422, "limit must be between 1 and 100")
     selected = [key.strip() for key in keys.split(",") if key.strip()] or None
-    items, truncated = await store.recall(selected, role=role or None, scope=scope, limit=limit)
+    items, truncated = await store.recall(
+        selected, role=role or None, scope=scope, limit=limit, owner=operator_id
+    )
     return {"items": [item.model_dump() for item in items], "truncated": truncated}
