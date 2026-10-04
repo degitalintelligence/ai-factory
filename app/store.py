@@ -22,6 +22,7 @@ from app.schemas import (
     CLEARANCE,
     DECISION_PHRASES,
     OUTCOME_STATE,
+    DecisionMessageType,
     DecisionState,
     MemoryState,
     MemoryView,
@@ -368,54 +369,64 @@ class Store:
                 task.status = "cancelled"
             s.add(Event(task_id=task_id, kind="cancel", message="Cancellation requested"))
 
+    @staticmethod
+    async def _apply_resume(session, task_id, action, message=""):
+        """Apply one resume transition inside a caller-owned transaction.
+
+        resolve_decision must reuse this exact logic so a decision and the task
+        transition it authorises commit together or not at all.
+        """
+        task = await session.get(Task, task_id, with_for_update=True)
+        if not task:
+            raise ValueError("Task not found")
+        if task.lease_until and task.lease_until > utcnow():
+            raise ValueError("Task is still running; wait until its worker stops")
+        if action == "approve":
+            if task.status != "awaiting_approval" or not task.plan_json:
+                raise ValueError("Task has no plan awaiting approval")
+            digest = plan_hash(task.plan_json)
+            if message != digest[:12]:
+                raise ValueError("Approval must include the current plan hash shown by /plan")
+            task.approved_plan_hash = digest
+        elif action == "answer":
+            if task.status != "waiting_input" or not message.strip():
+                raise ValueError("Task is not waiting for input or answer is empty")
+            task.requirement += "\n\nUser clarification:\n" + message[:10000]
+            task.plan_json = None
+            task.approved_plan_hash = None
+        elif action == "feedback":
+            if task.status != "pr_created" or not message.strip():
+                raise ValueError("Feedback requires a published PR and a message")
+            task.requirement += "\n\nRequested revision:\n" + message[:10000]
+            task.plan_json = None
+            task.approved_plan_hash = None
+            task.review_digest = None
+            task.head_sha = None
+            task.iteration = 0
+            task.feedback_json = json.dumps([message])
+        elif action == "retry":
+            if task.status not in {"failed", "cancelled"}:
+                raise ValueError("Only failed/cancelled tasks can be retried")
+            task.iteration = 0
+        else:
+            raise ValueError("Unknown resume action")
+        if redact(task.requirement) != task.requirement:
+            raise ValueError("Remove credentials from the message")
+        task.status = "received"
+        task.cancel_requested = False
+        task.lease_owner = None
+        task.lease_until = None
+        task.recoveries = 0
+        session.add(Event(task_id=task_id, kind=action, message=redact(message or action)))
+        return task
+
     async def resume(self, task_id, action, message=""):
         async with self.sessions() as s, s.begin():
-            task = await s.get(Task, task_id, with_for_update=True)
-            if not task:
-                raise ValueError("Task not found")
-            if task.lease_until and task.lease_until > utcnow():
-                raise ValueError("Task is still running; wait until its worker stops")
-            if action == "approve":
-                if task.status != "awaiting_approval" or not task.plan_json:
-                    raise ValueError("Task has no plan awaiting approval")
-                digest = plan_hash(task.plan_json)
-                if message != digest[:12]:
-                    raise ValueError("Approval must include the current plan hash shown by /plan")
-                task.approved_plan_hash = digest
-            elif action == "answer":
-                if task.status != "waiting_input" or not message.strip():
-                    raise ValueError("Task is not waiting for input or answer is empty")
-                task.requirement += "\n\nUser clarification:\n" + message[:10000]
-                task.plan_json = None
-                task.approved_plan_hash = None
-            elif action == "feedback":
-                if task.status != "pr_created" or not message.strip():
-                    raise ValueError("Feedback requires a published PR and a message")
-                task.requirement += "\n\nRequested revision:\n" + message[:10000]
-                task.plan_json = None
-                task.approved_plan_hash = None
-                task.review_digest = None
-                task.head_sha = None
-                task.iteration = 0
-                task.feedback_json = json.dumps([message])
-            elif action == "retry":
-                if task.status not in {"failed", "cancelled"}:
-                    raise ValueError("Only failed/cancelled tasks can be retried")
-                task.iteration = 0
-            else:
-                raise ValueError("Unknown resume action")
-            if redact(task.requirement) != task.requirement:
-                raise ValueError("Remove credentials from the message")
-            task.status = "received"
-            task.cancel_requested = False
-            task.lease_owner = None
-            task.lease_until = None
-            task.recoveries = 0
-            s.add(Event(task_id=task_id, kind=action, message=redact(message or action)))
+            await self._apply_resume(s, task_id, action, message)
 
     async def create_decision(self, card):
         """Persist a decision card. It never lives only in a channel message."""
-        async with self.sessions() as s:
+        async with self.sessions() as s, s.begin():
             decision = Decision(
                 task_id=card.task_id,
                 project=card.project,
@@ -436,8 +447,7 @@ class Store:
                 expires_at=card.expires_at,
             )
             s.add(decision)
-            await s.commit()
-            await s.refresh(decision)
+            await s.flush()
             if card.task_id:
                 s.add(
                     Event(
@@ -446,19 +456,19 @@ class Store:
                         message=redact(f"Decision #{decision.id} requested: {card.title}"),
                     )
                 )
-                await s.commit()
+            await s.refresh(decision)
             return decision
 
     async def ensure_task_approval_decision(self, task, reason, plan_digest):
         """Create one durable approval card for a task waiting on its plan.
 
         Retries and worker recovery must not create duplicate inbox items for the
-        same task. The plan hash is included in the evidence so the approval is
-        bound to the exact plan that will be resumed.
+        same task, so the task row is locked before the open-card check. The plan
+        hash is included in the evidence so the approval is bound to the exact plan
+        that will be resumed.
         """
-        from app.schemas import DecisionMessageType
-
-        async with self.sessions() as s:
+        async with self.sessions() as s, s.begin():
+            await s.scalar(select(Task.id).where(Task.id == task.id).with_for_update())
             existing = await s.scalar(
                 select(Decision)
                 .where(
@@ -519,7 +529,6 @@ class Store:
                     message=redact(f"Decision #{decision.id} requested: {decision.title}"),
                 )
             )
-            await s.commit()
             await s.refresh(decision)
             return decision
 
@@ -534,16 +543,22 @@ class Store:
             return list(await s.scalars(query))
 
     async def expire_stale_decisions(self):
-        """Mark past-expiry open decisions expired. Expiry is not a decision."""
+        """Mark past-expiry open decisions expired. Expiry is not a decision.
+
+        An expired approval card must release the task it gated, otherwise the task
+        would sit in awaiting_approval forever and hold its repository.
+        """
         now = utcnow()
         async with self.sessions() as s, s.begin():
             rows = list(
                 await s.scalars(
-                    select(Decision).where(Decision.state == DecisionState.OPEN, Decision.expires_at < now)
+                    select(Decision)
+                    .where(Decision.state == DecisionState.OPEN, Decision.expires_at < now)
+                    .with_for_update()
                 )
             )
             for row in rows:
-                row.state = DecisionState.EXPIRED
+                await self._close_decision(s, row, DecisionState.EXPIRED, None)
             if rows:
                 await s.flush()
             return len(rows)
@@ -553,52 +568,91 @@ class Store:
 
         A repeated identical answer returns the stored decision without changing
         state again. A conflicting answer after resolution is rejected.
+
+        The decision row, its audit event, and the task transition commit in one
+        transaction: a crash can never leave an approved decision on a task that is
+        still awaiting approval, and a rejected one can never strand the repository.
         """
         outcome = DECISION_PHRASES.get(phrase.strip().lower())
         if not outcome:
             raise ValueError("Answer with one of: approve, reject, ask, defer")
-        task_id = None
+        target = OUTCOME_STATE[outcome]
         async with self.sessions() as s:
             decision = await s.get(Decision, decision_id, with_for_update=True)
             if not decision:
                 raise ValueError("Decision not found")
-            target = OUTCOME_STATE[outcome]
             if decision.state != DecisionState.OPEN:
                 if decision.state == target:
-                    task_id = decision.task_id
-                    result = decision
-                else:
-                    raise ValueError(
-                        f"Decision #{decision_id} is already {decision.state}; start a new decision instead"
-                    )
-            else:
-                if decision.expires_at and decision.expires_at < utcnow():
-                    # Persist the expiry before raising, otherwise the rollback keeps it open forever.
-                    decision.state = DecisionState.EXPIRED
-                    await s.commit()
-                    raise ValueError("Decision expired; request a new one")
-                decision.state = target
-                decision.decided_by = user_id
-                decision.decided_at = utcnow()
-                task_id = decision.task_id
-                if decision.task_id:
-                    s.add(
-                        Event(
-                            task_id=decision.task_id,
-                            kind="decision",
-                            message=redact(f"Decision #{decision_id} -> {target} by {user_id}"),
-                        )
-                    )
+                    return decision
+                raise ValueError(
+                    f"Decision #{decision_id} is already {decision.state}; start a new decision instead"
+                )
+            if decision.expires_at and decision.expires_at < utcnow():
+                # Expiry is not a decision, but it must also release whatever it blocked.
+                await self._close_decision(s, decision, DecisionState.EXPIRED, user_id)
                 await s.commit()
-                await s.refresh(decision)
-                result = decision
-        # Approval is not merely a label: resume a task that is waiting on this
-        # decision, using the current plan hash as the same guard as /approve.
-        if task_id and target == DecisionState.APPROVED:
-            task = await self.get(task_id)
-            if task and task.status == "awaiting_approval" and task.plan_json:
-                await self.resume(task_id, "approve", plan_hash(task.plan_json)[:12])
-        return result
+                raise ValueError("Decision expired; request a new one")
+            await self._close_decision(s, decision, target, user_id)
+            await s.commit()
+            await s.refresh(decision)
+            return decision
+
+    async def _close_decision(self, session, decision, target, user_id):
+        """Record one decision outcome and apply its exact effect on the linked task.
+
+        Only an APPROVAL_REQUIRED card may move a task forward, and only while the task
+        is still parked on the plan digest the card carries. Every other outcome stops a
+        gated task so the repository reservation is released instead of held forever.
+        """
+        decision.state = target
+        decision.decided_by = user_id
+        decision.decided_at = utcnow()
+        task_id = decision.task_id
+        if not task_id:
+            return
+        session.add(
+            Event(
+                task_id=task_id,
+                kind="decision",
+                message=redact(f"Decision #{decision.id} -> {target} by {user_id}"),
+            )
+        )
+        if decision.kind != DecisionMessageType.APPROVAL_REQUIRED:
+            # A generic DECISION_REQUIRED card is a question about the work, never an
+            # authorisation to execute it.
+            return
+        task = await session.get(Task, task_id, with_for_update=True)
+        if not task or task.status != "awaiting_approval":
+            return
+        if target != DecisionState.APPROVED:
+            task.status = "cancelled" if target == DecisionState.REJECTED else "failed"
+            task.last_message = redact(
+                f"Decision #{decision.id} {target}; stop and inspect /logs before retrying"
+            )
+            task.cancel_requested = False
+            task.lease_owner = None
+            task.lease_until = None
+            return
+        if not task.plan_json:
+            raise ValueError("Task has no plan awaiting approval")
+        digest = plan_hash(task.plan_json)
+        if self._card_plan_digest(decision) not in (None, digest):
+            raise ValueError(
+                "This approval card is for a different plan version; reject it and run planning again"
+            )
+        await self._apply_resume(session, task_id, "approve", digest[:12])
+
+    @staticmethod
+    def _card_plan_digest(decision):
+        """The plan sha256 an APPROVAL_REQUIRED card was created against, if recorded."""
+        try:
+            evidence = json.loads(decision.evidence_json or "[]")
+        except json.JSONDecodeError:
+            return None
+        for item in evidence:
+            if isinstance(item, str) and item.startswith("plan_sha256="):
+                return item.split("=", 1)[1]
+        return None
 
     # --- Context and Memory Plane ---
 
