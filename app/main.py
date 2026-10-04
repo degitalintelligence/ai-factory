@@ -137,6 +137,7 @@ def task_view(t):
         "publishing": "LioBot is reconciling the approved publication.",
         "pr_created": "Review the PR and decide whether to merge/deploy.",
         "completed": "Publication is acknowledged; no further action is required.",
+        "superseded": "This stale merged PR was closed without release; create a fresh bounded re-review task.",
         "failed": "Inspect the report/logs, then create a new bounded retry if appropriate.",
         "cancelled": "No action is running; create a new intent if the work is still needed.",
     }
