@@ -37,6 +37,8 @@ async def test_cancel_is_idempotent_across_repeated_channel_requests(db):
     second = await perform_action(task.id, "cancel")
     assert "Cancellation requested" in first and "Cancellation requested" in second
     assert (await store.get(task.id)).status == "cancelled"
+    # Idempotency covers side effects too: a repeated cancel must not stack events.
+    assert len([e for e in await store.events(task.id) if e.kind == "cancel"]) == 1
 
 
 async def test_read_task_enforces_ownership_for_user_scoped_channels(db):
