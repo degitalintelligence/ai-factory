@@ -4,11 +4,12 @@ from datetime import timedelta
 
 from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import aliased
 
 from app.config import settings
 from app.db import (
     ACTIVE,
-    REPOSITORY_BLOCKING,
+    REPOSITORY_RESERVED,
     Artifact,
     Decision,
     Event,
@@ -49,6 +50,31 @@ class Store:
         async with self.sessions() as s:
             return await s.get(Task, task_id)
 
+    @staticmethod
+    async def _require_same_request(session, existing, requirement, project, chat_id, user_id, kind, brief):
+        """An idempotency key must describe exactly one request.
+
+        The policy snapshot is deliberately not compared: it is server-side state that
+        may legitimately change between two identical retries, and a stale task is
+        stopped by the policy-revocation check rather than by refusing the retry.
+        """
+        same = (
+            existing.requirement == requirement
+            and existing.project == project
+            and existing.chat_id == chat_id
+            and existing.user_id == user_id
+            and existing.kind == kind
+        )
+        if same:
+            stored = await session.scalar(
+                select(Artifact.content).where(
+                    Artifact.task_id == existing.id, Artifact.kind == "self_improvement_brief"
+                )
+            )
+            same = stored == (brief.model_dump_json() if brief is not None else None)
+        if not same:
+            raise ValueError("Idempotency key already belongs to a different request")
+
     async def create(
         self,
         requirement,
@@ -69,63 +95,78 @@ class Store:
             raise ValueError("Unknown project alias; use /projects")
         if kind == "self_improvement" and brief is None:
             raise ValueError("self_improvement tasks require a SelfImprovementBrief")
-        async with self.sessions() as s:
-            # An idempotent retry must return the original task even while it is active.
-            if idempotency_key:
-                existing = await s.scalar(select(Task).where(Task.idempotency_key == idempotency_key))
-                if existing is not None:
-                    if (
-                        existing.requirement != requirement
-                        or existing.project != project
-                        or existing.user_id != user_id
-                    ):
-                        raise ValueError("Idempotency key already belongs to a different request")
-                    return existing
-            # One active task per repository is the default safety policy.
-            running = await s.scalar(
-                select(Task)
-                .where(
-                    Task.repo == policy.repo,
-                    Task.status.in_(REPOSITORY_BLOCKING),
-                    Task.cancel_requested.is_(False),
+        try:
+            async with self.sessions() as s, s.begin():
+                # Same lock as claim(): a queued task must not appear between a worker's
+                # blocker check and its lease write.
+                if s.bind.dialect.name == "postgresql":
+                    await s.execute(text("SELECT pg_advisory_xact_lock(72803103)"))
+                # An idempotent retry must return the original task even while it is active.
+                if idempotency_key:
+                    existing = await s.scalar(select(Task).where(Task.idempotency_key == idempotency_key))
+                    if existing is not None:
+                        await self._require_same_request(
+                            s, existing, requirement, project, chat_id, user_id, kind, brief
+                        )
+                        return existing
+                # One reserved task per repository is the default safety policy. A task that
+                # is only queued still owns the repository, otherwise repeated /new calls
+                # stack unclaimed work that later claims race to execute.
+                running = await s.scalar(
+                    select(Task)
+                    .where(
+                        Task.repo == policy.repo,
+                        Task.status.in_(REPOSITORY_RESERVED),
+                        Task.cancel_requested.is_(False),
+                    )
+                    .limit(1)
                 )
-                .limit(1)
-            )
-            if running:
-                raise ValueError(
-                    f"One active task per repository; task #{running.id} is still {running.status} on {policy.repo}"
+                if running:
+                    raise ValueError(
+                        f"One active task per repository; task #{running.id} is still "
+                        f"{running.status} on {policy.repo}"
+                    )
+                task = Task(
+                    requirement=requirement,
+                    kind=kind,
+                    project=project,
+                    repo=policy.repo,
+                    base_branch=policy.base_branch,
+                    policy_json=policy.model_dump_json(),
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    idempotency_key=idempotency_key,
                 )
-            task = Task(
-                requirement=requirement,
-                kind=kind,
-                project=project,
-                repo=policy.repo,
-                base_branch=policy.base_branch,
-                policy_json=policy.model_dump_json(),
-                chat_id=chat_id,
-                user_id=user_id,
-                idempotency_key=idempotency_key,
-            )
-            s.add(task)
-            try:
-                await s.commit()
-            except IntegrityError:
-                await s.rollback()
-                task = await s.scalar(select(Task).where(Task.idempotency_key == idempotency_key))
-                if not idempotency_key or task is None:
-                    raise
-                if task.requirement != requirement or task.project != project or task.user_id != user_id:
-                    raise ValueError("Idempotency key already belongs to a different request")
+                s.add(task)
+                # Intake is one transaction: a task row is never visible without its branch,
+                # its received event, and its brief. Any failure rolls the whole intake back
+                # instead of leaving an unclaimable half-task behind.
+                await s.flush()
+                task.branch = f"ai-factory/task-{task.id}"
+                s.add(Event(task_id=task.id, kind="received", message=f"Queued for {task.repo}"))
+                if brief is not None:
+                    s.add(
+                        Artifact(
+                            task_id=task.id,
+                            kind="self_improvement_brief",
+                            content=brief.model_dump_json(),
+                        )
+                    )
                 return task
-            await s.refresh(task)
-            task.branch = f"ai-factory/task-{task.id}"
-            s.add(Event(task_id=task.id, kind="received", message=f"Queued for {task.repo}"))
-            if brief is not None:
-                s.add(
-                    Artifact(task_id=task.id, kind="self_improvement_brief", content=brief.model_dump_json())
+        except IntegrityError:
+            # The unique idempotency key is the only unique constraint an intake can
+            # violate, so a collision means a concurrent identical request. The advisory
+            # lock already prevents this on PostgreSQL; this is the remaining fallback.
+            if not idempotency_key:
+                raise
+            async with self.sessions() as s:
+                existing = await s.scalar(select(Task).where(Task.idempotency_key == idempotency_key))
+                if existing is None:
+                    raise
+                await self._require_same_request(
+                    s, existing, requirement, project, chat_id, user_id, kind, brief
                 )
-            await s.commit()
-            return task
+                return existing
 
     async def list(self, limit=20, user_id=None):
         async with self.sessions() as s:
@@ -216,11 +257,33 @@ class Store:
                     )
                 )
             await s.flush()
-            busy = select(Task.repo).where(Task.lease_until > now, Task.status.in_(ACTIVE))
+            candidate, blocker = aliased(Task), aliased(Task)
+            # A repository stays reserved from intake until it reaches a terminal state,
+            # so a paused task or an open PR is never bypassed by a second branch. Only a
+            # lower-id task blocks the candidate: the oldest task in a repository always
+            # wins, which keeps a queued task claimable and legacy stacked rows progressing
+            # instead of deadlocking each other.
+            reserved = (
+                select(blocker.id)
+                .where(
+                    blocker.repo == candidate.repo,
+                    blocker.id < candidate.id,
+                    blocker.status.in_(REPOSITORY_RESERVED),
+                    blocker.cancel_requested.is_(False),
+                )
+                .correlate(candidate)
+                .exists()
+            )
             task = await s.scalar(
-                select(Task)
-                .where(Task.status == "received", Task.cancel_requested.is_(False), Task.repo.not_in(busy))
-                .order_by(Task.id)
+                select(candidate)
+                .where(
+                    candidate.status == "received",
+                    candidate.cancel_requested.is_(False),
+                    # A task without a branch is a half-written intake; refuse to execute it.
+                    candidate.branch.is_not(None),
+                    ~reserved,
+                )
+                .order_by(candidate.id)
                 .with_for_update(skip_locked=True)
                 .limit(1)
             )

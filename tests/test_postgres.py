@@ -22,7 +22,13 @@ async def test_postgres_concurrent_claim_recovery_and_unique_keys(monkeypatch):
     await init_db(engine)
     await init_db(engine)
     store = Store(async_sessionmaker(engine, expire_on_commit=False))
-    await asyncio.gather(*(store.create(f"Queue feature {i}") for i in range(8)))
+    # Concurrent intake on one repository: the advisory lock must let exactly one through.
+    results = await asyncio.gather(
+        *(store.create(f"Queue feature {i}") for i in range(8)), return_exceptions=True
+    )
+    created = [r for r in results if not isinstance(r, BaseException)]
+    rejected = [r for r in results if isinstance(r, ValueError)]
+    assert len(created) == 1 and len(rejected) == 7
     claims = await asyncio.gather(*(store.claim(f"worker-{i}") for i in range(8)))
     active = [t for t in claims if t]
     assert len(active) == 1  # one active task per repository across workers

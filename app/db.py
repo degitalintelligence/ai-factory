@@ -38,6 +38,9 @@ ACTIVE = {"planning", "developing", "testing", "reviewing", "publishing"}
 # Repository reservation is broader than worker lease activity. Paused tasks and
 # an open PR still own the repository and must not be bypassed by a new branch.
 REPOSITORY_BLOCKING = ACTIVE | {"waiting_input", "awaiting_approval", "pr_created"}
+# Reserved for intake: a queued task owns the repository too, otherwise repeated
+# /new calls would stack unclaimed work that later claims race to execute.
+REPOSITORY_RESERVED = REPOSITORY_BLOCKING | {"received"}
 
 
 class Task(Base):
