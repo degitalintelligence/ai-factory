@@ -136,6 +136,50 @@ class DeploymentService:
             raise ValueError("Project policy requires deployment; use /deploy instead")
         return await self._record_publication(task, approved_sha)
 
+    async def supersede(self, task_id, reason):
+        """Close a stale merged-PR checkpoint so a fresh review can be queued.
+
+        This is deliberately separate from cancellation. It only applies when the
+        task PR was merged, the approved merge is no longer the branch tip, and the
+        current branch still contains that merge. No publication or deployment is
+        recorded by this operation.
+        """
+        if not reason.strip():
+            raise ValueError("Supersede requires a reason")
+        task = await store.get(task_id)
+        if not task or task.status != "pr_created" or not task.pr_url or not task.head_sha:
+            raise ValueError("Supersede requires a stale reviewed PR task")
+        policy = settings.projects().get(task.project)
+        if not policy or policy.repo != task.repo:
+            raise ValueError("Project policy does not match the task repository")
+        try:
+            number = int(task.pr_url.rstrip("/").split("/")[-1])
+        except (AttributeError, ValueError):
+            raise ValueError("Task PR URL is invalid") from None
+        pr = await self.github.pull(task.repo, number)
+        if not pr.get("merged") or pr.get("head", {}).get("sha") != task.head_sha:
+            raise ValueError("Supersede requires the reviewed PR to be merged unchanged")
+        merged_sha = pr.get("merge_commit_sha")
+        if not isinstance(merged_sha, str) or not re.fullmatch(r"[a-f0-9]{40}", merged_sha):
+            raise ValueError("Merged PR has no valid full commit SHA")
+        current_sha = await self.github.branch_sha(task.repo, task.base_branch)
+        if not current_sha:
+            raise ValueError("Current base branch cannot be resolved")
+        if current_sha == merged_sha:
+            raise ValueError("Approved commit is still the current base; use /publish or /deploy")
+        comparison = await self.github.request("GET", f"{task.repo}/compare/{merged_sha}...{current_sha}")
+        if comparison.get("merge_base_commit", {}).get("sha") != merged_sha:
+            raise ValueError("Current base no longer contains the merged PR; inspect the repository")
+        reviewed = await self.github.request("GET", f"{task.repo}/git/commits/{task.head_sha}")
+        merged = await self.github.request("GET", f"{task.repo}/git/commits/{merged_sha}")
+        if reviewed["tree"]["sha"] != merged["tree"]["sha"]:
+            raise ValueError("Merge contains changes outside the reviewed tree; do not supersede")
+        note = (
+            f"{reason.strip()[:10000]} Current base: {current_sha}; "
+            f"merged PR: {merged_sha}. No publication or deployment was recorded."
+        )
+        return await store.supersede(task_id, note)
+
     async def deploy(self, task_id, approved_sha):
         task, policy = await self._validated_release(task_id, approved_sha)
         # Backward-compatible alias: /deploy can acknowledge a merged PR when the
