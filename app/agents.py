@@ -27,7 +27,12 @@ def review_only_request(requirement: str) -> bool:
     )
     no_change_language = any(
         marker in text
-        for marker in ("only if a correction", "only if correction", "do not change", "no correction required")
+        for marker in (
+            "only if a correction",
+            "only if correction",
+            "do not change",
+            "no correction required",
+        )
     )
     return review_language and no_change_language
 
