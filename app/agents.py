@@ -41,9 +41,8 @@ def normalize_lead_plan(plan: LeadPlan, requirement: str = "") -> LeadPlan:
         approval_gates.append("Independent review and deterministic gates before publication")
 
     budget = plan.budget or PlanBudget()
-    rollback = (
-        plan.rollback_plan
-        or "Revert the reviewed commit and disable the change if outcome metrics regress."
+    rollback = plan.rollback_plan or (
+        "Revert the reviewed commit and disable the change if outcome metrics regress."
     )
     return plan.model_copy(
         update={
