@@ -169,7 +169,10 @@ def select_skills(objective: str) -> list[str]:
     text = objective.lower()
     selected: list[str] = []
     keyword_groups = (
-        ("engineering", ("code", "coding", "repository", "repo", "test", "deploy", "api", "bug", "implement")),
+        (
+            "engineering",
+            ("code", "coding", "repository", "repo", "test", "deploy", "api", "bug", "implement"),
+        ),
         ("product_research", ("requirement", "product", "research", "prioritize", "experiment", "strategy")),
         ("marketing", ("marketing", "campaign", "content", "funnel", "competitor", "ads", "seo")),
         ("admin_ops", ("admin", "ops", "sop", "schedule", "vendor", "checklist", "operational")),
