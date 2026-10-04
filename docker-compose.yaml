@@ -35,6 +35,7 @@ services:
       LEAD_MODEL: ${LEAD_MODEL:?LEAD_MODEL is required}
       DEVELOPER_MODEL: ${DEVELOPER_MODEL:?DEVELOPER_MODEL is required}
       REVIEWER_MODEL: ${REVIEWER_MODEL:?REVIEWER_MODEL is required}
+      MODEL_ALIASES_JSON: ${MODEL_ALIASES_JSON:-}
       API_TOKEN: ${API_TOKEN:-}
       SANDBOX_URL: http://sandbox:8090
       SANDBOX_TOKEN: ${SANDBOX_TOKEN:?Generate a separate long random sandbox token}
