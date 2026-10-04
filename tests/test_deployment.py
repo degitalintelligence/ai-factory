@@ -22,14 +22,22 @@ class FakeGitHub:
     merged = True
     tree_equal = True
     checks_pass = True
+    current_base = "b" * 40
+    merge_is_ancestor = True
 
     async def pull(self, repo, number):
         return {"merged": self.merged, "head": {"sha": "a" * 40}, "merge_commit_sha": "b" * 40}
 
     async def branch_sha(self, repo, branch):
-        return "b" * 40
+        return self.current_base
 
     async def request(self, method, path, **kwargs):
+        if "/compare/" in path:
+            return {
+                "merge_base_commit": {
+                    "sha": "b" * 40 if self.merge_is_ancestor else "c" * 40,
+                }
+            }
         if "/git/commits/" in path:
             return {"tree": {"sha": "tree" if self.tree_equal or path.endswith("a" * 40) else "different"}}
         if path.endswith("/status"):
@@ -148,3 +156,23 @@ async def test_completed_publication_is_terminal(db, publication_task):
     await service.publish(publication_task.id, "b" * 40)
     with pytest.raises(ValueError, match="terminal"):
         await db.cancel(publication_task.id)
+
+
+async def test_supersede_releases_repository_after_merged_pr_moves_base(db, publication_task):
+    service = FakeService(db.sessions)
+    service.github.current_base = "c" * 40
+
+    task = await service.supersede(publication_task.id, "Task #6 advanced main before this release")
+
+    assert task.status == "superseded"
+    assert "No publication or deployment was recorded" in task.last_message
+    events = await db.events(publication_task.id)
+    assert any(event.kind == "superseded" for event in events)
+    fresh = await db.create("Re-review the current main baseline")
+    assert fresh.id != publication_task.id
+
+
+async def test_supersede_rejects_a_current_base(db, publication_task):
+    service = FakeService(db.sessions)
+    with pytest.raises(ValueError, match="still the current base"):
+        await service.supersede(publication_task.id, "This should not bypass publication")

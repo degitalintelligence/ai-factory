@@ -424,6 +424,7 @@ received
 -> publishing
 -> pr_created
 -> completed (for non-deployable projects after /publish)
+-> superseded (stale merged PR closed before fresh review)
 -> deployment_pending (optional)
 -> deploying
 -> deployed / deployment_unknown / deployment_failed
@@ -472,6 +473,7 @@ Current Telegram commands:
 | /retry | bounded retry with retained lifetime budget |
 | /feedback | revise an existing open PR |
 | /publish | acknowledge a merged PR for a non-deployable project |
+| /supersede | close a stale merged PR before fresh review; no release is recorded |
 | /deploy | explicit deployment by full merged SHA |
 | /deployment | reconcile a deployment |
 
@@ -777,6 +779,5 @@ requirement with precedence over amendment V1.1; resolved the `bunny-alpha` alia
 provider model `stealth/space-bunny-alpha`; recorded V0.3 capability levels L0 to L3 as
 binding; labelled the V0.3 data model, `/v1` API, and Decision Inbox categories as roadmap;
 opened a memory tenant-isolation decision. No runtime behaviour changed.*
-
 
 

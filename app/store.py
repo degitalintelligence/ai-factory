@@ -298,12 +298,36 @@ class Store:
             task = await s.get(Task, task_id, with_for_update=True)
             if not task:
                 raise ValueError("Task not found")
+            if task.status == "superseded":
+                raise ValueError("Superseded task is terminal; create a fresh task")
             if task.status in {"pr_created", "completed"}:
                 raise ValueError("Published task is terminal; cancellation cannot undo publication")
             task.cancel_requested = True
             if task.status not in ACTIVE:
                 task.status = "cancelled"
             s.add(Event(task_id=task_id, kind="cancel", message="Cancellation requested"))
+
+    async def supersede(self, task_id, message):
+        """Release a stale merged-PR checkpoint after explicit validation."""
+        message = redact(message.strip())
+        if not message:
+            raise ValueError("Supersede requires a reason")
+        async with self.sessions() as s, s.begin():
+            task = await s.get(Task, task_id, with_for_update=True)
+            if not task:
+                raise ValueError("Task not found")
+            if task.status != "pr_created":
+                raise ValueError("Only a stale pr_created task can be superseded")
+            if task.lease_until and task.lease_until > utcnow():
+                raise ValueError("Task is still running; wait until its worker stops")
+            task.status = "superseded"
+            task.last_message = f"Superseded: {message[:12000]}"
+            task.cancel_requested = False
+            task.lease_owner = None
+            task.lease_until = None
+            s.add(Event(task_id=task_id, kind="superseded", message=message[:24000]))
+            await s.flush()
+            return task
 
     async def resume(self, task_id, action, message=""):
         async with self.sessions() as s, s.begin():
