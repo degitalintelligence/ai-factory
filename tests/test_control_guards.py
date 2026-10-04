@@ -36,7 +36,7 @@ class FakeContextWorkspace:
 
 
 @pytest.mark.asyncio
-async def test_self_context_is_compact_and_targeted(monkeypatch):
+async def test_self_context_is_compact_and_targeted(db, monkeypatch):
     async def fail_if_previous_tasks_are_loaded(_limit):
         raise AssertionError("self-improvement context must not load prior task transcripts")
 
@@ -49,6 +49,8 @@ async def test_self_context_is_compact_and_targeted(monkeypatch):
         kind="self_improvement",
         base_sha="a" * 40,
         base_branch="main",
+        project="lab",
+        user_id=None,
     )
 
     context, raw = await orchestrator.repository_context(FakeContextWorkspace(), task)

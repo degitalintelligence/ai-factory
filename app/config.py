@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     # HTTP is a shared operator credential, so the server—not the request body—
     # supplies the audit principal for approvals.
     api_operator_user_id: int | None = Field(default=None, ge=1)
+
+    @field_validator("api_operator_user_id", mode="before")
+    @classmethod
+    def blank_principal_means_unset(cls, value):
+        """An empty forwarded variable (Coolify/Compose) is "not configured", not a parse error.
+
+        Fail-closed semantics stay with validate_runtime(): an empty principal only
+        blocks startup when API_TOKEN is actually set.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     max_iterations: int = Field(default=4, ge=1, le=10)
     max_dev_steps: int = Field(default=36, ge=1, le=200)
     # A separate stall ceiling prevents repetitive agent actions from consuming the whole task budget.
@@ -103,10 +116,18 @@ class Settings(BaseSettings):
             raise ValueError("MODEL_ALIASES_JSON must map non-empty aliases to model IDs")
         return data
 
-    def model_for(self, role: str) -> str:
+    def configured_model(self, role: str) -> str:
+        """The operator-configured model name for a role, before alias resolution.
+
+        Kept separate from model_for() so a call can be audited with both the alias the
+        operator configured and the provider model that actually ran.
+        """
         if role not in {"lead", "developer", "reviewer"}:
             raise ValueError("Unknown model role")
-        configured = getattr(self, f"{role}_model")
+        return getattr(self, f"{role}_model")
+
+    def model_for(self, role: str) -> str:
+        configured = self.configured_model(role)
         return self.model_aliases().get(configured, configured)
 
     def projects(self) -> dict[str, Project]:

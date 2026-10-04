@@ -42,6 +42,11 @@ def repo(tmp_path, monkeypatch):
     git("init", "-b", "main")
     git("config", "user.email", "test@example.invalid")
     git("config", "user.name", "Test")
+    # The engine runs git with GIT_CONFIG_GLOBAL=/dev/null, so it never inherits an
+    # operator's core.autocrlf. The fixture must match that, otherwise a Windows host
+    # commits LF and re-adds CRLF, which looks like an implementation diff.
+    git("config", "core.autocrlf", "false")
+    git("config", "core.safecrlf", "false")
     (path / "app.py").write_text("def value(): return 1\n")
     (path / "README.md").write_text("# Demo\n")
     (path / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n*.db\n")

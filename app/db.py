@@ -1,8 +1,22 @@
+import hashlib
 import logging
 from datetime import datetime, timezone
 from enum import StrEnum
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, inspect, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    insert,
+    inspect,
+    select,
+    text,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -101,6 +115,53 @@ class Artifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class ModelRun(Base):
+    """One immutable record of one structured model call.
+
+    The budget counters on a task are aggregates that survive retries but cannot be
+    decomposed afterwards. This row is the per-call evidence they cannot reconstruct: which
+    role ran, which configured alias and resolved provider model were actually used, which
+    prompt version was sent, how long the call took, and how it ended. Rows are only ever
+    inserted, never updated.
+    """
+
+    __tablename__ = "model_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), index=True)
+    role: Mapped[str] = mapped_column(String(40), default="", server_default="", index=True)
+    # The configured alias and the resolved provider model are both kept: the alias is what
+    # the operator configured, the resolved model is what actually ran.
+    model_alias: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    model: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    prompt_version: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    prompt_sha256: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    schema_name: Mapped[str] = mapped_column(String(60), default="", server_default="")
+    attempt: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    outcome: Mapped[str] = mapped_column(String(40), default="ok", server_default="ok", index=True)
+    detail: Mapped[str] = mapped_column(Text, default="", server_default="")
+    tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    cost_usd: Mapped[float | None] = mapped_column(Float)
+    cost_reported: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    latency_ms: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class SchemaMigration(Base):
+    """Ledger of the named additive startup migrations that already ran.
+
+    The statements themselves are still derived from the models at startup, so this ledger
+    is not what makes them additive. It records which named step ran and a checksum of the
+    SQL it ran, so an edited migration shows up as drift instead of being silently skipped
+    by IF NOT EXISTS.
+    """
+
+    __tablename__ = "schema_migrations"
+    version: Mapped[str] = mapped_column(String(40), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), default="", server_default="")
+    checksum: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    applied_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Deployment(Base):
     __tablename__ = "deployments"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -191,19 +252,78 @@ def _default_clause(server_default):
     return f" DEFAULT {arg}"
 
 
+# Named, ordered, additive startup steps. The order is the apply order, and a step is only
+# skipped when the ledger already holds its version with the same SQL checksum, so editing
+# a statement is reported as drift instead of being silently ignored.
+MIGRATIONS = (
+    (
+        "0001_task_idempotency_key",
+        "Unique idempotency key so a repeated intake cannot create a second task.",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_task_idempotency ON tasks (idempotency_key)",
+    ),
+    (
+        "0002_memory_active_key",
+        "One active memory value per (tenant, key, scope).",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_active "
+        "ON memory_items (tenant, key, scope) WHERE state = 'active'",
+    ),
+    (
+        "0003_single_open_approval",
+        "At most one open approval card per task, so a retry cannot stack duplicate decisions.",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_open_approval "
+        "ON decisions (task_id) WHERE state = 'open' AND kind = 'APPROVAL_REQUIRED'",
+    ),
+)
+
+
+async def _apply_migrations(conn):
+    """Apply each named step once, in order, and record it in the ledger.
+
+    A step whose checksum changed under an existing version is reported and not re-applied:
+    re-running edited DDL automatically is exactly the kind of surprise an operator must
+    approve, and every statement here is additive and safe to run by hand.
+    """
+    logger = logging.getLogger(__name__)
+    ledger = SchemaMigration.__table__
+    for version, name, statement in MIGRATIONS:
+        checksum = hashlib.sha256(statement.encode()).hexdigest()
+        applied = (await conn.execute(select(ledger.c.checksum).where(ledger.c.version == version))).first()
+        if applied is not None:
+            if applied[0] != checksum:
+                logger.warning(
+                    "Migration %s was already applied with a different statement; "
+                    "review it manually before changing the schema",
+                    version,
+                )
+            continue
+        try:
+            async with conn.begin_nested():
+                await conn.execute(text(statement))
+                await conn.execute(insert(ledger).values(version=version, name=name, checksum=checksum))
+        except IntegrityError:
+            # Legacy data already violates the invariant. Startup stays additive and the
+            # store-layer lock/duplicate check stays authoritative until the data is fixed.
+            logger.warning(
+                "Migration %s could not be applied: existing rows violate it; "
+                "the store layer still prevents new duplicates",
+                version,
+            )
+
+
 async def init_db(db_engine=None):
     """Additive startup migration. Never deletes old task, memory, or evidence rows.
 
     Existing databases gain new columns through ALTER TABLE ADD COLUMN with their
     declared default, so a historical memory row written before tenant isolation
-    existed becomes tenant "default" rather than being dropped or left null.
+    existed becomes tenant "default" rather than being dropped or left null. Named
+    index migrations then run once each and are recorded in schema_migrations.
     """
     target = db_engine or engine
     async with target.begin() as conn:
         if target.dialect.name == "postgresql":
             await conn.execute(text("SELECT pg_advisory_xact_lock(72803102)"))
         tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
-        for model in (Task, MemoryItem):
+        for model in (Task, MemoryItem, ModelRun):
             if model.__tablename__ not in tables:
                 continue
             name = model.__tablename__
@@ -215,21 +335,4 @@ async def init_db(db_engine=None):
                 default = _default_clause(column.server_default)
                 await conn.execute(text(f'ALTER TABLE {name} ADD COLUMN "{column.name}" {sql_type}{default}'))
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(
-            text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_idempotency ON tasks (idempotency_key)")
-        )
-        try:
-            async with conn.begin_nested():
-                await conn.execute(text("DROP INDEX IF EXISTS ux_memory_active"))
-                await conn.execute(
-                    text(
-                        "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_active "
-                        "ON memory_items (tenant, key, scope) WHERE state = 'active'"
-                    )
-                )
-        except IntegrityError:
-            # Legacy rows already contain duplicate active keys; keep startup additive
-            # and rely on store-layer row locks and conflict checks until data is cleaned.
-            logging.getLogger(__name__).warning(
-                "ux_memory_active not created: memory_items already holds duplicate active keys"
-            )
+        await _apply_migrations(conn)

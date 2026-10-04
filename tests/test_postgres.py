@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db import Base, init_db, utcnow
-from app.store import Store
+from app.store import Store, plan_hash
 
 
 @pytest.mark.skipif(
@@ -36,4 +36,36 @@ async def test_postgres_concurrent_claim_recovery_and_unique_keys(monkeypatch):
     await store.update(task.id, task.lease_owner, lease_until=utcnow() - timedelta(seconds=1))
     recovered = await store.claim("recovery")
     assert recovered.id == task.id and recovered.recoveries == 1
+    await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"), reason="TEST_POSTGRES_URL required for real PostgreSQL integration"
+)
+async def test_postgres_concurrent_approval_requests_produce_one_card(monkeypatch):
+    """Five simultaneous approval requests for one task: exactly one open card.
+
+    The task row lock serializes the check, and the partial unique index backs it
+    up; a loser that still hits the index recovers by re-reading the winner.
+    """
+    engine = create_async_engine(os.environ["TEST_POSTGRES_URL"])
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+    await init_db(engine)
+    store = Store(async_sessionmaker(engine, expire_on_commit=False))
+    task = await store.create("Approval race feature")
+    await store.update(task.id, status="awaiting_approval", plan_json='{"steps": ["ship it"]}')
+    fresh = await store.get(task.id)
+
+    cards = await asyncio.gather(
+        *(
+            store.ensure_task_approval_decision(fresh, "High-risk plan", plan_hash('{"steps": ["ship it"]}'))
+            for _ in range(5)
+        ),
+        return_exceptions=True,
+    )
+    failed = [c for c in cards if isinstance(c, BaseException)]
+    assert not failed, failed
+    assert {card.id for card in cards} == {cards[0].id}
+    assert len(await store.inbox(state="open")) == 1
     await engine.dispose()
