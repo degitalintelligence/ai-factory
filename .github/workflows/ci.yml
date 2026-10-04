@@ -47,7 +47,7 @@ jobs:
         env:
           SANDBOX_TOKEN: ci-only-local-sandbox-token
         run: |
-          docker run -d --name factory-sandbox --security-opt seccomp=unconfined --security-opt apparmor=ai-factory-sandbox --security-opt no-new-privileges:true --cap-drop ALL --memory 3g --pids-limit 128 --read-only --tmpfs /tmp:rw,nosuid,nodev,size=536870912 -e SANDBOX_TOKEN -p 127.0.0.1:8090:8090 factory-sandbox:ci
+          docker run -d --name factory-sandbox --security-opt seccomp=unconfined --security-opt apparmor=ai-factory-sandbox --security-opt systempaths=unconfined --security-opt no-new-privileges:true --cap-drop ALL --memory 3g --pids-limit 128 --read-only --tmpfs /tmp:rw,nosuid,nodev,size=536870912 -e SANDBOX_TOKEN -p 127.0.0.1:8090:8090 factory-sandbox:ci
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8090/health; then break; fi
             sleep 2

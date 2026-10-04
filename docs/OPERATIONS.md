@@ -15,7 +15,7 @@ Compose uses `DATABASE_HOST` and `DATABASE_PASSWORD`; the application URL-encode
 
 ## Sandbox readiness troubleshooting
 
-The runner needs Linux unprivileged user namespaces. The Compose runner alone has `seccomp=unconfined` and `apparmor=ai-factory-sandbox` to permit nested namespaces; the credential-bearing control service keeps the default Docker profiles. No `privileged: true`, host network, host PID namespace, host directory mount or Docker socket is needed.
+The runner needs Linux unprivileged user namespaces. The Compose runner alone has `seccomp=unconfined`, `systempaths=unconfined` and `apparmor=ai-factory-sandbox` to permit nested namespaces and a fresh private `/proc`; Docker's default masked `/proc` paths otherwise make Bubblewrap fail while mounting its PID namespace. The credential-bearing control service keeps the default Docker profiles. No `privileged: true`, host network, host PID namespace, host directory mount or Docker socket is needed.
 
 Ubuntu 24.04 can reject loopback setup with `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` even with the generic unconfined Docker profile. The supplied explicit profile grants `userns` to this runner only. Install it on the host before deployment; Docker intentionally fails if the named profile is absent. On hosts without AppArmor restrictions, the operator may set `SANDBOX_APPARMOR_PROFILE=unconfined`, but Ubuntu should retain the named profile.
 
