@@ -30,39 +30,69 @@ BASELINE_DOCUMENTS = (
 )
 
 
+# Self-improvement tasks must start from the requested files and policy, not the whole product tree.
+SELF_BASELINE_DOCUMENTS = ("README.md", "AGENTS.md")
+
+
 async def repository_context(workspace, task):
     files = workspace.list_files()
-    chunks = ["PROJECT POLICY: " + task.policy_json, "FILES:\n" + files]
+    is_self = str(getattr(task, "kind", "")) == "self_improvement"
+    context_limit = settings.self_task_context_chars if is_self else 120000
+    # The inventory is useful for navigation, but a very large tree must not crowd out
+    # the actual requirement and target files in a self-improvement prompt.
+    inventory_limit = 16000 if is_self else len(files)
+    file_index = files[:inventory_limit]
+    chunks = ["PROJECT POLICY: " + task.policy_json, "FILES:\n" + file_index]
+    if is_self:
+        chunks.insert(
+            1,
+            "CONTEXT MODE: compact self-improvement baseline; inspect additional files with tools only when needed.",
+        )
     inspected = []
     referenced = re.findall(
         r"(?<!https://)(?<!http://)(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|js|ts|json|toml|ini|md|yaml|yml)",
         task.requirement,
     )
-    baseline_paths = list(dict.fromkeys((*BASELINE_DOCUMENTS, *referenced)))[:40]
+    if is_self:
+        baseline_paths = list(dict.fromkeys((*referenced, *SELF_BASELINE_DOCUMENTS)))[:12]
+        per_file_limit = 4000
+    else:
+        baseline_paths = list(dict.fromkeys((*BASELINE_DOCUMENTS, *referenced)))[:40]
+        per_file_limit = 10000
     for path in baseline_paths:
         try:
-            content = workspace.read_file(path)[:10000]
+            raw_content = workspace.read_file(path)
+            content = raw_content[:per_file_limit]
         except (ValueError, OSError, RuntimeError):
             continue
         inspected.append(
-            {"path": path, "sha256": hashlib.sha256(content.encode()).hexdigest(), "content": content}
+            {
+                "path": path,
+                "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "content": content,
+                "truncated": len(raw_content) > per_file_limit,
+            }
         )
         chunks.append(f"{path}:\n{content}")
-    previous = [
-        t
-        for t in await store.list(30)
-        if t.repo == task.repo and t.id != task.id and t.status == "pr_created"
-    ][:3]
-    chunks += [
-        f"Previous completed task #{t.id}: {t.requirement[:1000]}\n{t.last_message[:2000]}" for t in previous
-    ]
+    if not is_self:
+        previous = [
+            t
+            for t in await store.list(30)
+            if t.repo == task.repo and t.id != task.id and t.status == "pr_created"
+        ][:3]
+        chunks += [
+            f"Previous completed task #{t.id}: {t.requirement[:1000]}\n{t.last_message[:2000]}"
+            for t in previous
+        ]
     # Leave headroom for the system prompt, JSON schema and requirement within max_prompt_chars.
-    context = "\n\n".join(chunks)[:120000]
+    context = "\n\n".join(chunks)[:context_limit]
     baseline = json.dumps(
         {
             "base_sha": task.base_sha,
             "base_branch": task.base_branch,
             "policy": json.loads(task.policy_json),
+            "context_mode": "self_improvement_compact" if is_self else "standard",
+            "context_char_limit": context_limit,
             "file_count": len(files.splitlines()),
             "file_inventory": files,
             "inspected": inspected,

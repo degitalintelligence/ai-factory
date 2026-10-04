@@ -46,7 +46,13 @@ class Settings(BaseSettings):
     # supplies the audit principal for approvals.
     api_operator_user_id: int | None = Field(default=None, ge=1)
     max_iterations: int = Field(default=4, ge=1, le=10)
-    max_dev_steps: int = Field(default=60, ge=1, le=200)
+    max_dev_steps: int = Field(default=36, ge=1, le=200)
+    # A separate stall ceiling prevents repetitive agent actions from consuming the whole task budget.
+    max_developer_stall_steps: int = Field(default=8, ge=2, le=30)
+    # Developer prompts are narrower than the global LLM prompt budget.
+    max_developer_context_chars: int = Field(default=100_000, ge=20_000, le=180_000)
+    # Self-improvement lead context is intentionally compact and target-focused.
+    self_task_context_chars: int = Field(default=45_000, ge=10_000, le=120_000)
     max_llm_calls: int = Field(default=150, ge=1, le=1000)
     max_total_tokens: int = Field(default=600_000, ge=1)
     max_cost_usd: float = Field(default=5.0, gt=0)
