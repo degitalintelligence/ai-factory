@@ -1,0 +1,9 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+# Explicitly attached only to the credential-free AI Factory runner container.
+# Bubblewrap still isolates each child filesystem, PID tree and offline network.
+# This grants user-namespace setup without changing Ubuntu's global restrictions.
+profile ai-factory-sandbox flags=(unconfined) {
+  userns,
+}

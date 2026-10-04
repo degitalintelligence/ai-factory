@@ -1,81 +1,102 @@
-# AI Factory V0.1
+# AI Factory V0.2
 
-General-purpose autonomous software engineering factory.
+An operating engine for building software from Telegram requirements: **repository-aware planning → implementation → isolated tests → independent review → repair → GitHub PR → explicit, commit-bound Coolify deployment**.
 
-## Boundary
+AI Factory is the engine. LioBot, Quant Factory and other products belong in their own repositories. The default target remains `degitalintelligence/telegram-lab`.
 
-AI Factory is the software-building system itself. Domain products such as Quant Factory are separate repositories/products created by AI Factory and must not be embedded into this core.
+## What works
 
-## V0.1 flow
+- Persistent PostgreSQL queue, task events, plans, diffs, test reports and review evidence.
+- Atomic claims, worker leases/heartbeats, bounded restart recovery, one active task per repository.
+- Multiple registered projects with explicit repository, branch, Python/Node test profile and deployment policy.
+- Separate OpenRouter models for Lead, Developer and Reviewer. Structured responses, bounded retries, token/call/time budgets and provider-reported cost tracking.
+- Developer tools: inspect, search, replace/write/delete files, review a complete diff, run sandbox checks.
+- Deterministic gates: failing/absent tests, generated databases, credentials, symlink escapes, changed source after review, incomplete acceptance mapping and oversized diff cannot be approved by a model.
+- High-risk plan approval bound to its hash; clarification, cancellation, retry and feedback to an existing open PR.
+- Full target deployment pack when requested: Dockerfile, Compose, environment example, persistent volumes, healthchecks, deployment/backup/rollback runbook.
+- Optional deployment of an **existing registered Coolify application** after an explicit command, merged PR, matching reviewed tree, matching full commit SHA and successful existing GitHub checks.
+- Private Telegram allowlist, task ownership, optional bearer-protected HTTP API, health/readiness endpoints.
 
-Telegram requirement -> Lead plan -> Developer edits a target repository -> restricted tests -> independent Reviewer -> up to MAX_ITERATIONS -> branch + GitHub pull request.
+## Upgrade an existing Coolify deployment
 
-The first target repository is `degitalintelligence/telegram-lab`.
+Read [docs/OPERATIONS.md](docs/OPERATIONS.md) before switching branches. Keep the existing Compose resource and volume names. The startup migration is additive; old task rows remain intact.
 
-## Safety boundaries in V0.1
+Keep your existing model/API/GitHub/PostgreSQL values. Add:
 
-- No production deployment.
-- No Docker socket access.
-- No access to other repositories unless the GitHub credential grants it.
-- Developer commands are allowlisted to pytest and Python compile checks.
-- High-risk tasks stop automatically.
-- Review/fix loops are capped.
-- Human merges the pull request.
+```dotenv
+TELEGRAM_ALLOWED_USER_IDS=YOUR_NUMERIC_USER_ID
+SANDBOX_TOKEN=AN_INDEPENDENT_RANDOM_SECRET
+```
 
-## Coolify deployment
+Generate a secret locally using `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Put it in Coolify, never in a task or Git.
 
-Create a Docker Compose resource from this repository.
+On the Ubuntu Docker host, install the supplied runner-specific AppArmor profile once: `sudo bash scripts/install-sandbox-profile.sh` from this checkout. It permits the runner to create isolated namespaces without disabling the host-wide restrictions.
 
-Set these environment variables in Coolify:
+The new `sandbox` service must become healthy before the control service starts. Its namespace check fails closed if the host cannot provide isolation. Neither service mounts a Docker socket. Do not run generated Python directly in the credential-bearing control container.
 
-- OPENROUTER_API_KEY
-- TELEGRAM_BOT_TOKEN
-- GITHUB_TOKEN
-- GITHUB_OWNER=degitalintelligence
-- LAB_REPO=telegram-lab
-- LEAD_MODEL
-- DEVELOPER_MODEL
-- REVIEWER_MODEL
-- POSTGRES_PASSWORD
-- DATABASE_URL=postgresql+asyncpg://ai_factory:<same-password>@postgres:5432/ai_factory
-- MAX_ITERATIONS=3
-- MAX_DEV_STEPS=30
+## First useful task
 
-Do not commit secrets.
+```text
+/new lab | Siapkan LioBot end-to-end di repository ini. Pertahankan fitur /hello dan /todo. Tambahkan Dockerfile non-root, docker-compose.yaml, .env.example, healthcheck, volume data agar todo tetap ada setelah container dibuat ulang, serta docs/DEPLOYMENT.md yang menjelaskan environment, backup dan rollback. Buat test add/list, isolasi user, persistence, dan kegagalan input. Jangan menaruh data runtime atau token di Git.
+```
 
-## GitHub token scope
+The bot replies with the exact project, repository and branch. Follow progress with `/status`, `/logs` and `/report`. This command creates a reviewable PR, and does not silently merge or deploy it.
 
-For V0.1, use a fine-grained token restricted to the lab repository. Minimum practical permissions:
+## Project registry
 
-- Contents: Read and write
-- Pull requests: Read and write
-- Metadata: Read
+Configure `PROJECTS_JSON` in Coolify (empty retains the default lab):
 
-Do not grant access to production repositories yet.
+```json
+{
+  "lab": {
+    "repo": "degitalintelligence/telegram-lab",
+    "base_branch": "main",
+    "profile": "python",
+    "require_deployment": true,
+    "install_dependencies": true
+  }
+}
+```
 
-## Telegram commands
+Dependency installation requires both project `install_dependencies: true` and server `SANDBOX_INSTALL_DEPS=true`. Python installs wheels only; Node uses a committed lockfile and `npm ci --ignore-scripts`. Tests themselves have no network. Projects requiring native build/install scripts need a prebuilt, operator-maintained sandbox image.
 
-`/start` - help
+To add another product, create its repository with an initial commit, grant the fine-grained GitHub token access and register its alias. Do not give an LLM authority to change this registry. Project policies are snapshotted at task creation; a changed/revoked policy stops pending work.
 
-`/new <requirement>` - create and execute a task
+## Commands
 
-`/status <task_id>` - inspect task status
+| Command | Purpose |
+|---|---|
+| `/new <requirement>` | Queue a task in `lab` |
+| `/new <alias> \| <requirement>` | Queue a task in a registered project |
+| `/projects`, `/tasks` | Repository registry and your recent queue |
+| `/status <id>`, `/logs <id>`, `/report <id>` | State, events, and downloadable evidence |
+| `/plan <id>` | Inspect the plan and its approval hash |
+| `/answer <id> <answer>` | Clarify a blocked requirement; replan |
+| `/approve <id> <hash>` | Approve that specific high-risk plan |
+| `/cancel <id>` | Request cancellation; cannot undo an already published PR |
+| `/retry <id>` | Retry failed/cancelled work; lifetime LLM usage is retained |
+| `/feedback <id> <revision>` | Replan, test and review changes on the same open PR |
+| `/deploy <id> <40-character-merged-SHA>` | Explicitly deploy a registered, reviewed release |
+| `/deployment <id>` | Reconcile Coolify status; success of business behavior still needs smoke testing |
 
-## First acceptance test
+## Local development and tests
 
-Send:
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+python -m pytest -q
+ruff check app sandbox tests scripts
+```
 
-`/new Tambahkan command /hello yang membalas "Halo, <nama user>!" dan buat test-nya.`
+PostgreSQL integration uses `TEST_POSTGRES_URL` pointing **only to a disposable test database**; the integration test recreates its tables. CI supplies PostgreSQL 16 and a separate real Docker sandbox smoke test. Unit/integration tests stub external model/GitHub/Coolify calls and incur no API spend.
 
-Expected outcome:
+For local API development, set `WORKER_ENABLED=false`, leave the Telegram token empty and use an `API_TOKEN`. Run `uvicorn app.main:app --port 8080`. Workers in a real deployment require PostgreSQL and a healthy sandbox.
 
-1. Lead creates a bounded plan.
-2. Developer inspects Telegram Lab and changes code.
-3. Tests run in the restricted workspace.
-4. Reviewer independently reviews diff + test output.
-5. If approved, AI Factory pushes a task branch and creates a PR.
-6. You review/merge manually.
+## Current limits
 
-## Health check
+V0.2 is a bounded software engine, not an unlimited autonomous team. Source snapshots are UTF-8, up to 200 KB per file and 4 MB/2,500 files total, with a 110 KB complete review diff. Binary assets, empty repositories, monorepo-scale changes, arbitrary shells, networked tests, infrastructure provisioning and automatically creating Coolify resources are outside this release. Split larger work into separate tasks. No automatic merge or production rollback is performed.
 
-GET `/health` returns the running version.
+Deployment validation covers file structure and review, not an actual Docker build of every target. Target CI and post-deployment smoke tests remain necessary. Reported dollar limits are checked between model calls and can overshoot by one call; if a provider omits cost, `/status` marks the total partial and token/call/time limits still apply. Set an OpenRouter key credit limit for a hard spend ceiling.
+
+See [architecture](docs/ARCHITECTURE.md), [operations and upgrade](docs/OPERATIONS.md), and [acceptance/verification](docs/VERIFICATION.md).
