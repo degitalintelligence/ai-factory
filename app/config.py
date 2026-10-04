@@ -19,6 +19,10 @@ class Project(BaseModel):
     def validate_project(self):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.repo):
             raise ValueError("repo must be owner/name")
+        # The owner/name character class also matches "." and "..", which name a parent
+        # directory rather than a repository.
+        if any(part in {".", ".."} for part in self.repo.split("/")):
+            raise ValueError("repo owner and name must not be '.' or '..'")
         if self.profile not in {"python", "node"}:
             raise ValueError("profile must be python or node")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", self.base_branch) or ".." in self.base_branch:
@@ -140,8 +144,13 @@ class Settings(BaseSettings):
 
     def validate_runtime(self):
         self.projects()
+        self.role_clearance()
         if self.telegram_bot_token and not self.allowed_users():
             raise ValueError("TELEGRAM_ALLOWED_USER_IDS is required; bot access fails closed")
+        if self.api_token and self.api_operator_user_id is None:
+            # An approval or deployment decided through HTTP would otherwise be recorded
+            # with no principal, making the audit trail unattributable.
+            raise ValueError("API_OPERATOR_USER_ID is required when API_TOKEN is set")
         if self.worker_enabled:
             missing = [
                 name

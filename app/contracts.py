@@ -10,7 +10,7 @@ import json
 from app.config import settings
 from app.deployment import DeploymentService
 from app.schemas import CLEARANCE, DecisionRequest, TaskKind
-from app.store import store
+from app.store import DEFAULT_TENANT, store
 
 TASK_ACTIONS = ("cancel", "retry", "approve", "answer", "feedback")
 DEPLOY_ACTIONS = ("deploy", "deployment")
@@ -111,9 +111,11 @@ async def resolve_decision(decision_id, phrase, user_id=None):
     return await store.resolve_decision(decision_id, phrase, user_id=user_id)
 
 
-async def context_slice(keys, role, scope=None, limit=25):
+async def context_slice(keys, role, scope=None, limit=25, owner=None, tenant=DEFAULT_TENANT):
     """Render a memory slice for a prompt. Provenance travels with every item."""
-    items, truncated = await store.recall(keys, role=role, scope=scope, limit=limit)
+    items, truncated = await store.recall(
+        keys, role=role, scope=scope, limit=limit, owner=owner, tenant=tenant
+    )
     lines = [
         f"- {i.key} = {i.value} [{i.label}; source={i.source}; confidence={i.confidence:g}]" for i in items
     ]
@@ -123,9 +125,9 @@ async def context_slice(keys, role, scope=None, limit=25):
     return "CONTEXT SLICE (permission-filtered, verify before relying on it):\n" + "\n".join(lines) + note
 
 
-async def remember(item, owner=None, task_id=None):
+async def remember(item, owner=None, task_id=None, tenant=DEFAULT_TENANT):
     """Store a memory through the contract so every channel applies the same rules."""
-    return await store.remember(item, owner=owner, task_id=task_id)
+    return await store.remember(item, owner=owner, task_id=task_id, tenant=tenant)
 
 
 async def propose_clearance(changes, rationale, task_id=None, priority="high", risk_level="high"):

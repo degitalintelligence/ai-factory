@@ -710,7 +710,7 @@ model prompts or code comments.
 | V0.3 minimum data model and `/v1` API | ROADMAP | Add only when the milestone that needs it is active, with migration and contract tests. Business logic must remain usable without Telegram. |
 | Final Dedi interface | OPEN | Telegram, dashboard, or both; all adapters share one core inbox/state. |
 | Context/memory backend | OPEN | Choose only with permission, provenance, freshness, and retrieval tests. |
-| Memory tenant isolation key | OPEN | Decide whether free-text `scope` is the tenant boundary or `owner` becomes a real filter with a tenant or organization column before scoped memory is implemented. |
+| Memory tenant isolation key | RESOLVED | Dedi chose a real `tenant` column as the hard boundary plus `owner` as a real filter within one tenant. Every read, write, correction, retraction, and history lookup filters on tenant. A row owned by a person is visible only to that owner, unowned rows are shared inside the tenant, and a read with no principal returns shared memory only. Role clearance applies after the owner filter and never widens across it. The active-key uniqueness is `(tenant, key, scope)`; `owner` stays outside it, so one tenant holds one active value per key and scope. A tenant registry/mapping is still OPEN. |
 | Skill registry and Team Planner implementation | ROADMAP | Do not invent a generic platform before a concrete skill/task needs it. |
 | ai-factory self-target registry alias | OPEN | Add explicitly with branch, policy, budget, and approval rules before self-editing core. |
 | Domain skills beyond Engineering | ROADMAP | One domain at a time, with least-privilege connectors and staging evidence. |

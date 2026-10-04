@@ -40,9 +40,9 @@ that carries this document.
 ## 0. Remediation status — 2026-10-04
 
 Python 3.12.10 was installed, `.venv` created from `requirements-dev.txt`, and the suite was
-executed. **All five blockers and H1 are fixed, committed, and covered by regression tests.**
-The findings below are retained unchanged as the original record; this section is the
-current state.
+executed. **All five blockers plus H1 and H3 through H7 are fixed, committed, and covered by
+regression tests.** The findings below are retained unchanged as the original record; this
+section is the current state.
 
 | ID | Status | Commit | Regression coverage |
 |---|---|---|---|
@@ -53,14 +53,19 @@ current state.
 | B5 | FIXED | `bdc2ea3` | `test_post_publication_failure_is_not_reported_as_a_pass`, `test_post_publication_failure_reconciles_the_same_pr_on_retry` |
 | H1 | FIXED | `7de1edb` | `test_decision_and_task_transition_roll_back_together`, `test_repeated_identical_answer_does_not_duplicate_audit_events` |
 | H2 | PARTIAL — see below | `3aeeb66` | `test_idempotency_key_binds_the_full_request` |
-| H3–H9, M1–M7 | OPEN | — | Not started |
+| H3 | FIXED — Dedi's decision recorded below | this branch | 7 tenant/owner tests in `tests/test_memory.py` |
+| H4 | FIXED | this branch | `test_api_refuses_a_valid_token_with_no_principal`, `test_startup_refuses_an_api_token_without_a_principal` |
+| H5 | FIXED | this branch | `test_project_repo_cannot_traverse_out_of_the_registry` (7 parametrized cases) |
+| H6 | FIXED | this branch | `test_common_credential_shapes_are_redacted` (6 shapes), `test_ordinary_prose_is_not_mangled_by_redaction`, `test_credentials_in_provenance_fields_are_refused` |
+| H7 | FIXED | this branch | `test_startup_refuses_invalid_role_clearance` |
+| H8, H9, M1–M7 | OPEN | — | Not started |
 
 Verification at the tip of this branch:
 
 ```text
 ruff check app sandbox tests scripts      -> All checks passed
 ruff format --check app sandbox tests scripts -> 40 files already formatted
-python -m pytest -q                       -> 211 passed, 1 failed, 1 skipped
+python -m pytest -q                       -> 241 passed, 1 failed, 1 skipped
 ```
 
 The single failure is `tests/test_security_workspace.py::test_symlink_escape_and_git_write_blocked`,
@@ -68,6 +73,34 @@ which cannot create a symlink on Windows without Developer Mode or
 `SeCreateSymbolicLinkPrivilege` (`OSError: [WinError 1314]`). It is a pre-existing
 environment limitation, not a code regression, and it was deliberately not skipped or
 weakened. The 1 skip is the PostgreSQL integration test, which requires `TEST_POSTGRES_URL`.
+
+**H3 follows Dedi's explicit decision: `owner` becomes a real filter and a `tenant` column is
+added.** `tenant` is the hard boundary and is applied to every read, write, correction,
+retraction, and history lookup. `owner` narrows further inside one tenant: a row owned by a
+person is visible only to that owner, an unowned row is shared within the tenant, and a read
+with no principal returns only unowned shared memory. Role clearance cannot reach across
+the owner boundary — it is applied after the owner filter, so a permissive role still cannot
+read another person's memory. The partial unique index is now
+`ON memory_items (tenant, key, scope) WHERE state = 'active'`, so two tenants may hold the
+same active key while `owner` deliberately stays outside the index: one tenant still has one
+active value per `(key, scope)`, and a differing value must be corrected explicitly.
+
+The additive migration adds `tenant` to an existing `memory_items` table with
+`DEFAULT 'default'`, so historical rows become tenant `default` instead of being dropped or
+left null. `init_db()` is idempotent and the upgrade test runs it twice.
+
+**H4 fails closed at both layers.** `Settings.validate_runtime()` now refuses to start when
+`API_TOKEN` is set without `API_OPERATOR_USER_ID`, and `authorize()` independently returns
+401 for that case so the request cannot be authorized even if startup validation is bypassed.
+The principal continues to come from the server-side credential, never from the request body.
+
+**H6 broadens redaction and extends it to provenance.** Added GitLab, Slack, AWS access key
+ID and temporary key, Google API key, DigitalOcean, JWT, generic
+`api_key/secret/token/password/access_key` assignment, `Authorization: Bearer|Basic|Token`,
+and PEM public key patterns. The generic assignment pattern requires a value of at least eight
+non-space characters so ordinary prose is not mangled, which is asserted by
+`test_ordinary_prose_is_not_mangled_by_redaction`. `remember()` and `correct_memory()` now
+reject credentials in `value`, `source`, and `evidence_ref`, not only in the value.
 
 **H2 is intentionally partial.** The idempotency comparison now binds `requirement`,
 `project`, `chat_id`, `user_id`, `kind`, and the serialized self-improvement brief. It

@@ -160,3 +160,41 @@ def test_runtime_rejects_open_telegram_access():
     )
     with pytest.raises(ValueError, match="TELEGRAM_ALLOWED_USER_IDS"):
         config.validate_runtime()
+
+
+@pytest.mark.parametrize("repo", ["../other", "owner/..", ".", "..", "./repo", "owner/.", "owner/../escape"])
+def test_project_repo_cannot_traverse_out_of_the_registry(repo):
+    """'.' and '..' satisfy the owner/name character class but name no repository."""
+    with pytest.raises(ValueError, match="repo"):
+        Project(repo=repo)
+
+
+def test_project_repo_accepts_an_ordinary_owner_and_name():
+    assert Project(repo="degitalintelligence/telegram-lab").repo == "degitalintelligence/telegram-lab"
+
+
+@pytest.mark.parametrize(
+    "leaked",
+    [
+        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij",
+        "password = hunter2hunter2",
+        "glpat-ABCDEFGHIJKLMNOPQRST",
+        "xoxb-1234567890-abcdefghijkl",
+        "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+    ],
+)
+def test_common_credential_shapes_are_redacted(leaked):
+    assert "[REDACTED]" in redact(leaked), leaked
+    assert secret_present(leaked)
+
+
+def test_ordinary_prose_is_not_mangled_by_redaction():
+    """Redaction must not destroy normal engineering text."""
+    for line in (
+        "Set the token: the model returns one per request",
+        "password: ask the operator to rotate it",
+        "See https://example.com/guide for the API reference",
+        "The secret sauce is idempotency",
+    ):
+        assert redact(line) == line
