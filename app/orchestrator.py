@@ -4,7 +4,7 @@ import json
 import logging
 import re
 
-from app.agents import developer_loop, lead_plan, review_change
+from app.agents import developer_loop, lead_plan, normalize_lead_plan, review_change
 from app.config import Project, settings
 from app.gates import deployment_issues, post_publication_issues, quality_issues
 from app.github_api import GitHubAPI
@@ -215,7 +215,12 @@ async def run_task(task_id, notify=None, owner=None):
         context, baseline = await repository_context(workspace, task)
         await store.artifact(task_id, "baseline", baseline)
         if task.plan_json:
-            plan = LeadPlan.model_validate_json(task.plan_json)
+            raw_plan = task.plan_json
+            plan = normalize_lead_plan(LeadPlan.model_validate_json(raw_plan), task.requirement)
+            task.plan_json = plan.model_dump_json()
+            if task.plan_json != raw_plan:
+                await store.update(task_id, owner, plan_json=task.plan_json)
+                await store.artifact(task_id, "plan", task.plan_json)
         else:
             await transition("planning", "Lead is analysing requirements and repository context")
             plan = await lead_plan(task.requirement, context)
@@ -238,6 +243,98 @@ async def run_task(task_id, notify=None, owner=None):
                 f"{reason} ready for review. Decision Inbox has the approval card. Approve the exact plan with /decide <decision-id> approve or /approve {task_id} {plan_hash(task.plan_json)[:12]}",
             )
             return
+        if plan.review_only:
+            await transition("testing", "Running mandatory tests for review-only task")
+            diff = await asyncio.to_thread(workspace.diff)
+            digest = await asyncio.to_thread(workspace.digest)
+            files = await asyncio.to_thread(workspace.snapshot)
+            report = await asyncio.to_thread(workspace.default_tests)
+            new_tests = await asyncio.to_thread(workspace.changed_test_files, diff)
+            standalone = await asyncio.to_thread(workspace.standalone_tests, new_tests)
+            issues = []
+            if await asyncio.to_thread(workspace.digest) != digest:
+                issues.append("Source changed during tests")
+            if diff.strip():
+                issues.append("Review-only task produced an implementation diff")
+            if plan.deployment_required:
+                issues += deployment_issues(files, plan.persistence_required)
+            await store.artifact(task_id, "tests", report.model_dump_json())
+            await store.artifact(
+                task_id,
+                "test_environment",
+                json.dumps(
+                    report.environment
+                    or {
+                        "runner": "isolated sandbox",
+                        "test_network": "disabled by sandbox policy",
+                        "credentials": "not mounted",
+                        "telegram_polling": "not started",
+                    },
+                    sort_keys=True,
+                ),
+            )
+            await store.artifact(
+                task_id,
+                "standalone_tests",
+                json.dumps(
+                    {"test_files": new_tests, "report": standalone.model_dump() if standalone else None}
+                ),
+            )
+            await store.artifact(task_id, "diff", diff)
+            await store.artifact(
+                task_id,
+                "review_only",
+                json.dumps({"no_mutation": not bool(diff.strip()), "pr_created": False}, sort_keys=True),
+            )
+            await transition("reviewing", "Independent review: requirements, tests, security and deployment")
+            review = await review_change(
+                requirement=task.requirement,
+                plan=plan,
+                diff=diff,
+                test_output=report.model_dump_json(),
+                standalone_output=(
+                    json.dumps({"test_files": new_tests, "report": standalone.model_dump()})
+                    if standalone
+                    else "No new or changed test files"
+                ),
+                hygiene_issues=issues,
+                context=context[:22000],
+            )
+            issues = quality_issues(
+                plan,
+                report,
+                review,
+                diff,
+                issues,
+                standalone,
+                allow_no_diff=True,
+            )
+            await store.artifact(task_id, "review", review.model_dump_json())
+            await store.artifact(
+                task_id,
+                "gates",
+                json.dumps(
+                    {"passed": review.approved and not issues, "issues": issues, "source_digest": digest}
+                ),
+            )
+            if not review.approved or issues:
+                feedback = list(
+                    dict.fromkeys(issues + review.issues + ([] if review.approved else [review.summary]))
+                )
+                await store.update(task_id, owner, feedback_json=json.dumps(feedback))
+                await store.event(task_id, "rejected", "\n".join(feedback))
+                details = "\n- ".join(feedback) or "Independent review did not approve the unchanged baseline"
+                raise RuntimeError(
+                    "Review-only task found a correction or failed an evidence gate; "
+                    "create a bounded implementation task:\n- " + details
+                )
+            await transition(
+                "reviewed",
+                f"Review complete; no correction required. {review.summary}",
+                review_digest=digest,
+            )
+            return
+
         feedback = json.loads(task.feedback_json)
         for iteration in range(task.iteration + 1, settings.max_iterations + 1):
             await transition(
