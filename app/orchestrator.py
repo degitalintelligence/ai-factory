@@ -225,6 +225,7 @@ async def run_task(task_id, notify=None, owner=None):
             await transition("planning", "Lead is analysing requirements and repository context")
             plan = await lead_plan(task.requirement, context)
             plan.deployment_required = plan.deployment_required or policy.require_deployment
+            plan = normalize_lead_plan(plan, task.requirement)
             task.plan_json = plan.model_dump_json()
             await store.update(task_id, owner, plan_json=task.plan_json)
             await store.artifact(task_id, "plan", task.plan_json)
