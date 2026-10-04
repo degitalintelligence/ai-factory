@@ -366,6 +366,8 @@ class Store:
             task = await s.get(Task, task_id, with_for_update=True)
             if not task:
                 raise ValueError("Task not found")
+            if task.status == "reviewed":
+                raise ValueError("Reviewed task is terminal; create a fresh task")
             if task.status == "superseded":
                 raise ValueError("Superseded task is terminal; create a fresh task")
             if task.status in {"pr_created", "completed"}:

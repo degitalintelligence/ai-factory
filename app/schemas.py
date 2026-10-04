@@ -30,6 +30,7 @@ class LeadPlan(BaseModel):
     risk: Literal["low", "medium", "high"] = "low"
     deployment_required: bool = False
     persistence_required: bool = False
+    review_only: bool = False
     # Criteria verifiable only once the PR exists (PR body, PR URL, published CI/deployment records).
     post_publication_criteria: list[int] = Field(default_factory=list)
 

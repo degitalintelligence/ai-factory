@@ -172,6 +172,49 @@ async def test_end_to_end_real_git_mocked_external_services(db, repo, engine_fak
     assert repo[1]("status", "--porcelain") == ""
 
 
+async def test_review_only_completes_without_mutation_or_pr(db, engine_fakes, monkeypatch):
+    state, refs = engine_fakes
+
+    async def review_plan(*args):
+        return LeadPlan(
+            objective="Review current behavior",
+            acceptance_criteria=["Existing behavior remains valid"],
+            risk="low",
+            review_only=False,
+        )
+
+    async def developer_should_not_run(**kwargs):
+        raise AssertionError("developer loop must not run for review-only tasks")
+
+    monkeypatch.setattr(orchestrator, "lead_plan", review_plan)
+    monkeypatch.setattr(orchestrator, "developer_loop", developer_should_not_run)
+    task = await execute(
+        db,
+        (
+            await db.create(
+                "Re-review current main after the merge. "
+                "Create a PR only if a correction is required. Do not change application behavior."
+            )
+        ).id,
+    )
+
+    assert task.status == "reviewed"
+    assert state["prs"] == state["pushes"] == state["develop"] == 0
+    assert task.head_sha is None
+    artifacts = await db.artifacts(task.id)
+    assert {a.kind for a in artifacts} >= {
+        "baseline",
+        "plan",
+        "tests",
+        "test_environment",
+        "standalone_tests",
+        "diff",
+        "review_only",
+        "review",
+        "gates",
+    }
+
+
 async def test_test_failure_cannot_be_overruled_by_reviewer(db, engine_fakes):
     state, refs = engine_fakes
     state["test_exit"] = 5  # pytest: no tests collected

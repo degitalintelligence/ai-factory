@@ -72,6 +72,8 @@ For a test-only or otherwise non-deployable project, send `/publish <task-id> <f
 
 If the PR was merged but the base branch advanced before release, do not reuse the stale SHA. Send `/supersede <task-id> <reason>`. The engine verifies that the reviewed PR was merged unchanged, that the current base still contains that merge, records an auditable `superseded` terminal state without publishing or deploying, and releases the repository reservation for a fresh bounded review.
 
+Review-only/no-op requests are supported: when the requirement explicitly allows no correction, the engine runs mandatory tests and independent review without forcing a file mutation. A passing result ends in `reviewed`; no commit, push, PR, or deployment is created. If a correction is found, the task fails with evidence and a separate bounded implementation task is required.
+
 If status is `unknown`, inspect Coolify's deployment history before doing anything else; the record intentionally blocks automatic duplicate submission. If a deployment failed, diagnose logs and prepare a corrected new task. Do not treat an HTTP response or queued UUID as successful deployment.
 
 ## Backup, retention and rollback

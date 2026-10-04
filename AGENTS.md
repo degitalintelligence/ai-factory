@@ -425,6 +425,7 @@ received
 -> pr_created
 -> completed (for non-deployable projects after /publish)
 -> superseded (stale merged PR closed before fresh review)
+-> reviewed (review-only task completed without a correction or PR)
 -> deployment_pending (optional)
 -> deploying
 -> deployed / deployment_unknown / deployment_failed
@@ -440,6 +441,7 @@ Rules:
 - Testing enters reviewing only after mandatory test evidence is persisted.
 - Rejected review may return to developing only while budget and iteration limits remain.
 - Publishing requires Reviewer approval and zero deterministic gate issues.
+- Review-only tasks may end in `reviewed` only after mandatory tests and independent review; they must not invent a mutation or PR.
 - PR publication reconciles an existing branch/PR after lost responses; it does not create duplicates.
 - Deployment requires a human command with a full 40-character merged SHA.
 - deployment_unknown is not auto-retried.

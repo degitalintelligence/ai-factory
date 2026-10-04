@@ -19,6 +19,24 @@ POST_PUBLICATION_MARKERS = (
 )
 
 
+def review_only_request(requirement: str) -> bool:
+    """Recognize an explicit audit request that must not invent a code change."""
+    text = requirement.casefold()
+    review_language = any(
+        marker in text for marker in ("re-review", "review current", "review-only", "review only")
+    )
+    no_change_language = any(
+        marker in text
+        for marker in (
+            "only if a correction",
+            "only if correction",
+            "do not change",
+            "no correction required",
+        )
+    )
+    return review_language and no_change_language
+
+
 def normalize_lead_plan(plan: LeadPlan, requirement: str = "") -> LeadPlan:
     """Make publication criteria, skill selection, and control gates explicit."""
     deferred = set(plan.post_publication_criteria)
@@ -51,6 +69,7 @@ def normalize_lead_plan(plan: LeadPlan, requirement: str = "") -> LeadPlan:
             "approval_gates": list(dict.fromkeys(approval_gates)),
             "budget": budget,
             "rollback_plan": rollback,
+            "review_only": plan.review_only or review_only_request(requirement),
         }
     )
 
@@ -82,6 +101,7 @@ Ask questions only for missing decisions that block correctness; use conservativ
 Mark destructive migrations, money movement, credential/access changes, production changes, or broad rewrites high risk.
 Set deployment_required when Docker/Compose/Coolify/deployment or a deployable complete product is requested.
 Set persistence_required for stored user data; require restart/recreation and user-isolation tests.
+Set review_only=true for an explicit audit or re-review request that permits no changes and creates a PR only if a correction is found.
 LioBot is the product implemented by this engine, not a separate target application.
 Quant Factory, Kedaya, and other business products remain separate registered products.
 Return a plan that keeps authority separate from confidence. The operator-configured budget and policy remain hard ceilings.
