@@ -8,6 +8,8 @@ SECRET_PATTERNS = [
     r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b",
     r"\bsk-(?:or-v1-)?[A-Za-z0-9_-]{20,}\b",
     r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b",
+    # scheme://user:password@host — credentials embedded in connection strings.
+    r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@",
 ]
 
 

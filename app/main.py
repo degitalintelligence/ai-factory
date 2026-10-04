@@ -1,4 +1,5 @@
 import hmac
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -8,8 +9,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.config import settings
+from app.contracts import decision_inbox, perform_action, raise_decision, resolve_decision
 from app.db import engine, init_db, utcnow
-from app.schemas import TaskRequest
+from app.schemas import DecisionRequest, TaskRequest
 from app.store import store
 from app.telegram_control import build_telegram_app
 from app.worker import WorkerPool
@@ -55,11 +57,13 @@ async def lifespan(app):
         await engine.dispose()
 
 
-app = FastAPI(title="AI Factory", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="LioBot by AI Factory", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
 def authorize(authorization: str = Header(default="")):
-    if not settings.api_token or not hmac.compare_digest(authorization, f"Bearer {settings.api_token}"):
+    if not settings.api_token or not hmac.compare_digest(
+        authorization.encode(), f"Bearer {settings.api_token}".encode()
+    ):
         raise HTTPException(401, "Unauthorized")
 
 
@@ -168,12 +172,56 @@ class ActionRequest(BaseModel):
 @app.post("/tasks/{task_id}/{action}", dependencies=[Depends(authorize)])
 async def action(task_id: int, action: str, request: ActionRequest):
     try:
-        if action == "cancel":
-            await store.cancel(task_id)
-        elif action in {"retry", "approve", "answer", "feedback"}:
-            await store.resume(task_id, action, request.message)
-        else:
-            raise ValueError("Unknown action")
+        return {"message": await perform_action(task_id, action, request.message)}
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"accepted": True}
+
+
+def decision_view(d):
+    return {
+        "id": d.id,
+        "task_id": d.task_id,
+        "project": d.project,
+        "kind": d.kind,
+        "title": d.title,
+        "situation": d.situation,
+        "why_now": d.why_now,
+        "options": json.loads(d.options_json or "[]"),
+        "impact": json.loads(d.impact_json or "[]"),
+        "risk": json.loads(d.risk_json or "[]"),
+        "recommendation": d.recommendation,
+        "evidence": json.loads(d.evidence_json or "[]"),
+        "missing_information": d.missing_information,
+        "rollback": d.rollback,
+        "required_action": d.required_action,
+        "priority": d.priority,
+        "risk_level": d.risk_level,
+        "state": d.state,
+        "expires_at": d.expires_at,
+        "decided_by": d.decided_by,
+        "decided_at": d.decided_at,
+        "created_at": d.created_at,
+    }
+
+
+@app.post("/decisions", dependencies=[Depends(authorize)], status_code=201)
+async def new_decision(card: DecisionRequest):
+    return decision_view(await raise_decision(card))
+
+
+@app.get("/decisions", dependencies=[Depends(authorize)])
+async def decisions(state: str | None = None, project: str | None = None):
+    return [decision_view(d) for d in await decision_inbox(state=state, project=project)]
+
+
+class DecisionAnswer(BaseModel):
+    answer: str = Field(min_length=1, max_length=200)
+    user_id: int | None = None
+
+
+@app.post("/decisions/{decision_id}", dependencies=[Depends(authorize)])
+async def answer_decision(decision_id: int, request: DecisionAnswer):
+    try:
+        return decision_view(await resolve_decision(decision_id, request.answer, request.user_id))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc

@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     command_timeout_seconds: int = Field(default=180, ge=5, le=600)
     coolify_url: str = ""
     coolify_token: str = ""
+    role_clearance_json: str = ""
 
     @model_validator(mode="after")
     def database_credentials(self):
@@ -83,6 +84,22 @@ class Settings(BaseSettings):
         ):
             raise ValueError("PROJECTS_JSON must map project aliases to policies")
         return {k: Project.model_validate(v) for k, v in data.items()}
+
+    def role_clearance(self) -> dict[str, str]:
+        """Which sensitivity each agent role may read.
+
+        Configuration, not code: the AI Lead may propose a change, but it is applied
+        only after Dedi's approval, so it travels through the same decision path as any
+        other policy change. Unknown values fail closed rather than widening access.
+        """
+        defaults = {"lead": "confidential", "developer": "internal", "reviewer": "internal"}
+        data = json.loads(self.role_clearance_json) if self.role_clearance_json else defaults
+        valid = {"public", "internal", "confidential", "restricted"}
+        if not isinstance(data, dict) or not data:
+            raise ValueError("ROLE_CLEARANCE_JSON must map agent roles to a sensitivity level")
+        if any(not isinstance(v, str) or v not in valid for v in data.values()):
+            raise ValueError(f"ROLE_CLEARANCE_JSON values must be one of {sorted(valid)}")
+        return data
 
     def allowed_users(self) -> set[int]:
         return {int(x.strip()) for x in self.telegram_allowed_user_ids.split(",") if x.strip()}

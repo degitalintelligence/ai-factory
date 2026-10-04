@@ -6,7 +6,16 @@ from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.db import ACTIVE, Artifact, Event, SessionLocal, Task, utcnow
+from app.db import ACTIVE, Artifact, Decision, Event, MemoryItem, SessionLocal, Task, utcnow
+from app.schemas import (
+    CLEARANCE,
+    DECISION_PHRASES,
+    OUTCOME_STATE,
+    DecisionState,
+    MemoryState,
+    MemoryView,
+    MemoryWrite,
+)
 from app.security import redact
 
 
@@ -30,7 +39,16 @@ class Store:
         async with self.sessions() as s:
             return await s.get(Task, task_id)
 
-    async def create(self, requirement, project="lab", chat_id=None, user_id=None, idempotency_key=None):
+    async def create(
+        self,
+        requirement,
+        project="lab",
+        chat_id=None,
+        user_id=None,
+        idempotency_key=None,
+        kind="engineering",
+        brief=None,
+    ):
         requirement = requirement.strip()
         if not 5 <= len(requirement) <= 20000:
             raise ValueError("Requirement must contain 5–20000 characters")
@@ -39,9 +57,33 @@ class Store:
         policy = settings.projects().get(project)
         if policy is None:
             raise ValueError("Unknown project alias; use /projects")
+        if kind == "self_improvement" and brief is None:
+            raise ValueError("self_improvement tasks require a SelfImprovementBrief")
         async with self.sessions() as s:
+            # An idempotent retry must return the original task even while it is active.
+            if idempotency_key:
+                existing = await s.scalar(select(Task).where(Task.idempotency_key == idempotency_key))
+                if existing is not None:
+                    if (
+                        existing.requirement != requirement
+                        or existing.project != project
+                        or existing.user_id != user_id
+                    ):
+                        raise ValueError("Idempotency key already belongs to a different request")
+                    return existing
+            # One active task per repository is the default safety policy.
+            running = await s.scalar(
+                select(Task)
+                .where(Task.repo == policy.repo, Task.status.in_(ACTIVE), Task.cancel_requested.is_(False))
+                .limit(1)
+            )
+            if running:
+                raise ValueError(
+                    f"One active task per repository; task #{running.id} is still {running.status} on {policy.repo}"
+                )
             task = Task(
                 requirement=requirement,
+                kind=kind,
                 project=project,
                 repo=policy.repo,
                 base_branch=policy.base_branch,
@@ -64,6 +106,10 @@ class Store:
             await s.refresh(task)
             task.branch = f"ai-factory/task-{task.id}"
             s.add(Event(task_id=task.id, kind="received", message=f"Queued for {task.repo}"))
+            if brief is not None:
+                s.add(
+                    Artifact(task_id=task.id, kind="self_improvement_brief", content=brief.model_dump_json())
+                )
             await s.commit()
             return task
 
@@ -261,6 +307,293 @@ class Store:
             task.lease_until = None
             task.recoveries = 0
             s.add(Event(task_id=task_id, kind=action, message=redact(message or action)))
+
+    async def create_decision(self, card):
+        """Persist a decision card. It never lives only in a channel message."""
+        async with self.sessions() as s:
+            decision = Decision(
+                task_id=card.task_id,
+                project=card.project,
+                kind=card.kind,
+                title=card.title,
+                situation=redact(card.situation),
+                why_now=redact(card.why_now),
+                options_json=json.dumps([o.model_dump() for o in card.options]),
+                impact_json=json.dumps([o.impact for o in card.options]),
+                risk_json=json.dumps([o.risk for o in card.options]),
+                recommendation=redact(card.recommendation),
+                evidence_json=json.dumps([redact(e) for e in card.evidence]),
+                missing_information=redact(card.missing_information),
+                rollback=redact(card.rollback),
+                required_action=card.required_action,
+                priority=card.priority,
+                risk_level=card.risk_level,
+                expires_at=card.expires_at,
+            )
+            s.add(decision)
+            await s.commit()
+            await s.refresh(decision)
+            if card.task_id:
+                s.add(
+                    Event(
+                        task_id=card.task_id,
+                        kind=card.kind,
+                        message=redact(f"Decision #{decision.id} requested: {card.title}"),
+                    )
+                )
+                await s.commit()
+            return decision
+
+    async def inbox(self, state=None, project=None, limit=50):
+        """List decisions newest first, filtered by state/project for the operator inbox."""
+        async with self.sessions() as s:
+            query = select(Decision).order_by(Decision.id.desc()).limit(limit)
+            if state:
+                query = query.where(Decision.state == str(state))
+            if project:
+                query = query.where(Decision.project == project)
+            return list(await s.scalars(query))
+
+    async def expire_stale_decisions(self):
+        """Mark past-expiry open decisions expired. Expiry is not a decision."""
+        now = utcnow()
+        async with self.sessions() as s, s.begin():
+            rows = list(
+                await s.scalars(
+                    select(Decision).where(Decision.state == DecisionState.OPEN, Decision.expires_at < now)
+                )
+            )
+            for row in rows:
+                row.state = DecisionState.EXPIRED
+            if rows:
+                await s.flush()
+            return len(rows)
+
+    async def resolve_decision(self, decision_id, phrase, user_id=None):
+        """Apply one decision outcome. Idempotent and auditable.
+
+        A repeated identical answer returns the stored decision without changing
+        state again. A conflicting answer after resolution is rejected.
+        """
+        outcome = DECISION_PHRASES.get(phrase.strip().lower())
+        if not outcome:
+            raise ValueError("Answer with one of: approve, reject, ask, defer")
+        async with self.sessions() as s:
+            decision = await s.get(Decision, decision_id, with_for_update=True)
+            if not decision:
+                raise ValueError("Decision not found")
+            target = OUTCOME_STATE[outcome]
+            if decision.state != DecisionState.OPEN:
+                if decision.state == target:
+                    return decision
+                raise ValueError(
+                    f"Decision #{decision_id} is already {decision.state}; start a new decision instead"
+                )
+            if decision.expires_at and decision.expires_at < utcnow():
+                # Persist the expiry before raising, otherwise the rollback keeps it open forever.
+                decision.state = DecisionState.EXPIRED
+                await s.commit()
+                raise ValueError("Decision expired; request a new one")
+            decision.state = target
+            decision.decided_by = user_id
+            decision.decided_at = utcnow()
+            if decision.task_id:
+                s.add(
+                    Event(
+                        task_id=decision.task_id,
+                        kind="decision",
+                        message=redact(f"Decision #{decision_id} -> {target} by {user_id}"),
+                    )
+                )
+            await s.commit()
+            await s.refresh(decision)
+            return decision
+
+    # --- Context and Memory Plane ---
+
+    async def remember(self, item: MemoryWrite, owner=None, task_id=None):
+        """Store one memory, superseding any earlier active version of the same key.
+
+        A correction never overwrites history: the old row is kept and marked superseded,
+        so what was previously believed stays auditable.
+        """
+        if redact(item.value) != item.value:
+            raise ValueError("Remove credentials before storing this as memory")
+        async with self.sessions() as s:
+            previous = list(
+                await s.scalars(
+                    select(MemoryItem)
+                    .where(MemoryItem.key == item.key, MemoryItem.state == MemoryState.ACTIVE)
+                    .with_for_update()
+                )
+            )
+            # A contradictory value for the same key is a conflict, not a silent overwrite.
+            if any(p.value != item.value for p in previous):
+                raise ValueError(
+                    f"Memory '{item.key}' already holds a different value; correct it explicitly"
+                )
+            if previous:
+                for row in previous:
+                    row.state = MemoryState.SUPERSEDED
+                version = max(p.version for p in previous) + 1
+                supersedes = previous[0].id
+                # Emit the SUPERSEDED update before inserting the replacement so the
+                # partial unique index never sees two active rows for one key.
+                await s.flush()
+            else:
+                version, supersedes = 1, None
+            row = MemoryItem(
+                key=item.key,
+                value=item.value,
+                scope=item.scope,
+                sensitivity=item.sensitivity,
+                source=item.source,
+                evidence_ref=item.evidence_ref,
+                owner=owner,
+                confidence=item.confidence,
+                version=version,
+                supersedes=supersedes,
+                locked=item.locked,
+                expires_at=item.expires_at,
+            )
+            s.add(row)
+            if task_id:
+                s.add(
+                    Event(
+                        task_id=task_id,
+                        kind="memory",
+                        message=redact(f"Memory '{item.key}' v{version} stored ({item.source})"),
+                    )
+                )
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                await s.rollback()
+                raise ValueError(f"Memory '{item.key}' was stored concurrently; retry") from exc
+            await s.refresh(row)
+            return row
+
+    async def recall(self, keys=None, role=None, scope=None, limit=25):
+        """Return a permission-aware slice. Never returns a whole-table dump.
+
+        `role` is an agent role resolved through the audited clearance config. An
+        unknown role gets nothing, so a typo cannot widen access.
+        """
+        clearance = CLEARANCE.get(settings.role_clearance().get(role, "none"), -1)
+        async with self.sessions() as s:
+            query = select(MemoryItem).where(MemoryItem.state == MemoryState.ACTIVE)
+            if keys:
+                query = query.where(MemoryItem.key.in_(keys))
+            if scope is not None:
+                query = query.where(or_(MemoryItem.scope == scope, MemoryItem.scope == ""))
+            rows = list(await s.scalars(query.order_by(MemoryItem.id.desc())))
+        allowed = [r for r in rows if CLEARANCE.get(r.sensitivity, 0) <= clearance]
+        now = utcnow()
+        views = [self._view(r, now) for r in allowed[:limit]]
+        return views, len(allowed) > limit
+
+    @staticmethod
+    def _view(row, now):
+        stale = bool(row.expires_at and row.expires_at < now)
+        label = "stale" if stale else ("unverified" if row.confidence < 0.5 else "current")
+        return MemoryView(
+            id=row.id,
+            key=row.key,
+            value=row.value,
+            scope=row.scope,
+            sensitivity=row.sensitivity,
+            source=row.source,
+            evidence_ref=row.evidence_ref,
+            confidence=row.confidence,
+            version=row.version,
+            state=row.state,
+            stale=stale,
+            label=label,
+            created_at=row.created_at.isoformat(),
+            expires_at=row.expires_at.isoformat() if row.expires_at else None,
+        )
+
+    async def correct_memory(self, memory_id, value, source, owner=None, task_id=None):
+        """Replace a memory's value with a new version, keeping the previous one auditable."""
+        async with self.sessions() as s:
+            row = await s.get(MemoryItem, memory_id, with_for_update=True)
+            if not row:
+                raise ValueError("Memory not found")
+            if row.locked:
+                raise ValueError("Memory is locked by Dedi and cannot be corrected automatically")
+            if row.state != MemoryState.ACTIVE:
+                raise ValueError(f"Memory is {row.state}; correct the active version instead")
+            if redact(value) != value:
+                raise ValueError("Remove credentials before storing this as memory")
+            replacement = MemoryItem(
+                key=row.key,
+                value=value,
+                scope=row.scope,
+                sensitivity=row.sensitivity,
+                source=source,
+                evidence_ref=row.evidence_ref,
+                owner=owner if owner is not None else row.owner,
+                confidence=row.confidence,
+                version=row.version + 1,
+                supersedes=row.id,
+                locked=row.locked,
+                expires_at=row.expires_at,
+            )
+            row.state = MemoryState.SUPERSEDED
+            # Emit the SUPERSEDED update before inserting the replacement so the
+            # partial unique index never sees two active rows for one key.
+            await s.flush()
+            # Captured before commit: a rollback expires the row, so the error
+            # message below must not touch it again.
+            key = row.key
+            s.add(replacement)
+            if task_id:
+                s.add(
+                    Event(
+                        task_id=task_id,
+                        kind="memory",
+                        message=redact(f"Memory '{row.key}' corrected to v{row.version + 1} ({source})"),
+                    )
+                )
+            try:
+                await s.commit()
+            except IntegrityError as exc:
+                await s.rollback()
+                raise ValueError(f"Memory '{key}' was modified concurrently; retry the correction") from exc
+            await s.refresh(replacement)
+            return replacement
+
+    async def retract_memory(self, memory_id, reason, owner=None, task_id=None):
+        """Close a memory without deleting it. The row and its reason remain auditable."""
+        async with self.sessions() as s:
+            row = await s.get(MemoryItem, memory_id, with_for_update=True)
+            if not row:
+                raise ValueError("Memory not found")
+            if row.locked and owner is None:
+                raise ValueError("Locked memories can only be retracted by their owner")
+            row.state = MemoryState.RETRACTED
+            if task_id:
+                s.add(
+                    Event(
+                        task_id=task_id,
+                        kind="memory",
+                        message=redact(f"Memory '{row.key}' retracted: {reason}"),
+                    )
+                )
+            await s.commit()
+            await s.refresh(row)
+            return row
+
+    async def memory_history(self, key):
+        """Every version of a key, newest first, so a correction can be inspected."""
+        async with self.sessions() as s:
+            rows = list(
+                await s.scalars(
+                    select(MemoryItem).where(MemoryItem.key == key).order_by(MemoryItem.version.desc())
+                )
+            )
+            now = utcnow()
+            return [self._view(r, now) for r in rows]
 
 
 store = Store()

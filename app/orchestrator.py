@@ -1,10 +1,11 @@
 import asyncio
+import hashlib
 import json
 import logging
 
 from app.agents import developer_loop, lead_plan, review_change
 from app.config import Project, settings
-from app.gates import deployment_issues, quality_issues
+from app.gates import deployment_issues, post_publication_issues, quality_issues
 from app.github_api import GitHubAPI
 from app.llm import run_context
 from app.schemas import LeadPlan
@@ -14,36 +15,53 @@ from app.workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
-
-async def create_task(requirement, **kwargs):
-    return await store.create(requirement, **kwargs)
-
-
-async def get_task(task_id):
-    return await store.get(task_id)
+# Documents that describe how the repository must be changed, captured verbatim for replayable provenance.
+BASELINE_DOCUMENTS = (
+    "README.md",
+    "AGENTS.md",
+    "requirements.txt",
+    "pyproject.toml",
+    "package.json",
+    "docs/ARCHITECTURE.md",
+)
 
 
 async def repository_context(workspace, task):
-    chunks = ["PROJECT POLICY: " + task.policy_json, "FILES:\n" + workspace.list_files()]
-    for path in (
-        "README.md",
-        "AGENTS.md",
-        "requirements.txt",
-        "pyproject.toml",
-        "package.json",
-        "docs/ARCHITECTURE.md",
-    ):
+    files = workspace.list_files()
+    chunks = ["PROJECT POLICY: " + task.policy_json, "FILES:\n" + files]
+    inspected = []
+    for path in BASELINE_DOCUMENTS:
         try:
-            chunks.append(f"{path}:\n{workspace.read_file(path)[:10000]}")
+            content = workspace.read_file(path)[:10000]
         except (ValueError, OSError, RuntimeError):
             continue
+        inspected.append(
+            {"path": path, "sha256": hashlib.sha256(content.encode()).hexdigest(), "content": content}
+        )
+        chunks.append(f"{path}:\n{content}")
     previous = [
         t
         for t in await store.list(30)
         if t.repo == task.repo and t.id != task.id and t.status == "pr_created"
     ][:3]
-    chunks += [f"Previous completed task #{t.id}: {t.requirement[:1000]}\n{t.last_message}" for t in previous]
-    return "\n\n".join(chunks)
+    chunks += [
+        f"Previous completed task #{t.id}: {t.requirement[:1000]}\n{t.last_message[:2000]}" for t in previous
+    ]
+    # Leave headroom for the system prompt, JSON schema and requirement within max_prompt_chars.
+    context = "\n\n".join(chunks)[:120000]
+    baseline = json.dumps(
+        {
+            "base_sha": task.base_sha,
+            "base_branch": task.base_branch,
+            "policy": json.loads(task.policy_json),
+            "file_count": len(files.splitlines()),
+            "file_inventory": files,
+            "inspected": inspected,
+            "context_sha256": hashlib.sha256(context.encode()).hexdigest(),
+        },
+        sort_keys=True,
+    )
+    return context, baseline
 
 
 async def run_task(task_id, notify=None, owner=None):
@@ -61,7 +79,7 @@ async def run_task(task_id, notify=None, owner=None):
         await store.event(task_id, status, message)
         if notify:
             try:
-                await notify(f"Task #{task_id} [{task.project} → {task.repo}]\n{message}")
+                await notify(f"Task #{task_id} [{task.project} → {task.repo}]\n{redact(message)}")
             except Exception:
                 logger.warning("Notification unavailable for task %s", task_id)
 
@@ -103,6 +121,17 @@ async def run_task(task_id, notify=None, owner=None):
                 "Deterministic tests, acceptance mapping, source integrity and hygiene gates passed. "
                 "Deployment files are statically checked when required. A live deployment is a separate explicit action."
             )
+            if task.plan_json:
+                # Read the durable plan; publication reconciliation runs before plan is parsed below.
+                deferred = LeadPlan.model_validate_json(task.plan_json).post_publication_criteria
+            else:
+                deferred = []
+            if deferred:
+                body += (
+                    "\n\nPost-publication criteria verified by this PR: "
+                    + ", ".join(f"#{n}" for n in sorted(deferred))
+                    + ". Each is satisfied by this PR body, the linked commit, and the published checks."
+                )
             if len(body) > 60000:
                 body = body[:56000] + "\n\nFull evidence retained in task artifacts (/report)."
             url = await api.create_pr(
@@ -112,14 +141,29 @@ async def run_task(task_id, notify=None, owner=None):
                 title=f"AI Factory #{task_id}: {task.requirement.splitlines()[0][:90]}",
                 body=redact(body),
             )
-            await transition("pr_created", f"Passed gates. PR: {url}\n{summary}", pr_url=url)
+            published = post_publication_issues(
+                await api.pull(task.repo, int(url.rsplit("/", 1)[-1])),
+                digest=digest,
+                sha=sha,
+                deferred=deferred,
+            )
+            await store.artifact(
+                task_id, "post_publication", json.dumps({"pr_url": url, "issues": published})
+            )
+            note = (
+                "\nPost-publication verification: all evidence sections present."
+                if not published
+                else "\nPost-publication verification needs operator attention:\n- " + "\n- ".join(published)
+            )
+            await transition("pr_created", f"Passed gates. PR: {url}\n{summary}{note}", pr_url=url)
 
         # The commit and approval record are durable BEFORE a push or PR API request.
         if task.head_sha and task.review_digest:
             await transition("publishing", "Reconciling previously approved publication")
             await publish(task.head_sha, task.review_digest, "Publication recovered without duplicate PR")
             return
-        context = await repository_context(workspace, task)
+        context, baseline = await repository_context(workspace, task)
+        await store.artifact(task_id, "baseline", baseline)
         if task.plan_json:
             plan = LeadPlan.model_validate_json(task.plan_json)
         else:
@@ -135,10 +179,12 @@ async def run_task(task_id, notify=None, owner=None):
                 "Clarification needed: " + " | ".join(plan.questions) + f"\nUse /answer {task_id} <answer>",
             )
             return
-        if plan.risk == "high" and task.approved_plan_hash != plan_hash(task.plan_json):
+        needs_approval = plan.risk == "high" or task.kind == "self_improvement"
+        if needs_approval and task.approved_plan_hash != plan_hash(task.plan_json):
+            reason = "Self-improvement" if task.kind == "self_improvement" else "High-risk plan"
             await transition(
                 "awaiting_approval",
-                f"High-risk plan ready for review. Use /plan {task_id}; approve this exact plan with /approve {task_id} {plan_hash(task.plan_json)[:12]}",
+                f"{reason} ready for review. Use /plan {task_id}; approve this exact plan with /approve {task_id} {plan_hash(task.plan_json)[:12]}",
             )
             return
         feedback = json.loads(task.feedback_json)
@@ -172,12 +218,21 @@ async def run_task(task_id, notify=None, owner=None):
                 continue
             await transition("testing", "Running mandatory tests in isolated sandbox")
             report = await asyncio.to_thread(workspace.default_tests)
+            new_tests = await asyncio.to_thread(workspace.changed_test_files, diff)
+            standalone = await asyncio.to_thread(workspace.standalone_tests, new_tests)
             issues = []
             if await asyncio.to_thread(workspace.digest) != digest:
                 issues.append("Source changed during tests")
             if plan.deployment_required:
                 issues += deployment_issues(files, plan.persistence_required)
             await store.artifact(task_id, "tests", report.model_dump_json())
+            await store.artifact(
+                task_id,
+                "standalone_tests",
+                json.dumps(
+                    {"test_files": new_tests, "report": standalone.model_dump() if standalone else None}
+                ),
+            )
             await store.artifact(task_id, "diff", diff)
             await transition("reviewing", "Independent review: requirements, tests, security and deployment")
             review = await review_change(
@@ -185,10 +240,15 @@ async def run_task(task_id, notify=None, owner=None):
                 plan=plan,
                 diff=diff,
                 test_output=report.model_dump_json(),
+                standalone_output=(
+                    json.dumps({"test_files": new_tests, "report": standalone.model_dump()})
+                    if standalone
+                    else "No new or changed test files"
+                ),
                 hygiene_issues=issues,
                 context=context[:22000],
             )
-            issues = quality_issues(plan, report, review, diff, issues)
+            issues = quality_issues(plan, report, review, diff, issues, standalone)
             await store.artifact(task_id, "review", review.model_dump_json())
             await store.artifact(
                 task_id,

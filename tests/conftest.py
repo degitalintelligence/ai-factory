@@ -43,6 +43,7 @@ def repo(tmp_path, monkeypatch):
     git("config", "user.email", "test@example.invalid")
     git("config", "user.name", "Test")
     (path / "app.py").write_text("def value(): return 1\n")
+    (path / "README.md").write_text("# Demo\n")
     (path / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n*.db\n")
     git("add", ".")
     git("commit", "-m", "Initial")

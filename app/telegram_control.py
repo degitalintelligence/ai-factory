@@ -7,7 +7,15 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from app.config import settings
-from app.deployment import DeploymentService
+from app.contracts import (
+    create_self_improvement,
+    create_task,
+    decision_inbox,
+    perform_action,
+    read_task,
+    resolve_decision,
+)
+from app.schemas import SelfImprovementBrief
 from app.security import redact
 from app.store import plan_hash, store
 
@@ -38,7 +46,7 @@ def protected(handler):
         except ValueError as exc:
             await reply(update, redact(str(exc)))
         except Exception:
-            logger.error("Telegram command failed", exc_info=False)
+            logger.exception("Telegram command failed")
             await reply(update, "Command failed. No success is assumed; inspect /status or server logs.")
 
     return wrapped
@@ -47,17 +55,14 @@ def protected(handler):
 async def owned_task(update, context):
     if not context.args or not context.args[0].isdigit():
         raise ValueError("Provide a numeric task ID")
-    task = await store.get(int(context.args[0]))
-    if not task or task.user_id != update.effective_user.id:
-        raise ValueError("Task not found or not owned by you")
-    return task
+    return await read_task(int(context.args[0]), update.effective_user.id)
 
 
 @protected
 async def start_handler(update, context):
     await reply(
         update,
-        "AI Factory V0.2\n\n/new <requirement>\n/new <project> | <requirement>\n/projects — registered repositories\n/tasks — queue\n/status <id>\n/plan <id>\n/logs <id>\n/report <id>\n/cancel <id>\n/retry <id>\n/answer <id> <clarification>\n/approve <id> <plan-hash>\n/feedback <id> <revision>\n/deploy <id> <full-merged-sha>\n/deployment <id>\n\nCode → isolated tests → independent review → PR. Merges are human-controlled.",
+        "LioBot by AI Factory — operator interface\n\n/new <requirement>\n/new <project> | <requirement>\n/projects — registered repositories\n/tasks — queue\n/status <id>\n/plan <id>\n/logs <id>\n/report <id>\n/cancel <id>\n/retry <id>\n/answer <id> <clarification>\n/approve <id> <plan-hash>\n/feedback <id> <revision>\n/deploy <id> <full-merged-sha>\n/deployment <id>\n/inbox [state] [project] — decision inbox\n/decide <id> <approve|reject|ask|defer>\n/improve problem:...; evidence:...; hypothesis:...; scope:...; baseline:...; rollback:...\n\nCode → isolated tests → independent review → PR. Merges are human-controlled.\nThis Telegram bot is a channel adapter; decisions are stored in the core inbox, not in chat.",
     )
 
 
@@ -75,7 +80,7 @@ async def projects_handler(update, context):
 async def new_handler(update, context):
     raw = " ".join(context.args).strip()
     project, requirement = (part.strip() for part in raw.split("|", 1)) if "|" in raw else ("lab", raw)
-    task = await store.create(
+    task = await create_task(
         requirement,
         project,
         update.effective_chat.id,
@@ -149,19 +154,99 @@ async def report_handler(update, context):
 async def action_handler(update, context):
     t = await owned_task(update, context)
     action = update.effective_message.text.split()[0].split("@")[0].removeprefix("/")
-    message = " ".join(context.args[1:])
-    if action == "cancel":
-        await store.cancel(t.id)
-        await reply(update, f"Cancellation requested for #{t.id}; inspect /status for completion")
-    elif action == "deploy":
-        record = await DeploymentService().deploy(t.id, message)
-        await reply(update, f"Deployment {record.status}: {record.deployment_uuid}\n{record.message}")
-    elif action == "deployment":
-        record = await DeploymentService().status(t.id)
-        await reply(update, f"Deployment: {record.status}\nCommit: {record.commit_sha}\n{record.message}")
-    else:
-        await store.resume(t.id, action, message)
-        await reply(update, f"Task #{t.id} requeued ({action})")
+    await reply(update, await perform_action(t.id, action, " ".join(context.args[1:])))
+
+
+def render_decision(decision):
+    """Render one decision card. Any channel shows the same fields from the same row."""
+    options = ", ".join(f"{o.get('id')}={o.get('label')}" for o in json.loads(decision.options_json or "[]"))
+    lines = [
+        f"Decision #{decision.id} [{decision.kind}] — {decision.state.upper()}",
+        f"Title: {decision.title}",
+        f"Task: #{decision.task_id}" if decision.task_id else "Task: -",
+        f"Priority: {decision.priority}; risk: {decision.risk_level}",
+        f"Situation: {decision.situation}",
+        f"Why now: {decision.why_now}",
+        f"Options: {options or '-'}",
+        f"Recommendation: {decision.recommendation}",
+        f"Evidence: {'; '.join(json.loads(decision.evidence_json or '[]')) or '-'}",
+    ]
+    if decision.missing_information:
+        lines.append(f"Missing information: {decision.missing_information}")
+    if decision.rollback:
+        lines.append(f"Rollback: {decision.rollback}")
+    if decision.expires_at:
+        lines.append(f"Expires: {decision.expires_at.isoformat()}")
+    if decision.decided_by:
+        lines.append(f"Decided by {decision.decided_by} at {decision.decided_at.isoformat()}")
+    if decision.state == "open":
+        lines.append(f"Answer with /decide {decision.id} <approve|reject|ask|defer>")
+    return redact("\n".join(lines))
+
+
+@protected
+async def inbox_handler(update, context):
+    decisions = await decision_inbox(
+        state=context.args[0] if context.args else "open",
+        project=context.args[1] if len(context.args) > 1 else None,
+    )
+    await reply(
+        update,
+        "\n\n".join(render_decision(d) for d in decisions) or "No decisions pending",
+    )
+
+
+@protected
+async def decide_handler(update, context):
+    if len(context.args) < 2 or not context.args[0].isdigit():
+        raise ValueError("Usage: /decide <decision-id> <approve|reject|ask|defer>")
+    decision = await resolve_decision(int(context.args[0]), context.args[1], user_id=update.effective_user.id)
+    await reply(update, f"Decision #{decision.id} → {decision.state}\n\n{render_decision(decision)}")
+
+
+@protected
+async def improve_handler(update, context):
+    raw = " ".join(context.args)
+    fields = {}
+    for token in raw.split(";"):
+        key, _, value = token.partition(":")
+        if value.strip():
+            fields[key.strip().lower()] = value.strip()
+    missing = [
+        k for k in ("problem", "evidence", "hypothesis", "scope", "baseline", "rollback") if k not in fields
+    ]
+    if missing:
+        raise ValueError(
+            "Missing fields: "
+            + ", ".join(missing)
+            + "\nFormat: /improve problem:...; evidence:...; hypothesis:...; scope:...; baseline:...; rollback:...; project:lab"
+        )
+    brief = SelfImprovementBrief(
+        problem=fields["problem"],
+        evidence=[e.strip() for e in fields["evidence"].split(",") if e.strip()],
+        hypothesis=fields["hypothesis"],
+        scope=fields["scope"],
+        baseline=fields["baseline"],
+        rollback_plan=fields["rollback"],
+        touched_areas=[a.strip() for a in fields.get("areas", "").split(",") if a.strip()],
+        blast_radius=fields.get("blast", ""),
+    )
+    task, needs_approval, areas = await create_self_improvement(
+        brief,
+        fields.get("project", "lab"),
+        update.effective_chat.id,
+        update.effective_user.id,
+        f"telegram:{update.update_id}",
+    )
+    note = (
+        f"\n\nSensitive areas detected: {', '.join(areas)}.\nThis task stops at /approve before any code runs."
+        if needs_approval
+        else "\n\nNo sensitive area detected; it still stops at /approve like any gated task."
+    )
+    await reply(
+        update,
+        f"Queued self-improvement #{task.id}\nBranch: {task.branch}\nProblem: {brief.problem}{note}",
+    )
 
 
 def build_telegram_app():
@@ -176,6 +261,9 @@ def build_telegram_app():
         "plan": plan_handler,
         "logs": logs_handler,
         "report": report_handler,
+        "inbox": inbox_handler,
+        "decide": decide_handler,
+        "improve": improve_handler,
     }.items():
         app.add_handler(CommandHandler(command, handler))
     for command in ("cancel", "retry", "answer", "approve", "feedback", "deploy", "deployment"):

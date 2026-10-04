@@ -154,6 +154,15 @@ class Workspace:
             raise WorkspaceError("File too large; use search")
         return redact(target.read_text(encoding="utf-8"))
 
+    def _read_raw(self, path):
+        """Read without redaction so edits operate on real bytes; writes stay fail-closed."""
+        target = self._safe_path(path)
+        if not target.is_file():
+            raise WorkspaceError("File not found")
+        if target.stat().st_size > 100000:
+            raise WorkspaceError("File too large; use search")
+        return target.read_text(encoding="utf-8")
+
     def write_file(self, path, content):
         target = self._safe_path(path)
         if len(content.encode()) > 200000 or secret_present(content):
@@ -163,7 +172,7 @@ class Workspace:
         return f"Wrote {path}"
 
     def replace_text(self, path, old_text, content):
-        current = self.read_file(path)
+        current = self._read_raw(path)
         if current.count(old_text) != 1:
             raise WorkspaceError("old_text must match exactly once")
         return self.write_file(path, current.replace(old_text, content, 1))
@@ -221,27 +230,6 @@ class Workspace:
             raise WorkspaceError("Diff exceeds review context limit; split the task")
         return redact(result)
 
-    def status_porcelain(self):
-        return self._run(["git", "status", "--porcelain=v1", "--untracked-files=all"], check=False).stdout
-
-    def tracked_suspicious_artifacts(self):
-        if not (self.path / ".git").exists():
-            return []
-        return [p for p in self.paths() if is_suspicious_artifact(p) and (self.path / p).exists()]
-
-    def hygiene_issues(self, before_tests, after_tests):
-        issues = [
-            f"Tests created or dirtied repository artifact: {x[3:]}"
-            for x in set(after_tests.splitlines()) - set(before_tests.splitlines())
-        ]
-        for line in after_tests.splitlines():
-            if "D" not in line[:2] and is_suspicious_artifact(line[3:]):
-                issues.append(f"Suspicious runtime/generated artifact: {line[3:]}")
-        issues.extend(
-            f"Suspicious runtime/generated artifact: {x}" for x in self.tracked_suspicious_artifacts()
-        )
-        return sorted(set(issues))
-
     def assert_safe_to_commit(self):
         self.snapshot()
 
@@ -293,6 +281,36 @@ class Workspace:
             commands[0] = ["npm", "test"]
         return self.run_commands(commands)
 
+    def changed_test_files(self, diff):
+        """Test files added or modified by the diff, used to prove new tests run standalone."""
+        changed = []
+        for line in diff.splitlines():
+            if not line.startswith("+++ b/"):
+                continue
+            path = line[6:].strip()
+            if path == "/dev/null" or path in changed:
+                continue
+            p = Path(path)
+            name = p.name
+            # Jest and node:test default globs: *.test.*, *_test.*, test-*, or anything under __tests__/.
+            if (
+                name.startswith("test_")
+                or name.startswith("test-")
+                or name.endswith(("_test.py", "_test.js", "_test.ts"))
+                or name.endswith((".test.js", ".test.ts", ".test.mjs", ".test.cjs", ".spec.js", ".spec.ts"))
+                or "__tests__" in p.parts
+            ):
+                changed.append(path)
+        return changed
+
+    def standalone_tests(self, paths):
+        """Run only the changed test files so new behaviour is proven in isolation from the suite."""
+        if not paths:
+            return None
+        if self.policy.profile == "python":
+            return self.run_commands([["python", "-m", "pytest", "-q", "-p", "no:cacheprovider", *paths]])
+        return self.run_commands([["npm", "test", "--", *paths]])
+
     def commit(self, message, expected_digest):
         if self.digest() != expected_digest:
             raise WorkspaceError("Source changed after review")
@@ -308,8 +326,3 @@ class Workspace:
         if not re.fullmatch(r"[a-f0-9]{40}", sha):
             raise WorkspaceError("Invalid commit")
         self._run(["git", "push", "origin", f"{sha}:refs/heads/{self.branch}"], auth=True)
-
-    def commit_and_push(self, message):
-        sha = self.commit(message, self.digest())
-        self.push(sha)
-        return sha

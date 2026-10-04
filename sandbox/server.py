@@ -250,7 +250,7 @@ def run(request: RunRequest):
 
 def authorize(authorization: str = Header(default="")):
     token = os.getenv("SANDBOX_TOKEN", "")
-    if not token or not hmac.compare_digest(authorization, f"Bearer {token}"):
+    if not token or not hmac.compare_digest(authorization.encode(), f"Bearer {token}".encode()):
         raise HTTPException(401, "Unauthorized")
 
 
@@ -267,16 +267,20 @@ def run_endpoint(request: RunRequest):
 
 @app.get("/health")
 def health():
-    with tempfile.TemporaryDirectory() as directory:
-        result = execute(
-            Path(directory),
-            [
-                "python",
-                "-c",
-                "import os; assert not os.path.exists('/app'); assert 'SANDBOX_TOKEN' not in os.environ; print('isolated')",
-            ],
-            10,
-        )
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            result = execute(
+                Path(directory),
+                [
+                    "python",
+                    "-c",
+                    "import os; assert not os.path.exists('/app'); assert 'SANDBOX_TOKEN' not in os.environ; print('isolated')",
+                ],
+                10,
+            )
+    except (OSError, RuntimeError) as exc:
+        # Fail closed with 503, matching /run, instead of a 500 when namespaces are unsupported.
+        raise HTTPException(503, "Sandbox unavailable; check namespace support") from exc
     if result.exit_code != 0:
         logging.getLogger(__name__).error("Sandbox namespace probe failed: %s", result.output[:2000])
         raise HTTPException(503, "Sandbox probe failed; inspect runner logs and docs/OPERATIONS.md")

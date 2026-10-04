@@ -1,7 +1,9 @@
+import logging
 from datetime import datetime, timezone
 from enum import StrEnum
 
 from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -65,6 +67,9 @@ class Task(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(100))
     lease_until: Mapped[datetime | None] = mapped_column(DateTime)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    kind: Mapped[str] = mapped_column(
+        String(32), default="engineering", server_default="engineering", index=True
+    )
 
 
 class Event(Base):
@@ -96,8 +101,79 @@ class Deployment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class Decision(Base):
+    """One durable decision request. Shared source of truth for every channel adapter."""
+
+    __tablename__ = "decisions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), index=True)
+    project: Mapped[str] = mapped_column(String(40), default="", server_default="")
+    kind: Mapped[str] = mapped_column(
+        String(40), default="DECISION_REQUIRED", server_default="DECISION_REQUIRED"
+    )
+    title: Mapped[str] = mapped_column(String(300), default="")
+    situation: Mapped[str] = mapped_column(Text, default="")
+    why_now: Mapped[str] = mapped_column(Text, default="")
+    options_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    impact_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    risk_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    recommendation: Mapped[str] = mapped_column(Text, default="")
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]", server_default="[]")
+    missing_information: Mapped[str] = mapped_column(Text, default="")
+    rollback: Mapped[str] = mapped_column(Text, default="")
+    required_action: Mapped[str] = mapped_column(String(80), default="")
+    priority: Mapped[str] = mapped_column(String(20), default="normal", server_default="normal")
+    risk_level: Mapped[str] = mapped_column(String(20), default="medium", server_default="medium")
+    state: Mapped[str] = mapped_column(String(20), default="open", server_default="open", index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    decided_by: Mapped[int | None] = mapped_column(BigInteger)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime)
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class MemoryItem(Base):
+    """One memory entry with provenance, freshness, permission, and a correction path.
+
+    Memories are never deleted. A correction supersedes the previous version and a
+    retraction closes it, so the history of what was believed stays auditable.
+    """
+
+    __tablename__ = "memory_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(200), index=True)
+    value: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(String(120), default="", server_default="", index=True)
+    sensitivity: Mapped[str] = mapped_column(String(20), default="internal", server_default="internal")
+    source: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    evidence_ref: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    owner: Mapped[int | None] = mapped_column(BigInteger)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0, server_default="1.0")
+    version: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    state: Mapped[str] = mapped_column(String(20), default="active", server_default="active", index=True)
+    supersedes: Mapped[int | None] = mapped_column(ForeignKey("memory_items.id"))
+    locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
+
+
+def _default_clause(server_default):
+    """Render the DEFAULT clause for an additive ALTER TABLE ADD COLUMN.
+
+    Plain string defaults are single-quoted so PostgreSQL treats them as
+    literals instead of identifiers; TextClause defaults stay raw SQL.
+    """
+    if server_default is None:
+        return ""
+    arg = server_default.arg
+    if isinstance(arg, str):
+        return " DEFAULT '" + arg.replace("'", "''") + "'"
+    return f" DEFAULT {arg}"
 
 
 async def init_db(db_engine=None):
@@ -113,11 +189,23 @@ async def init_db(db_engine=None):
                 if column.name in columns:
                     continue
                 sql_type = column.type.compile(dialect=target.dialect)
-                default = f" DEFAULT {column.server_default.arg}" if column.server_default else ""
-                if column.name in {"project", "repo", "base_branch", "policy_json", "feedback_json"}:
-                    default = " DEFAULT '" + str(column.server_default.arg).replace("'", "''") + "'"
+                default = _default_clause(column.server_default)
                 await conn.execute(text(f'ALTER TABLE tasks ADD COLUMN "{column.name}" {sql_type}{default}'))
         await conn.run_sync(Base.metadata.create_all)
         await conn.execute(
             text("CREATE UNIQUE INDEX IF NOT EXISTS ux_task_idempotency ON tasks (idempotency_key)")
         )
+        try:
+            async with conn.begin_nested():
+                await conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_active "
+                        "ON memory_items (key) WHERE state = 'active'"
+                    )
+                )
+        except IntegrityError:
+            # Legacy rows already contain duplicate active keys; keep startup additive
+            # and rely on store-layer row locks and conflict checks until data is cleaned.
+            logging.getLogger(__name__).warning(
+                "ux_memory_active not created: memory_items already holds duplicate active keys"
+            )

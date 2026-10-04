@@ -77,3 +77,22 @@ async def test_sandbox_fails_closed_and_is_authenticated(monkeypatch):
                 "/run", json=body, headers={"Authorization": "Bearer runner-test-token"}
             )
             assert response.status_code == 503
+
+
+@pytest.mark.parametrize("error", [RuntimeError("no namespaces"), OSError("bwrap is missing")])
+async def test_health_fails_closed_when_namespaces_unsupported(error):
+    with patch.object(server, "execute", side_effect=error):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(server.app), base_url="http://runner"
+        ) as client:
+            assert (await client.get("/health")).status_code == 503
+
+
+async def test_health_reports_isolation_when_the_probe_passes():
+    probe = CommandResult(command=["python", "-c", "isolation"], exit_code=0)
+    with patch.object(server, "execute", return_value=probe):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(server.app), base_url="http://runner"
+        ) as client:
+            response = await client.get("/health")
+            assert response.status_code == 200 and response.json()["isolation"] == "bubblewrap"

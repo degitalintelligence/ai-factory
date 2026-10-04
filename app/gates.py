@@ -4,6 +4,40 @@ import yaml
 
 from app.schemas import LeadPlan, ReviewResult, TestReport
 
+# Sections the PR body must actually carry for post-publication criteria to be verifiable by a human.
+REQUIRED_PR_SECTIONS = (
+    "## Requirement",
+    "## Plan",
+    "## Independent review",
+    "## Test evidence",
+    "Reviewed source digest:",
+    "Commit:",
+)
+
+
+def post_publication_issues(pr, *, digest, sha, deferred):
+    """Verify the published PR against evidence only obtainable after publication."""
+    issues = []
+    if not pr:
+        return ["Published PR could not be read back from GitHub"]
+    body = pr.get("body") or ""
+    for section in REQUIRED_PR_SECTIONS:
+        if section not in body:
+            issues.append(f"Published PR body is missing required section: {section}")
+    if digest not in body:
+        issues.append("Published PR body does not record the reviewed source digest")
+    if sha not in body:
+        issues.append("Published PR body does not record the approved commit")
+    head = (pr.get("head") or {}).get("sha")
+    if head and head != sha:
+        issues.append("Published PR head does not match the approved commit")
+    if pr.get("state") != "open":
+        issues.append(f"Published PR is not open (state={pr.get('state')})")
+    for n in sorted(deferred):
+        if f"#{n}" not in body:
+            issues.append(f"Published PR body does not state post-publication criterion #{n}")
+    return issues
+
 
 def deployment_issues(files, persistence=False):
     issues = []
@@ -43,7 +77,7 @@ def deployment_issues(files, persistence=False):
                 if "docker.sock" in str(volume) or source.startswith(("/", "~", "..")):
                     issues.append(f"Unsafe host mount in service {name}")
         if persistence:
-            declared = set(data.get("volumes", {}))
+            declared = set(data.get("volumes") or {})
             mounts = [
                 v.get("source", "") if isinstance(v, dict) else str(v).split(":")[0]
                 for s in services.values()
@@ -58,26 +92,48 @@ def deployment_issues(files, persistence=False):
     except (ValueError, TypeError, AttributeError, yaml.YAMLError):
         issues.append("Compose file failed structural validation")
     dockerfile = files.get("Dockerfile", "")
-    if dockerfile and not re.search(r"(?im)^USER\s+(?!root\b|0\b)\S+", dockerfile):
-        issues.append("Application Dockerfile must declare a non-root USER")
+    users = re.findall(r"(?im)^USER\s+(\S+)", dockerfile)
+    if dockerfile and (not users or _root_account(users[-1])):
+        issues.append("Application Dockerfile must declare a non-root USER in its final stage")
     return issues
 
 
-def quality_issues(plan: LeadPlan, report: TestReport, review: ReviewResult, diff: str, hygiene: list[str]):
+def _root_account(user: str) -> bool:
+    """A USER directive may carry a group suffix; only the account decides the gate."""
+    return user.split(":", 1)[0].lower() in {"root", "0"}
+
+
+def quality_issues(
+    plan: LeadPlan,
+    report: TestReport,
+    review: ReviewResult,
+    diff: str,
+    hygiene: list[str],
+    standalone: TestReport | None = None,
+):
     issues = list(hygiene)
     if not diff.strip():
         issues.append("No implementation diff")
     if not report.passed:
         issues.append("Mandatory test gate failed (including missing tests, timeout, or test artifacts)")
         issues.extend(report.issues)
+    if standalone is not None and not standalone.passed:
+        issues.append("New or changed tests must pass when run standalone")
+        issues.extend(standalone.issues)
     if review.approved and review.issues:
         issues.append("Reviewer cannot approve while reporting unresolved issues")
-    by_id = {x.criterion: x for x in review.criteria}
-    if len(review.criteria) != len(plan.acceptance_criteria) or set(by_id) != set(
-        range(1, len(plan.acceptance_criteria) + 1)
-    ):
+    # Criteria that depend on the published PR are verified after publication, not before it.
+    required = set(range(1, len(plan.acceptance_criteria) + 1)) - set(plan.post_publication_criteria)
+    by_id = {}
+    duplicates = set()
+    for x in review.criteria:
+        if x.criterion in by_id:
+            duplicates.add(x.criterion)
+        by_id[x.criterion] = x
+    # Deferred criteria may be omitted entirely; required criteria must each appear exactly once.
+    if not required <= set(by_id) or duplicates & required:
         issues.append("Reviewer must provide evidence for every acceptance criterion exactly once")
-    for n in range(1, len(plan.acceptance_criteria) + 1):
+    for n in sorted(required):
         if n in by_id and not by_id[n].satisfied:
             issues.append(f"Acceptance criterion {n} not satisfied")
     return list(dict.fromkeys(issues))

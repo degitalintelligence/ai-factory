@@ -6,7 +6,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import settings
-from app.db import init_db, utcnow
+from app.db import Task, _default_clause, init_db, utcnow
 from app.store import BudgetExceeded, TaskStopped, plan_hash
 
 
@@ -107,3 +107,29 @@ async def test_additive_migration_preserves_v01_rows(tmp_path):
         ).one()
         assert tuple(row) == ("old todo task", "pr_created", 0, "lab")
     await engine.dispose()
+
+
+def test_default_clause_quotes_literals_and_keeps_sql_raw():
+    # The V0.1 upgrade path must quote string defaults (DEFAULT 'lab'); unquoted,
+    # PostgreSQL treats them as identifiers and rejects the additive ALTER TABLE.
+    assert _default_clause(Task.__table__.c.project.server_default) == " DEFAULT 'lab'"
+    assert _default_clause(Task.__table__.c.cost_incomplete.server_default) == " DEFAULT false"
+    assert _default_clause(Task.__table__.c.requirement.server_default) == ""
+
+
+async def test_only_one_active_task_per_repository(db):
+    first = await db.create("First feature")
+    assert (await db.claim("worker-a")).id == first.id  # planning is an active state
+    with pytest.raises(ValueError, match="One active task per repository"):
+        await db.create("Second feature on the same repository")
+    other = await db.create("Feature on another repository", "other")
+    assert other.repo == "owner/other"
+
+
+async def test_idempotent_retry_returns_the_original_task_while_active(db):
+    first = await db.create("Same requirement", idempotency_key="telegram:9")
+    await db.claim("worker-a")  # the task is active, yet a retry is still idempotent
+    again = await db.create("Same requirement", idempotency_key="telegram:9")
+    assert again.id == first.id and again.status == "planning"
+    with pytest.raises(ValueError, match="different request"):
+        await db.create("Different requirement", idempotency_key="telegram:9")

@@ -1,3 +1,6 @@
+import hashlib
+import json
+
 import pytest
 
 from app import orchestrator
@@ -33,7 +36,15 @@ def engine_fakes(repo, monkeypatch):
                 state["fail_publish"] = False
                 raise RuntimeError("Lost GitHub connection after push")
             state["prs"] = 1
+            state["pr_body"] = kwargs["body"]
             return "https://github.com/owner/repo/pull/1"
+
+        async def pull(self, repo, number):
+            return {
+                "state": "open",
+                "body": state.get("pr_body", ""),
+                "head": {"sha": refs.get("feature")},
+            }
 
     def prepare(self, **kwargs):
         self.base_sha = workspace.base_sha
@@ -79,6 +90,15 @@ def engine_fakes(repo, monkeypatch):
             results=[CommandResult(command=["pytest"], exit_code=state["test_exit"], output="test evidence")]
         ),
     )
+    monkeypatch.setattr(
+        Workspace,
+        "standalone_tests",
+        lambda self, paths: (
+            Report(results=[CommandResult(command=["pytest", *paths], exit_code=state["test_exit"])])
+            if paths
+            else None
+        ),
+    )
     monkeypatch.setattr(orchestrator, "GitHubAPI", GitHub)
     monkeypatch.setattr(orchestrator, "lead_plan", plan)
     monkeypatch.setattr(orchestrator, "developer_loop", develop)
@@ -97,6 +117,21 @@ async def execute(db, task_id, owner="w"):
     return await db.get(task_id)
 
 
+async def test_baseline_artifact_redacts_secrets(db, repo, engine_fakes, monkeypatch):
+    workspace, git = repo
+    secret = "ghp_" + "A" * 30
+    monkeypatch.setattr(settings, "github_token", secret)
+    # Committed before the task starts, so the sandbox write guard cannot reject it.
+    (workspace.path / "README.md").write_text(f"# Demo\ntoken: {secret}\n")
+    git("add", ".")
+    git("commit", "-m", "Add readme")
+    task = await db.create("Change the return value")
+    task = await execute(db, task.id)
+    baseline = next(a for a in await db.artifacts(task.id) if a.kind == "baseline")
+    assert secret not in baseline.content
+    assert "[REDACTED]" in baseline.content
+
+
 async def test_end_to_end_real_git_mocked_external_services(db, repo, engine_fakes):
     state, refs = engine_fakes
     task = await db.create("Change return value and add tests")
@@ -105,8 +140,26 @@ async def test_end_to_end_real_git_mocked_external_services(db, repo, engine_fak
     assert task.head_sha == refs[task.branch]
     assert len(task.review_digest) == 64
     artifacts = await db.artifacts(task.id)
-    assert {a.kind for a in artifacts} >= {"plan", "tests", "diff", "review", "gates"}
+    assert {a.kind for a in artifacts} >= {
+        "baseline",
+        "plan",
+        "tests",
+        "standalone_tests",
+        "diff",
+        "review",
+        "gates",
+        "post_publication",
+    }
     assert "tests/test_app.py" in next(a.content for a in artifacts if a.kind == "diff")
+    baseline = json.loads(next(a.content for a in artifacts if a.kind == "baseline"))
+    assert baseline["base_sha"] == refs["main"] and len(baseline["context_sha256"]) == 64
+    assert "app.py" in baseline["file_inventory"]
+    readme = next(d for d in baseline["inspected"] if d["path"] == "README.md")
+    assert readme["content"] == "# Demo\n"
+    assert hashlib.sha256(readme["content"].encode()).hexdigest() == readme["sha256"]
+    standalone = json.loads(next(a.content for a in artifacts if a.kind == "standalone_tests"))
+    assert standalone["test_files"] == ["tests/test_app.py"]
+    assert json.loads(next(a.content for a in artifacts if a.kind == "post_publication"))["issues"] == []
     assert repo[1]("status", "--porcelain") == ""
 
 
