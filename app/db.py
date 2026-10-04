@@ -29,6 +29,7 @@ class TaskStatus(StrEnum):
     PUBLISHING = "publishing"
     PR_CREATED = "pr_created"
     COMPLETED = "completed"
+    SUPERSEDED = "superseded"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
