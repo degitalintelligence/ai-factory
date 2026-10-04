@@ -85,17 +85,20 @@ class Settings(BaseSettings):
     def model_aliases(self) -> dict[str, str]:
         """Resolve model aliases from operator configuration; unknown aliases fail closed."""
         try:
-            raw = (
-                self.model_aliases_json.strip()
-                or '{"bunny-alpha":"stealth/space-bunny-alpha"}'
-            )
+            raw = self.model_aliases_json.strip() or '{"bunny-alpha":"stealth/space-bunny-alpha"}'
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError("MODEL_ALIASES_JSON must be valid JSON") from exc
         if (
             not isinstance(data, dict)
             or not data
-            or any(not isinstance(k, str) or not k or not isinstance(v, str) or not v for k, v in data.items())
+            or any(
+                not isinstance(k, str)
+                or not k
+                or not isinstance(v, str)
+                or not v
+                for k, v in data.items()
+            )
         ):
             raise ValueError("MODEL_ALIASES_JSON must map non-empty aliases to model IDs")
         return data
