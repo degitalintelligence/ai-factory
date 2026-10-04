@@ -40,9 +40,9 @@ that carries this document.
 ## 0. Remediation status — 2026-10-04
 
 Python 3.12.10 was installed, `.venv` created from `requirements-dev.txt`, and the suite was
-executed. **All five blockers plus H1 and H3 through H7 are fixed, committed, and covered by
-regression tests.** The findings below are retained unchanged as the original record; this
-section is the current state.
+executed. **All five blockers, H1, H3 through H7, and M1 through M7 are fixed, committed, and
+covered by regression tests.** The findings below are retained unchanged as the original
+record; this section is the current state.
 
 | ID | Status | Commit | Regression coverage |
 |---|---|---|---|
@@ -58,21 +58,33 @@ section is the current state.
 | H5 | FIXED | this branch | `test_project_repo_cannot_traverse_out_of_the_registry` (7 parametrized cases) |
 | H6 | FIXED | this branch | `test_common_credential_shapes_are_redacted` (6 shapes), `test_ordinary_prose_is_not_mangled_by_redaction`, `test_credentials_in_provenance_fields_are_refused` |
 | H7 | FIXED | this branch | `test_startup_refuses_invalid_role_clearance` |
-| H8, H9, M1–M7 | OPEN | — | Not started |
+| M1 | FIXED | `cefd723` | `tests/test_worker.py`: heartbeat renews a long lease, cancellation interrupts the running job, wall-clock timeout fails the task and releases the lease, notify forwarding (with and without a chat), loop executes queued work then stops, a failing cycle is recorded in `last_error`, stopping mid-run leaves a recoverable checkpoint |
+| M2 | FIXED | `cefd723` | Partial unique index `ux_decision_open_approval`; `test_a_repeated_approval_request_returns_the_same_open_card`, `test_the_database_refuses_a_second_open_approval_for_one_task`, `test_a_resolved_card_frees_the_task_for_one_new_approval`, `test_a_lost_insert_race_returns_the_winners_card`; `test_postgres_concurrent_approval_requests_produce_one_card` (CI, PostgreSQL) |
+| M3 | FIXED | `cefd723` | `test_cancel_is_idempotent_across_repeated_channel_requests` now asserts exactly one `cancel` event after a repeated cancel |
+| M4 | FIXED | `cefd723` | `tests/test_model_runs.py`: per-attempt role/alias/resolved model/prompt version/prompt hash/outcome/tokens/cost; provider errors recorded without response bodies; unreported cost marked `cost_incomplete`; calls outside a task context persist nothing |
+| M5 | FIXED | `cefd723` | `tests/test_context_assembly.py`: memory reaches the lead prompt with id/version/source/evidence/confidence and a trust-boundary header, tenant and owner isolation, character budget truncation, baseline `memory_slice_sha256`/`context_sha256` |
+| M6 | FIXED | `cefd723` | `tests/test_budget.py`: plan budget can only lower the operator ceiling, warnings at 60/80/95 fire exactly once, degradation plan names the remedy, `budget_status()` reports the binding envelope, retry retains lifetime usage, token reserve alone can exhaust |
+| M7 | FIXED | `cefd723` | `tests/test_migration_ledger.py`: ordered ledger with per-step SQL checksums, a second startup neither re-applies nor duplicates, checksum drift is reported and left untouched, a v0.1 database gains the ledger without losing rows |
+| H8, H9 | OPEN | — | Not started (deployment lifecycle states on the task; static-check wording vs. real deployment evidence) |
 
 Verification at the tip of this branch:
 
 ```text
-ruff check app sandbox tests scripts      -> All checks passed
-ruff format --check app sandbox tests scripts -> 40 files already formatted
-python -m pytest -q                       -> 243 passed, 1 failed, 1 skipped
+ruff check app sandbox tests scripts          -> All checks passed
+ruff format --check app sandbox tests scripts -> 45 files already formatted
+python -m pytest -q                           -> 286 passed, 3 skipped
 ```
 
-The single failure is `tests/test_security_workspace.py::test_symlink_escape_and_git_write_blocked`,
-which cannot create a symlink on Windows without Developer Mode or
-`SeCreateSymbolicLinkPrivilege` (`OSError: [WinError 1314]`). It is a pre-existing
-environment limitation, not a code regression, and it was deliberately not skipped or
-weakened. The 1 skip is the PostgreSQL integration test, which requires `TEST_POSTGRES_URL`.
+The 3 skips are deliberate, not failures: the two PostgreSQL integration tests
+(`TEST_POSTGRES_URL` only, run in CI) and the symlink-escape test on Windows hosts without
+`SeCreateSymbolicLinkPrivilege`, which still runs in the Linux CI sandbox job.
+
+The same remediation branch also fixed a deployment incident on 2026-10-04: Coolify/Compose
+forward `API_OPERATOR_USER_ID` as an empty string, which pydantic refused to parse and
+crashed `Settings()` import in the sandbox healthcheck (`container ... is unhealthy`).
+Commit `64248a9` treats a blank principal as unset; fail-closed semantics are unchanged
+(`validate_runtime()` still refuses `API_TOKEN` without a principal). Merged to `main` as
+`f4dc777`.
 
 **H3 follows Dedi's explicit decision: `owner` becomes a real filter and a `tenant` column is
 added.** `tenant` is the hard boundary and is applied to every read, write, correction,
@@ -601,9 +613,11 @@ than a silent rename.
 
 ## 8. Recommended remediation order
 
-> **Status 2026-10-04:** steps 1–4 are complete and committed (`3aeeb66`, `7de1edb`,
-> `bdc2ea3`). Step 5 is complete except for the deliberate `policy_json` exclusion recorded
-> in section 0. The remaining steps below are still open.
+> **Status 2026-10-04:** steps 1–5 (all blockers plus H2's deliberate `policy_json`
+> exclusion) and the hardening batch (H3–H7) are complete and committed. The M1–M7 medium
+> batch is also complete (`cefd723`, hotfix `64248a9`). The remaining open items are H8
+> (deployment lifecycle states on the task) and H9 (static-check wording), plus the open
+> decisions in section 9.
 
 Each step is independently reviewable and reversible. Steps 1–5 are the blockers.
 
