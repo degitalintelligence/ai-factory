@@ -33,6 +33,14 @@ Sandbox tests are offline; mock external Telegram/payment/database APIs. Tempora
 
 ## Budgets and queue controls
 
+### Structured model output failures
+
+`/report <id>` and `/logs <id>` include `llm_validation` diagnostics for each rejected completion after this update. These identify the schema/role, attempt, and error category: malformed JSON, schema fields, empty content, missing choices, refusal, or truncated output. Report artifacts also record the configured model and output token limit. Raw responses, unknown field names, and input values are deliberately excluded. Earlier failures cannot be reconstructed from these new diagnostics.
+
+The engine sends specific validation feedback on retry and documents the Developer action format explicitly. A single JSON Markdown fence is accepted; prose, action arrays, unknown action names and extra fields remain invalid. A syntactically valid JSON object does not necessarily satisfy the action schema. The engine uses JSON-object mode and local validation; it does not assume that every configured model supports provider-enforced JSON Schema.
+
+After deploying a fix, retry the failed task once and inspect its new diagnostics if it fails again. For `truncated`, inspect the configured output limit and task size before adjusting them; reasoning models may consume output budget before returning JSON. No automatic token-limit increase or model switch is performed. A passing mocked regression suite does not establish live compatibility with a provider: verify one real task through tests, independent review and PR creation.
+
 Defaults: one worker, four review iterations, 60 developer steps per iteration, 150 model calls, 600k aggregate provider-reported tokens, $5 reported cost and one hour per attempt. Choose model IDs explicitly in Coolify; no hardcoded premium provider or silent fallback can increase spending.
 
 Each malformed-output retry consumes a call and records returned usage. Network failures can be billed by the provider without returned usage. Reported cost can therefore be partial. Use a provider-level credit limit for a strict dollar ceiling. `/retry` retains call/token/cost totals; reaching the budget requires a deliberately new bounded task or an operator policy change, not an automatic budget reset.

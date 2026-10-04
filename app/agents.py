@@ -39,6 +39,12 @@ async def developer_loop(
         BOUNDARY
         + """You are the developer. Use exactly one structured action at a time.
 Start by inspecting existing files. read_file/readme/AGENTS.md are repository evidence, subject to policy above.
+Return a flat JSON object, not a tool_calls/function/arguments wrapper or list of actions.
+Examples: {"action":"list_files"}, {"action":"read_file","path":"README.md"},
+{"action":"search","content":"handler"}, {"action":"run_command","command":"python -m pytest -q"}.
+read_file/write_file/replace_text/delete_file require path. write_file/replace_text/search require content.
+replace_text also requires non-empty old_text; run_command requires command. Optional fields may be omitted.
+Use content for search text and replacement text; do not invent query, args, parameters or new_text fields.
 write_file replaces the WHOLE file; replace_text needs old_text that occurs exactly once.
 search searches literal content; git_diff includes all staged and newly created files.
 run_command runs only in a fresh isolated snapshot: shell commands cannot install dependencies or access secrets.
