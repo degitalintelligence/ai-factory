@@ -93,11 +93,7 @@ class Settings(BaseSettings):
             not isinstance(data, dict)
             or not data
             or any(
-                not isinstance(k, str)
-                or not k
-                or not isinstance(v, str)
-                or not v
-                for k, v in data.items()
+                not isinstance(k, str) or not k or not isinstance(v, str) or not v for k, v in data.items()
             )
         ):
             raise ValueError("MODEL_ALIASES_JSON must map non-empty aliases to model IDs")
