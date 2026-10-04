@@ -30,6 +30,7 @@ class TaskStatus(StrEnum):
     PR_CREATED = "pr_created"
     COMPLETED = "completed"
     SUPERSEDED = "superseded"
+    REVIEWED = "reviewed"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
