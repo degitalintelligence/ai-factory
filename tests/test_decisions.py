@@ -1,13 +1,17 @@
 """Decision Request / Decision Inbox: one durable row, one state machine, every channel."""
 
+import json
 from datetime import timedelta
 
 import pytest
 from pydantic import ValidationError
 
 from app.contracts import decision_inbox, raise_decision, resolve_decision
-from app.db import utcnow
+from app.db import Decision, utcnow
 from app.schemas import DecisionMessageType, DecisionRequest, Option
+from app.store import plan_hash
+
+PLAN = json.dumps({"steps": ["do the thing"], "risk": "high"})
 
 
 def card(**overrides):
@@ -29,6 +33,19 @@ def card(**overrides):
         "risk_level": "high",
     }
     return DecisionRequest(**{**payload, **overrides})
+
+
+async def gated_task(db, requirement="Ship a risky change"):
+    """A task parked on a high-risk plan, exactly as the orchestrator leaves it."""
+    task = await db.create(requirement)
+    await db.update(task.id, status="awaiting_approval", plan_json=PLAN)
+    return await db.get(task.id)
+
+
+async def expire(db, decision_id):
+    async with db.sessions() as s, s.begin():
+        row = await s.get(Decision, decision_id)
+        row.expires_at = utcnow() - timedelta(hours=1)
 
 
 async def test_decision_card_requires_a_recommendation_that_exists(db):
@@ -143,3 +160,102 @@ async def test_secrets_in_a_card_are_redacted_before_storage(db):
     assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in stored.situation
     assert "sk-proj-1234567890abcdef" not in stored.evidence_json
     assert "[REDACTED]" in stored.situation
+
+
+async def test_approval_card_releases_the_task_with_the_exact_plan_hash(db):
+    task = await gated_task(db)
+    decision = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+
+    resolved = await resolve_decision(decision.id, "approve", user_id=7)
+
+    assert resolved.state == "approved"
+    after = await db.get(task.id)
+    assert after.status == "received"
+    assert after.approved_plan_hash == plan_hash(PLAN)
+
+
+async def test_a_generic_decision_never_resumes_an_approval_task(db):
+    task = await gated_task(db)
+    decision = await raise_decision(card(task_id=task.id, kind=DecisionMessageType.DECISION_REQUIRED))
+
+    await resolve_decision(decision.id, "approve", user_id=7)
+
+    # DECISION_REQUIRED is a question about the work, not an authorisation to execute it.
+    assert (await db.get(task.id)).status == "awaiting_approval"
+
+
+@pytest.mark.parametrize(
+    ("phrase", "expected"),
+    [("reject", "cancelled"), ("ask", "failed"), ("defer", "failed")],
+)
+async def test_a_non_approval_outcome_releases_the_gated_task_and_its_repository(db, phrase, expected):
+    task = await gated_task(db)
+    decision = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+
+    await resolve_decision(decision.id, phrase, user_id=7)
+
+    assert (await db.get(task.id)).status == expected
+    # The repository reservation must not outlive the decision.
+    assert await db.claim("worker") is None
+    replacement = await db.create("Unrelated next task")
+    assert replacement.id != task.id
+
+
+async def test_expiry_releases_the_gated_task_instead_of_stranding_it(db):
+    task = await gated_task(db)
+    decision = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+    await expire(db, decision.id)
+    await db.expire_stale_decisions()
+
+    assert (await db.get(task.id)).status == "failed"
+    assert await db.claim("worker") is None
+
+
+async def test_expired_approval_card_is_recorded_and_the_task_is_released(db):
+    task = await gated_task(db)
+    decision = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+    await expire(db, decision.id)
+
+    with pytest.raises(ValueError, match="Decision expired"):
+        await resolve_decision(decision.id, "approve")
+
+    assert [d.state for d in await decision_inbox(state="expired")] == ["expired"]
+    assert (await db.get(task.id)).status == "failed"
+
+
+async def test_an_approval_card_for_an_old_plan_cannot_approve_the_current_one(db):
+    task = await gated_task(db)
+    decision = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+    await db.update(task.id, plan_json=json.dumps({"steps": ["a different plan"], "risk": "high"}))
+
+    with pytest.raises(ValueError, match="different plan version"):
+        await resolve_decision(decision.id, "approve")
+
+    # Nothing was authorised: the card stays open and the task stays gated.
+    assert (await db.get(task.id)).status == "awaiting_approval"
+    assert (await db.get(task.id)).approved_plan_hash is None
+    assert [d.state for d in await decision_inbox(state="open")] == ["open"]
+
+
+async def test_a_failed_task_transition_rolls_the_decision_back(db):
+    task = await gated_task(db)
+    decision = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+    await db.update(task.id, plan_json=json.dumps({"steps": ["moved on"], "risk": "high"}))
+
+    with pytest.raises(ValueError):
+        await resolve_decision(decision.id, "approve")
+
+    reopened = (await decision_inbox(state="open"))[0]
+    assert reopened.id == decision.id
+    assert reopened.decided_at is None
+
+
+async def test_repeated_identical_answer_does_not_duplicate_the_task_event(db):
+    task = await gated_task(db)
+    decision = await db.ensure_task_approval_decision(task, "High-risk plan", plan_hash(PLAN))
+
+    await resolve_decision(decision.id, "reject", user_id=7)
+    await resolve_decision(decision.id, "reject", user_id=7)
+
+    messages = [e.message for e in await db.events(task.id) if e.kind == "decision"]
+    assert sum(f"Decision #{decision.id} -> rejected" in m for m in messages) == 1
