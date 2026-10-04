@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # supplies the audit principal for approvals.
     api_operator_user_id: int | None = Field(default=None, ge=1)
     max_iterations: int = Field(default=4, ge=1, le=10)
-    max_dev_steps: int = Field(default=60, ge=1, le=200)
+    max_dev_steps: int = Field(default=36, ge=1, le=200)
     # A separate stall ceiling prevents repetitive agent actions from consuming the whole task budget.
     max_developer_stall_steps: int = Field(default=8, ge=2, le=30)
     # Developer prompts are narrower than the global LLM prompt budget.
