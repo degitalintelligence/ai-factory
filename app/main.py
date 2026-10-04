@@ -306,7 +306,7 @@ async def clarify_intent(intent_id: int, request: ClarificationRequest):
 @app.post("/v1/plans/{plan_id}/approve", dependencies=[Depends(authorize)])
 async def approve_plan(plan_id: int, request: PlanApprovalRequest):
     try:
-        await perform_action(plan_id, "approve", request.plan_hash)
+        await perform_action(plan_id, "approve", request.plan_hash[:12])
         task = await store.get(plan_id)
         if not task:
             raise HTTPException(404, "Plan not found")
