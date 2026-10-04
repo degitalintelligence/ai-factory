@@ -65,7 +65,7 @@ Verification at the tip of this branch:
 ```text
 ruff check app sandbox tests scripts      -> All checks passed
 ruff format --check app sandbox tests scripts -> 40 files already formatted
-python -m pytest -q                       -> 241 passed, 1 failed, 1 skipped
+python -m pytest -q                       -> 243 passed, 1 failed, 1 skipped
 ```
 
 The single failure is `tests/test_security_workspace.py::test_symlink_escape_and_git_write_blocked`,
