@@ -5,6 +5,7 @@ import pytest
 
 from app import orchestrator
 from app.config import settings
+from app.contracts import decision_inbox, resolve_decision
 from app.schemas import CommandResult, CriterionEvidence, LeadPlan, ReviewResult
 from app.schemas import TestReport as Report
 from app.workspace import Workspace
@@ -202,6 +203,11 @@ async def test_plan_waits_before_execution_when_needed(db, engine_fakes, reason,
         state["questions"] = ["Which database must be preserved?"]
     task = await execute(db, (await db.create("Migrate user storage safely")).id)
     assert task.status == status and state["develop"] == 0
+    if reason == "high":
+        cards = await decision_inbox(state="open", project=task.project)
+        assert len(cards) == 1 and cards[0].task_id == task.id
+        await resolve_decision(cards[0].id, "approve", user_id=7)
+        assert (await db.get(task.id)).status == "received"
 
 
 async def test_base_drift_prevents_publication(db, engine_fakes):

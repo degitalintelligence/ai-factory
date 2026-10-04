@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 
 from app.agents import developer_loop, lead_plan, review_change
 from app.config import Project, settings
@@ -23,6 +24,9 @@ BASELINE_DOCUMENTS = (
     "pyproject.toml",
     "package.json",
     "docs/ARCHITECTURE.md",
+    "bot.py",
+    "pytest.ini",
+    "tests/test_smoke.py",
 )
 
 
@@ -30,7 +34,12 @@ async def repository_context(workspace, task):
     files = workspace.list_files()
     chunks = ["PROJECT POLICY: " + task.policy_json, "FILES:\n" + files]
     inspected = []
-    for path in BASELINE_DOCUMENTS:
+    referenced = re.findall(
+        r"(?<!https://)(?<!http://)(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:py|js|ts|json|toml|ini|md|yaml|yml)",
+        task.requirement,
+    )
+    baseline_paths = list(dict.fromkeys((*BASELINE_DOCUMENTS, *referenced)))[:40]
+    for path in baseline_paths:
         try:
             content = workspace.read_file(path)[:10000]
         except (ValueError, OSError, RuntimeError):
@@ -182,9 +191,10 @@ async def run_task(task_id, notify=None, owner=None):
         needs_approval = plan.risk == "high" or task.kind == "self_improvement"
         if needs_approval and task.approved_plan_hash != plan_hash(task.plan_json):
             reason = "Self-improvement" if task.kind == "self_improvement" else "High-risk plan"
+            await store.ensure_task_approval_decision(task, reason, plan_hash(task.plan_json))
             await transition(
                 "awaiting_approval",
-                f"{reason} ready for review. Use /plan {task_id}; approve this exact plan with /approve {task_id} {plan_hash(task.plan_json)[:12]}",
+                f"{reason} ready for review. Decision Inbox has the approval card. Approve the exact plan with /decide <decision-id> approve or /approve {task_id} {plan_hash(task.plan_json)[:12]}",
             )
             return
         feedback = json.loads(task.feedback_json)
@@ -226,6 +236,20 @@ async def run_task(task_id, notify=None, owner=None):
             if plan.deployment_required:
                 issues += deployment_issues(files, plan.persistence_required)
             await store.artifact(task_id, "tests", report.model_dump_json())
+            await store.artifact(
+                task_id,
+                "test_environment",
+                json.dumps(
+                    report.environment
+                    or {
+                        "runner": "isolated sandbox",
+                        "test_network": "disabled by sandbox policy",
+                        "credentials": "not mounted",
+                        "telegram_polling": "not started",
+                    },
+                    sort_keys=True,
+                ),
+            )
             await store.artifact(
                 task_id,
                 "standalone_tests",

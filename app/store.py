@@ -6,7 +6,17 @@ from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.db import ACTIVE, Artifact, Decision, Event, MemoryItem, SessionLocal, Task, utcnow
+from app.db import (
+    ACTIVE,
+    REPOSITORY_BLOCKING,
+    Artifact,
+    Decision,
+    Event,
+    MemoryItem,
+    SessionLocal,
+    Task,
+    utcnow,
+)
 from app.schemas import (
     CLEARANCE,
     DECISION_PHRASES,
@@ -74,7 +84,11 @@ class Store:
             # One active task per repository is the default safety policy.
             running = await s.scalar(
                 select(Task)
-                .where(Task.repo == policy.repo, Task.status.in_(ACTIVE), Task.cancel_requested.is_(False))
+                .where(
+                    Task.repo == policy.repo,
+                    Task.status.in_(REPOSITORY_BLOCKING),
+                    Task.cancel_requested.is_(False),
+                )
                 .limit(1)
             )
             if running:
@@ -344,6 +358,80 @@ class Store:
                 await s.commit()
             return decision
 
+    async def ensure_task_approval_decision(self, task, reason, plan_digest):
+        """Create one durable approval card for a task waiting on its plan.
+
+        Retries and worker recovery must not create duplicate inbox items for the
+        same task. The plan hash is included in the evidence so the approval is
+        bound to the exact plan that will be resumed.
+        """
+        from app.schemas import DecisionMessageType
+
+        async with self.sessions() as s:
+            existing = await s.scalar(
+                select(Decision)
+                .where(
+                    Decision.task_id == task.id,
+                    Decision.state == DecisionState.OPEN,
+                    Decision.kind == DecisionMessageType.APPROVAL_REQUIRED,
+                )
+                .order_by(Decision.id.desc())
+            )
+            if existing:
+                return existing
+            decision = Decision(
+                task_id=task.id,
+                project=task.project,
+                kind=DecisionMessageType.APPROVAL_REQUIRED,
+                title=f"Approve task #{task.id}: {reason}",
+                situation=redact(task.requirement),
+                why_now="The task is gated before code execution because its plan requires Dedi approval.",
+                options_json=json.dumps(
+                    [
+                        {
+                            "id": "approve",
+                            "label": "Approve this exact plan",
+                            "impact": "The worker may continue to implementation.",
+                            "risk": "The approved plan will be executed in the registered repository.",
+                        },
+                        {
+                            "id": "reject",
+                            "label": "Reject and stop the task",
+                            "impact": "No code changes will be executed.",
+                            "risk": "The requested work remains incomplete.",
+                        },
+                    ]
+                ),
+                impact_json=json.dumps(
+                    ["The worker may continue to implementation.", "No code changes will be executed."]
+                ),
+                risk_json=json.dumps(
+                    [
+                        "The approved plan will be executed in the registered repository.",
+                        "The requested work remains incomplete.",
+                    ]
+                ),
+                recommendation="approve",
+                evidence_json=json.dumps([f"plan_sha256={plan_digest}", f"task_id={task.id}"]),
+                missing_information="Review the plan and exact hash shown in /plan before approving.",
+                rollback="Reject the task before execution; code changes are still gated by review and tests.",
+                required_action=f"approve with plan hash {plan_digest[:12]}, or reject",
+                priority="high",
+                risk_level="high" if reason == "Self-improvement" else "medium",
+            )
+            s.add(decision)
+            await s.flush()
+            s.add(
+                Event(
+                    task_id=task.id,
+                    kind="decision",
+                    message=redact(f"Decision #{decision.id} requested: {decision.title}"),
+                )
+            )
+            await s.commit()
+            await s.refresh(decision)
+            return decision
+
     async def inbox(self, state=None, project=None, limit=50):
         """List decisions newest first, filtered by state/project for the operator inbox."""
         async with self.sessions() as s:
@@ -378,6 +466,7 @@ class Store:
         outcome = DECISION_PHRASES.get(phrase.strip().lower())
         if not outcome:
             raise ValueError("Answer with one of: approve, reject, ask, defer")
+        task_id = None
         async with self.sessions() as s:
             decision = await s.get(Decision, decision_id, with_for_update=True)
             if not decision:
@@ -385,29 +474,40 @@ class Store:
             target = OUTCOME_STATE[outcome]
             if decision.state != DecisionState.OPEN:
                 if decision.state == target:
-                    return decision
-                raise ValueError(
-                    f"Decision #{decision_id} is already {decision.state}; start a new decision instead"
-                )
-            if decision.expires_at and decision.expires_at < utcnow():
-                # Persist the expiry before raising, otherwise the rollback keeps it open forever.
-                decision.state = DecisionState.EXPIRED
-                await s.commit()
-                raise ValueError("Decision expired; request a new one")
-            decision.state = target
-            decision.decided_by = user_id
-            decision.decided_at = utcnow()
-            if decision.task_id:
-                s.add(
-                    Event(
-                        task_id=decision.task_id,
-                        kind="decision",
-                        message=redact(f"Decision #{decision_id} -> {target} by {user_id}"),
+                    task_id = decision.task_id
+                    result = decision
+                else:
+                    raise ValueError(
+                        f"Decision #{decision_id} is already {decision.state}; start a new decision instead"
                     )
-                )
-            await s.commit()
-            await s.refresh(decision)
-            return decision
+            else:
+                if decision.expires_at and decision.expires_at < utcnow():
+                    # Persist the expiry before raising, otherwise the rollback keeps it open forever.
+                    decision.state = DecisionState.EXPIRED
+                    await s.commit()
+                    raise ValueError("Decision expired; request a new one")
+                decision.state = target
+                decision.decided_by = user_id
+                decision.decided_at = utcnow()
+                task_id = decision.task_id
+                if decision.task_id:
+                    s.add(
+                        Event(
+                            task_id=decision.task_id,
+                            kind="decision",
+                            message=redact(f"Decision #{decision_id} -> {target} by {user_id}"),
+                        )
+                    )
+                await s.commit()
+                await s.refresh(decision)
+                result = decision
+        # Approval is not merely a label: resume a task that is waiting on this
+        # decision, using the current plan hash as the same guard as /approve.
+        if task_id and target == DecisionState.APPROVED:
+            task = await self.get(task_id)
+            if task and task.status == "awaiting_approval" and task.plan_json:
+                await self.resume(task_id, "approve", plan_hash(task.plan_json)[:12])
+        return result
 
     # --- Context and Memory Plane ---
 
@@ -417,13 +517,19 @@ class Store:
         A correction never overwrites history: the old row is kept and marked superseded,
         so what was previously believed stays auditable.
         """
+        if item.locked and owner is None:
+            raise ValueError("Locked memories require an owner")
         if redact(item.value) != item.value:
             raise ValueError("Remove credentials before storing this as memory")
         async with self.sessions() as s:
             previous = list(
                 await s.scalars(
                     select(MemoryItem)
-                    .where(MemoryItem.key == item.key, MemoryItem.state == MemoryState.ACTIVE)
+                    .where(
+                        MemoryItem.key == item.key,
+                        MemoryItem.scope == item.scope,
+                        MemoryItem.state == MemoryState.ACTIVE,
+                    )
                     .with_for_update()
                 )
             )
@@ -520,7 +626,10 @@ class Store:
             if not row:
                 raise ValueError("Memory not found")
             if row.locked:
-                raise ValueError("Memory is locked by Dedi and cannot be corrected automatically")
+                if owner != row.owner:
+                    raise ValueError("Memory is locked by Dedi and cannot be corrected automatically")
+            elif row.owner is not None and owner != row.owner:
+                raise ValueError("Only the memory owner can correct this memory")
             if row.state != MemoryState.ACTIVE:
                 raise ValueError(f"Memory is {row.state}; correct the active version instead")
             if redact(value) != value:
@@ -569,8 +678,10 @@ class Store:
             row = await s.get(MemoryItem, memory_id, with_for_update=True)
             if not row:
                 raise ValueError("Memory not found")
-            if row.locked and owner is None:
+            if row.locked and owner != row.owner:
                 raise ValueError("Locked memories can only be retracted by their owner")
+            if row.owner is not None and owner != row.owner:
+                raise ValueError("Only the memory owner can retract this memory")
             row.state = MemoryState.RETRACTED
             if task_id:
                 s.add(

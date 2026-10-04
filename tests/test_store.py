@@ -126,6 +126,14 @@ async def test_only_one_active_task_per_repository(db):
     assert other.repo == "owner/other"
 
 
+@pytest.mark.parametrize("status", ["waiting_input", "awaiting_approval", "pr_created"])
+async def test_paused_or_published_task_reserves_its_repository(db, status):
+    first = await db.create("First gated feature")
+    await db.update(first.id, status=status)
+    with pytest.raises(ValueError, match="One active task per repository"):
+        await db.create("Second feature on the same repository")
+
+
 async def test_idempotent_retry_returns_the_original_task_while_active(db):
     first = await db.create("Same requirement", idempotency_key="telegram:9")
     await db.claim("worker-a")  # the task is active, yet a retry is still idempotent

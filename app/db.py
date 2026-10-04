@@ -32,7 +32,12 @@ class TaskStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+# These states reserve a repository even when no worker lease is held. A paused
+# approval/input task or an open PR must not race a second branch on the same repo.
 ACTIVE = {"planning", "developing", "testing", "reviewing", "publishing"}
+# Repository reservation is broader than worker lease activity. Paused tasks and
+# an open PR still own the repository and must not be bypassed by a new branch.
+REPOSITORY_BLOCKING = ACTIVE | {"waiting_input", "awaiting_approval", "pr_created"}
 
 
 class Task(Base):
@@ -197,10 +202,11 @@ async def init_db(db_engine=None):
         )
         try:
             async with conn.begin_nested():
+                await conn.execute(text("DROP INDEX IF EXISTS ux_memory_active"))
                 await conn.execute(
                     text(
                         "CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_active "
-                        "ON memory_items (key) WHERE state = 'active'"
+                        "ON memory_items (key, scope) WHERE state = 'active'"
                     )
                 )
         except IntegrityError:

@@ -143,7 +143,7 @@ async def test_correction_keeps_the_previous_version_auditable(db):
 
 
 async def test_locked_memory_refuses_automatic_correction(db):
-    locked = await remember(item(locked=True))
+    locked = await remember(item(locked=True), owner=7)
     with pytest.raises(ValueError, match="locked by Dedi"):
         await db.correct_memory(locked.id, "staging-web", source="agent guess")
 
@@ -157,7 +157,7 @@ async def test_retraction_closes_the_memory_without_deleting_it(db):
 
 
 async def test_locked_memory_needs_an_owner_to_retract(db):
-    locked = await remember(item(locked=True))
+    locked = await remember(item(locked=True), owner=7)
     with pytest.raises(ValueError, match="only be retracted by their owner"):
         await db.retract_memory(locked.id, "reason")
     assert (await db.retract_memory(locked.id, "Dedi retracted", owner=7)).state == MemoryState.RETRACTED
@@ -268,8 +268,14 @@ async def test_concurrent_memory_writes_fail_with_a_retryable_error(db, monkeypa
 async def test_active_memory_keys_are_unique_in_the_database(db):
     """The partial unique index is the hard backstop behind the store-layer row locks."""
     await remember(item())
-    duplicate = MemoryItem(key="deploy.target", value="prod-web", source="duplicate write")
+    duplicate = MemoryItem(key="deploy.target", scope="lab", value="prod-web", source="duplicate write")
     async with db.sessions() as s:
         s.add(duplicate)
         with pytest.raises(IntegrityError):
             await s.commit()
+
+
+async def test_same_memory_key_can_be_scoped_to_distinct_projects(db):
+    await remember(item(key="deploy.target", scope="lab", value="lab-web"))
+    await remember(item(key="deploy.target", scope="quant", value="quant-web"))
+    assert {v.value for v in (await db.recall(role="lead"))[0]} == {"lab-web", "quant-web"}

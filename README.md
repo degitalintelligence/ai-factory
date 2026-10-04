@@ -2,7 +2,10 @@
 
 An operating engine for building software from Telegram requirements: **repository-aware planning → implementation → isolated tests → independent review → repair → GitHub PR → explicit, commit-bound Coolify deployment**.
 
-AI Factory is the engine. LioBot, Quant Factory and other products belong in their own repositories. The default target remains `degitalintelligence/telegram-lab`.
+LioBot = AI Factory. This repository is the LioBot core product and its bounded
+engineering engine. `telegram-lab` is a test/acceptance harness only; it is not a
+second LioBot product. Quant Factory, Kedaya, and other business products remain
+separate registered repositories and runtimes.
 
 ## What works
 
