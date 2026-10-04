@@ -110,9 +110,10 @@ def quality_issues(
     diff: str,
     hygiene: list[str],
     standalone: TestReport | None = None,
+    allow_no_diff: bool = False,
 ):
     issues = list(hygiene)
-    if not diff.strip():
+    if not diff.strip() and not allow_no_diff:
         issues.append("No implementation diff")
     if not report.passed:
         issues.append("Mandatory test gate failed (including missing tests, timeout, or test artifacts)")
