@@ -4,9 +4,9 @@
 > Product identity: LioBot = AI Factory.
 > This repository is the LioBot core engine. Read this file before changing code.
 >
-> **Requirement authority:** `LIOBOT_CORE_V0_3_REQUIREMENTS.md` is the current product
-> and engineering requirement. It amends `AI_FACTORY_FULL_REQUIREMENTS.md` and
-> `AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md` and is read before them. Where V0.3 and an
+> **Requirement authority:** `docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md` is the current product
+> and engineering requirement. It amends `docs/AI_FACTORY_FULL_REQUIREMENTS (2).md` and
+> `docs/AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md` and is read before them. Where V0.3 and an
 > earlier document disagree, V0.3 wins. See §3 for the full precedence order.
 
 ## 0. Project at a glance
@@ -37,8 +37,8 @@ Before writing or changing code, every agent must:
 1. Read this AGENTS.md completely.
 2. Read README.md.
 3. Read relevant sections of docs/ARCHITECTURE.md, docs/VERIFICATION.md, and docs/OPERATIONS.md.
-4. Read `LIOBOT_CORE_V0_3_REQUIREMENTS.md`, then the amendment
-   `AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md`, then the supplied product requirements.
+4. Read `docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md`, then the amendment
+   `docs/AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md`, then the supplied product requirements.
    V0.3 is authoritative for product identity, product boundary, capability levels,
    decision categories, memory model, and acceptance criteria.
 5. Inspect the current module and test structure before choosing a file.
@@ -88,10 +88,10 @@ These decisions are locked unless Dedi explicitly changes them.
 When documents or prompts conflict, use this order:
 
 1. The latest explicit instruction from Dedi.
-2. LIOBOT_CORE_V0_3_REQUIREMENTS.md, the current product and engineering requirement.
-3. AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md, where V0.3 is silent.
+2. docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md, the current product and engineering requirement.
+3. docs/AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md, where V0.3 is silent.
 4. This AGENTS.md for repository operation and safety.
-5. AI_FACTORY_FULL_REQUIREMENTS.md, including its normative correction section.
+5. docs/AI_FACTORY_FULL_REQUIREMENTS (2).md, including its normative correction section.
 6. README.md and docs.
 7. Existing implementation and historical notes.
 8. Agent assumptions last.
