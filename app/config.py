@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     projects_json: str = ""
     telegram_allowed_user_ids: str = ""
     api_token: str = ""
+    # HTTP is a shared operator credential, so the server—not the request body—
+    # supplies the audit principal for approvals.
+    api_operator_user_id: int | None = Field(default=None, ge=1)
     max_iterations: int = Field(default=4, ge=1, le=10)
     max_dev_steps: int = Field(default=60, ge=1, le=200)
     max_llm_calls: int = Field(default=150, ge=1, le=1000)

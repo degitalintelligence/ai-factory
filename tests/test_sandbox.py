@@ -35,6 +35,8 @@ def test_tests_cannot_mutate_source_without_detection(monkeypatch):
     report = server.run(server.RunRequest(files={"source.py": "original"}, commands=[["pytest"]]))
     assert not report.passed
     assert "source.py" in report.issues[0] and "todo.db" in report.issues[0]
+    assert report.environment["test_network"] == "disabled"
+    assert report.environment["credentials"] == "cleared"
 
 
 def test_dependency_network_requires_operator_opt_in(monkeypatch):

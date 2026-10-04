@@ -1,12 +1,14 @@
 # AI Factory — Full Product & Engineering Requirements
 
-**Status:** Baseline untuk eksekusi developer  
+**Status:** Current baseline, with Amendment V1.1 and AGENTS.md authoritative
 **Version:** 1.1  
 **Tanggal:** 2026-10-04  
 **Owner:** Dedi / PT Pohon Keahlian Digital  
 **Repository engine:** degitalintelligence/ai-factory  
-**Current target:** degitalintelligence/telegram-lab  
+**Acceptance harness:** degitalintelligence/telegram-lab; **core product:** degitalintelligence/ai-factory
 **Current model:** stealth/space-bunny-alpha untuk Lead, Developer, Reviewer
+
+> **Canonical correction:** LioBot = AI Factory. `AGENTS.md` and `AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md` are authoritative where earlier baseline wording conflicts with the self-building and channel-boundary rules below.
 
 ---
 
@@ -510,7 +512,7 @@ Ini acceptance target utama untuk membuktikan AI Factory sebagai engine.
 
 ### 11.1 Scope
 
-AI Factory menyiapkan LioBot di repository target yang terdaftar, bukan mengedit AI Factory sebagai target application.
+Self-improvement LioBot menargetkan repository `ai-factory` melalui alias yang terdaftar secara eksplisit; `telegram-lab` tetap hanya acceptance harness.
 
 Wajib:
 
@@ -1287,4 +1289,3 @@ Jika tidak ada tindakan dari Dedi, LioBot harus menyatakan “tidak ada tindakan
 6. Tambahkan self-building loop dengan approval gate.
 7. Baru setelah itu buat dashboard/native chat adapter yang nyaman untuk Dedi.
 8. Gunakan 'telegram-lab' hanya untuk regression/acceptance testing seluruh loop.
-

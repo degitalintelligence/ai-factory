@@ -84,6 +84,7 @@ class CommandResult(BaseModel):
 class TestReport(BaseModel):
     results: list[CommandResult] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
+    environment: dict[str, str] = Field(default_factory=dict)
 
     @property
     def passed(self):

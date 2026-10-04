@@ -51,7 +51,7 @@ Keep a single Telegram polling replica. If scaling the worker code into addition
 
 ## HTTP operator interface
 
-Set a separate `API_TOKEN`. Empty token means endpoints fail closed. Use `Authorization: Bearer ...` for `/tasks`, `/tasks/{id}`, `/tasks/{id}/events` and `/tasks/{id}/artifacts`. POST `/tasks` with `requirement`, `project` and optional `idempotency_key`. Reuse a key only for the same request. POST `/tasks/{id}/{cancel|retry|answer|approve|feedback}` with a JSON `message`. The token grants operator-wide access: do not distribute it to customers.
+Set a separate `API_TOKEN` and, when using HTTP approvals, set `API_OPERATOR_USER_ID` to the numeric operator identity recorded in the audit trail. Empty token means endpoints fail closed. The decision answer body accepts only `answer`; callers cannot spoof `user_id`. Use `Authorization: Bearer ...` for `/tasks`, `/tasks/{id}`, `/tasks/{id}/events` and `/tasks/{id}/artifacts`. POST `/tasks` with `requirement`, `project` and optional `idempotency_key`. Reuse a key only for the same request. POST `/tasks/{id}/{cancel|retry|answer|approve|feedback}` with a JSON `message`. The token grants operator-wide access: do not distribute it to customers.
 
 ## Optional Coolify release integration
 

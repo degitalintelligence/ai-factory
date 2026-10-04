@@ -190,7 +190,14 @@ def run(request: RunRequest):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(content)
             baseline = fingerprint(root)
-            report = TestReport()
+            report = TestReport(
+                environment={
+                    "runner": "bubblewrap isolated sandbox",
+                    "test_network": "disabled",
+                    "credentials": "cleared",
+                    "telegram_polling": "not started",
+                }
+            )
             if request.install_dependencies:
                 if os.getenv("SANDBOX_INSTALL_DEPS", "false").lower() != "true":
                     report.issues.append("Dependency network access is disabled by sandbox operator")

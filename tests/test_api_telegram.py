@@ -180,6 +180,7 @@ async def test_improve_warns_when_sensitive_areas_are_touched(db, monkeypatch):
 
 async def test_api_decision_records_the_answering_operator(db, monkeypatch):
     monkeypatch.setattr(settings, "api_token", "t")
+    monkeypatch.setattr(settings, "api_operator_user_id", 42)
     headers = {"Authorization": "Bearer t"}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
         first = (await client.post("/decisions", headers=headers, json=CARD)).json()["id"]
@@ -187,9 +188,11 @@ async def test_api_decision_records_the_answering_operator(db, monkeypatch):
         answered = await client.post(
             f"/decisions/{first}", headers=headers, json={"answer": "approve", "user_id": 42}
         )
+        assert answered.status_code == 422
+        answered = await client.post(f"/decisions/{first}", headers=headers, json={"answer": "approve"})
         assert answered.status_code == 200 and answered.json()["decided_by"] == 42
         anonymous = await client.post(f"/decisions/{second}", headers=headers, json={"answer": "approve"})
-        assert anonymous.status_code == 200 and anonymous.json()["decided_by"] is None
+        assert anonymous.status_code == 200 and anonymous.json()["decided_by"] == 42
 
 
 async def test_improve_can_target_a_registered_project(db, monkeypatch):

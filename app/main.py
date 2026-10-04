@@ -65,6 +65,7 @@ def authorize(authorization: str = Header(default="")):
         authorization.encode(), f"Bearer {settings.api_token}".encode()
     ):
         raise HTTPException(401, "Unauthorized")
+    return settings.api_operator_user_id
 
 
 @app.get("/health")
@@ -215,13 +216,13 @@ async def decisions(state: str | None = None, project: str | None = None):
 
 
 class DecisionAnswer(BaseModel):
+    model_config = {"extra": "forbid"}
     answer: str = Field(min_length=1, max_length=200)
-    user_id: int | None = None
 
 
 @app.post("/decisions/{decision_id}", dependencies=[Depends(authorize)])
-async def answer_decision(decision_id: int, request: DecisionAnswer):
+async def answer_decision(decision_id: int, request: DecisionAnswer, operator_id=Depends(authorize)):
     try:
-        return decision_view(await resolve_decision(decision_id, request.answer, request.user_id))
+        return decision_view(await resolve_decision(decision_id, request.answer, operator_id))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc

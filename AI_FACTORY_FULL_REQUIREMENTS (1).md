@@ -1,18 +1,20 @@
 # AI Factory — Full Product & Engineering Requirements
 
-**Status:** Baseline untuk eksekusi developer  
+**Status:** Historical baseline — tidak boleh dipakai sebagai source of truth tunggal
 **Version:** 1.0  
 **Tanggal:** 2026-10-04  
 **Owner:** Dedi / PT Pohon Keahlian Digital  
 **Repository engine:** degitalintelligence/ai-factory  
-**Current target:** degitalintelligence/telegram-lab  
+**Acceptance harness:** degitalintelligence/telegram-lab; **core product:** degitalintelligence/ai-factory
 **Current model:** stealth/space-bunny-alpha untuk Lead, Developer, Reviewer
+
+> **Canonical correction:** LioBot = AI Factory. `AGENTS.md` and `AI_FACTORY_REQUIREMENTS_AMENDMENT_V1.1.md` are authoritative for current product identity, self-building, and channel boundaries. This baseline is retained for historical acceptance scenarios only.
 
 ---
 
 ## 1. Ringkasan produk
 
-AI Factory adalah mesin kerja berbasis AI yang menerima objective manusia, memahami repository atau business context, membuat rencana, membentuk tim/role/skill, mengeksekusi pekerjaan melalui tool yang dibatasi, menghasilkan evidence, menguji hasil, melakukan review independen, meminta approval manusia pada tindakan berisiko, lalu menerbitkan artefak, PR, atau deployment yang dapat diaudit.
+AI Factory/LioBot adalah mesin kerja berbasis AI yang menerima objective manusia, memahami repository atau business context, membuat rencana, membentuk tim/role/skill, mengeksekusi pekerjaan melalui tool yang dibatasi, menghasilkan evidence, menguji hasil, melakukan review independen, meminta approval manusia pada tindakan berisiko, lalu menerbitkan artefak, PR, atau deployment yang dapat diaudit.
 
 AI Factory bukan hanya coding bot. Coding adalah capability pertama karena batas verifikasinya paling jelas. Arsitektur harus mendukung:
 
@@ -39,7 +41,7 @@ AI Factory adalah engine/orchestrator. LioBot, Quant Factory, Kedaya, dan produk
 ## 2. Keputusan yang dikunci
 
 1. AI Factory harus mampu menyiapkan LioBot end-to-end: source change, tests, Dockerfile, docker-compose.yaml, persistence, healthcheck, environment example, deployment docs, backup/rollback guidance, dan PR.
-2. LioBot bukan AI Factory. LioBot adalah target application/repository yang dibangun oleh AI Factory.
+2. LioBot = AI Factory. Repository `ai-factory` adalah core product; `telegram-lab` hanya acceptance harness.
 3. Quant Factory harus tetap produk terpisah dan tidak boleh berbagi repository, database, workspace, volume, atau credential dengan AI Factory.
 4. Semua role saat ini menggunakan model stealth/space-bunny-alpha. Config boleh tetap dipisah per role untuk future routing, tetapi tidak boleh ada silent fallback atau model switch tersembunyi.
 5. Merge branch utama dan production deployment tetap human-controlled.
@@ -509,7 +511,7 @@ Ini acceptance target utama untuk membuktikan AI Factory sebagai engine.
 
 ### 11.1 Scope
 
-AI Factory menyiapkan LioBot di repository target yang terdaftar, bukan mengedit AI Factory sebagai target application.
+Self-improvement LioBot menargetkan repository `ai-factory` melalui alias yang terdaftar secara eksplisit; `telegram-lab` tetap hanya acceptance harness.
 
 Wajib:
 
@@ -997,4 +999,3 @@ A milestone is done only when:
 - model claim is never the only evidence.
 
 Success is not the number of generated PRs. Success is the percentage of tasks reaching a correct, reviewable, reproducible outcome with minimal human intervention while preserving human control over irreversible actions.
-
