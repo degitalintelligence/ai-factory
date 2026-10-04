@@ -5,13 +5,27 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class PlanBudget(BaseModel):
+    """The planner's requested budget; runtime ceilings remain operator-configured."""
+
+    max_llm_calls: int = Field(default=30, ge=1, le=1000)
+    max_tokens: int = Field(default=120_000, ge=1)
+    max_cost_usd: float = Field(default=1.0, gt=0)
+
+
 class LeadPlan(BaseModel):
     objective: str = Field(min_length=1)
     acceptance_criteria: list[str] = Field(min_length=1)
+    assumptions: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
     suggested_tests: list[str] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
+    approval_gates: list[str] = Field(default_factory=list)
+    rollback_plan: str = ""
+    budget: PlanBudget = Field(default_factory=PlanBudget)
     questions: list[str] = Field(default_factory=list)
     risk: Literal["low", "medium", "high"] = "low"
     deployment_required: bool = False
@@ -234,6 +248,28 @@ class MemoryRecall(BaseModel):
     items: list[MemoryView] = Field(default_factory=list)
     keys: list[str] = Field(default_factory=list)
     truncated: bool = False
+
+
+class IntentRequest(BaseModel):
+    """Channel-neutral natural-language intake for the v0.3 orchestration API."""
+
+    objective: str = Field(min_length=5, max_length=20000)
+    project: str = "lab"
+    idempotency_key: str | None = Field(default=None, max_length=160)
+
+
+class ClarificationRequest(BaseModel):
+    answer: str = Field(min_length=1, max_length=10000)
+
+
+class PlanApprovalRequest(BaseModel):
+    plan_hash: str = Field(min_length=12, max_length=64)
+
+
+class ImprovementRequest(BaseModel):
+    brief: SelfImprovementBrief
+    project: str = "lab"
+    idempotency_key: str | None = Field(default=None, max_length=160)
 
 
 class TaskRequest(BaseModel):

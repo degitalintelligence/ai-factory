@@ -9,9 +9,22 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.config import settings
-from app.contracts import decision_inbox, perform_action, raise_decision, resolve_decision
+from app.contracts import (
+    create_self_improvement,
+    decision_inbox,
+    perform_action,
+    raise_decision,
+    resolve_decision,
+)
 from app.db import engine, init_db, utcnow
-from app.schemas import DecisionRequest, TaskRequest
+from app.schemas import (
+    ClarificationRequest,
+    DecisionRequest,
+    ImprovementRequest,
+    IntentRequest,
+    PlanApprovalRequest,
+    TaskRequest,
+)
 from app.store import store
 from app.telegram_control import build_telegram_app
 from app.worker import WorkerPool
@@ -57,7 +70,7 @@ async def lifespan(app):
         await engine.dispose()
 
 
-app = FastAPI(title="LioBot by AI Factory", version="0.2.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="LioBot by AI Factory", version="0.3.0", lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
 def authorize(authorization: str = Header(default="")):
@@ -69,11 +82,13 @@ def authorize(authorization: str = Header(default="")):
 
 
 @app.get("/health")
+@app.get("/v1/health")
 async def health():
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.3.0"}
 
 
 @app.get("/ready")
+@app.get("/v1/ready")
 async def ready():
     try:
         async with engine.connect() as connection:
@@ -95,7 +110,7 @@ async def ready():
                 response.raise_for_status()
     except Exception:
         raise HTTPException(503, "A required dependency is not ready") from None
-    return {"status": "ready", "version": "0.2.0"}
+    return {"status": "ready", "version": "0.3.0"}
 
 
 @app.get("/health/telegram", dependencies=[Depends(authorize)])
@@ -107,6 +122,24 @@ async def telegram_health():
 
 
 def task_view(t):
+    try:
+        plan = json.loads(t.plan_json) if t.plan_json else None
+    except (TypeError, json.JSONDecodeError):
+        plan = None
+    next_actions = {
+        "received": "LioBot will resolve intent and prepare a plan.",
+        "planning": "Review the plan when it appears; answer only blocking questions.",
+        "waiting_input": "Answer the blocking clarification.",
+        "awaiting_approval": "Review the exact plan and approve, reject, ask, or defer.",
+        "developing": "LioBot is executing the approved bounded plan.",
+        "testing": "LioBot is running isolated verification.",
+        "reviewing": "LioBot is independently reviewing evidence.",
+        "publishing": "LioBot is reconciling the approved publication.",
+        "pr_created": "Review the PR and decide whether to merge/deploy.",
+        "failed": "Inspect the report/logs, then create a new bounded retry if appropriate.",
+        "cancelled": "No action is running; create a new intent if the work is still needed.",
+    }
+    decision_required = t.status in {"waiting_input", "awaiting_approval"}
     return {
         key: getattr(t, key)
         for key in (
@@ -126,6 +159,15 @@ def task_view(t):
             "created_at",
             "updated_at",
         )
+    } | {
+        "intent_id": t.id,
+        "kind": t.kind,
+        "summary": t.last_message or "Intent accepted; waiting for the next durable state transition.",
+        "next_action": next_actions.get(t.status, "Inspect the current evidence and task state."),
+        "decision_required": decision_required,
+        "evidence_refs": [f"/v1/tasks/{t.id}/evidence"],
+        "risk": (plan or {}).get("risk", "unknown"),
+        "plan": plan,
     }
 
 
@@ -143,6 +185,8 @@ async def tasks():
 
 
 @app.get("/tasks/{task_id}", dependencies=[Depends(authorize)])
+@app.get("/v1/tasks/{task_id}", dependencies=[Depends(authorize)])
+@app.get("/v1/intents/{task_id}", dependencies=[Depends(authorize)])
 async def task(task_id: int):
     t = await store.get(task_id)
     if not t:
@@ -151,6 +195,8 @@ async def task(task_id: int):
 
 
 @app.get("/tasks/{task_id}/artifacts", dependencies=[Depends(authorize)])
+@app.get("/v1/tasks/{task_id}/evidence", dependencies=[Depends(authorize)])
+@app.get("/v1/tasks/{task_id}/artifacts", dependencies=[Depends(authorize)])
 async def artifacts(task_id: int):
     return [
         {"kind": a.kind, "content": a.content, "created_at": a.created_at}
@@ -206,11 +252,13 @@ def decision_view(d):
 
 
 @app.post("/decisions", dependencies=[Depends(authorize)], status_code=201)
+@app.post("/v1/decisions", dependencies=[Depends(authorize)], status_code=201)
 async def new_decision(card: DecisionRequest):
     return decision_view(await raise_decision(card))
 
 
 @app.get("/decisions", dependencies=[Depends(authorize)])
+@app.get("/v1/decisions", dependencies=[Depends(authorize)])
 async def decisions(state: str | None = None, project: str | None = None):
     return [decision_view(d) for d in await decision_inbox(state=state, project=project)]
 
@@ -221,8 +269,87 @@ class DecisionAnswer(BaseModel):
 
 
 @app.post("/decisions/{decision_id}", dependencies=[Depends(authorize)])
+@app.post("/v1/decisions/{decision_id}/action", dependencies=[Depends(authorize)])
 async def answer_decision(decision_id: int, request: DecisionAnswer, operator_id=Depends(authorize)):
     try:
         return decision_view(await resolve_decision(decision_id, request.answer, operator_id))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/v1/intents", dependencies=[Depends(authorize)], status_code=202)
+async def create_intent(request: IntentRequest, operator_id=Depends(authorize)):
+    try:
+        task = await store.create(
+            request.objective,
+            project=request.project,
+            user_id=operator_id,
+            idempotency_key=request.idempotency_key,
+        )
+        return task_view(task)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/v1/intents/{intent_id}/clarification", dependencies=[Depends(authorize)])
+async def clarify_intent(intent_id: int, request: ClarificationRequest):
+    try:
+        await perform_action(intent_id, "answer", request.answer)
+        task = await store.get(intent_id)
+        if not task:
+            raise HTTPException(404, "Intent not found")
+        return task_view(task)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/v1/plans/{plan_id}/approve", dependencies=[Depends(authorize)])
+async def approve_plan(plan_id: int, request: PlanApprovalRequest):
+    try:
+        await perform_action(plan_id, "approve", request.plan_hash[:12])
+        task = await store.get(plan_id)
+        if not task:
+            raise HTTPException(404, "Plan not found")
+        return task_view(task)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/v1/improvements", dependencies=[Depends(authorize)], status_code=202)
+async def create_improvement(request: ImprovementRequest, operator_id=Depends(authorize)):
+    try:
+        task, needs_approval, sensitive_areas = await create_self_improvement(
+            request.brief,
+            request.project,
+            user_id=operator_id,
+            idempotency_key=request.idempotency_key,
+        )
+        result = task_view(task)
+        result.update(
+            {
+                "approval_required": needs_approval,
+                "sensitive_areas": sensitive_areas,
+                "next_action": (
+                    "Review the self-improvement plan and decision card before execution."
+                    if needs_approval
+                    else "LioBot will prepare the bounded self-improvement plan."
+                ),
+            }
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/v1/memory/search", dependencies=[Depends(authorize)])
+async def search_memory(
+    keys: str = "",
+    role: str = "",
+    scope: str | None = None,
+    limit: int = 25,
+):
+    if not 1 <= limit <= 100:
+        raise HTTPException(422, "limit must be between 1 and 100")
+    selected = [key.strip() for key in keys.split(",") if key.strip()] or None
+    items, truncated = await store.recall(selected, role=role or None, scope=scope, limit=limit)
+    return {"items": [item.model_dump() for item in items], "truncated": truncated}

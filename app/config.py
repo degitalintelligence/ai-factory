@@ -36,9 +36,11 @@ class Settings(BaseSettings):
     github_token: str = ""
     github_owner: str = "degitalintelligence"
     lab_repo: str = "telegram-lab"
-    lead_model: str = ""
-    developer_model: str = ""
-    reviewer_model: str = ""
+    # Roles accept either a concrete provider model or an audited alias.
+    model_aliases_json: str = '{"bunny-alpha":"stealth/space-bunny-alpha"}'
+    lead_model: str = "bunny-alpha"
+    developer_model: str = "bunny-alpha"
+    reviewer_model: str = "bunny-alpha"
     projects_json: str = ""
     telegram_allowed_user_ids: str = ""
     api_token: str = ""
@@ -79,6 +81,29 @@ class Settings(BaseSettings):
                 raise ValueError("DATABASE_PASSWORD is required with DATABASE_HOST")
             self.database_url = f"postgresql+asyncpg://ai_factory:{quote(self.database_password, safe='')}@{self.database_host}:5432/ai_factory"
         return self
+
+    def model_aliases(self) -> dict[str, str]:
+        """Resolve model aliases from operator configuration; unknown aliases fail closed."""
+        try:
+            raw = self.model_aliases_json.strip() or '{"bunny-alpha":"stealth/space-bunny-alpha"}'
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("MODEL_ALIASES_JSON must be valid JSON") from exc
+        if (
+            not isinstance(data, dict)
+            or not data
+            or any(
+                not isinstance(k, str) or not k or not isinstance(v, str) or not v for k, v in data.items()
+            )
+        ):
+            raise ValueError("MODEL_ALIASES_JSON must map non-empty aliases to model IDs")
+        return data
+
+    def model_for(self, role: str) -> str:
+        if role not in {"lead", "developer", "reviewer"}:
+            raise ValueError("Unknown model role")
+        configured = getattr(self, f"{role}_model")
+        return self.model_aliases().get(configured, configured)
 
     def projects(self) -> dict[str, Project]:
         data = (

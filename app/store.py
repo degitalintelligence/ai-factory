@@ -245,6 +245,27 @@ class Store:
     async def heartbeat(self, task_id, owner):
         await self.update(task_id, owner, lease_until=utcnow() + timedelta(seconds=settings.lease_seconds))
 
+    @staticmethod
+    def _budget_ratio(task):
+        ratios = (
+            task.llm_calls / settings.max_llm_calls,
+            task.tokens / settings.max_total_tokens,
+            task.cost_usd / settings.max_cost_usd,
+        )
+        return max(ratios)
+
+    async def _emit_budget_warnings(self, task_id, owner, before, after):
+        for threshold in (0.60, 0.80, 0.95):
+            if before < threshold <= self._budget_ratio(after):
+                percent = int(threshold * 100)
+                message = (
+                    f"Budget warning {percent}%: calls={after.llm_calls}/{settings.max_llm_calls}, "
+                    f"tokens={after.tokens}/{settings.max_total_tokens}, "
+                    f"reported_cost=${after.cost_usd:.4f}/${settings.max_cost_usd:.2f}. "
+                    "Next: reduce context/parallelism or use a new bounded task; no automatic reset."
+                )
+                await self.event(task_id, "budget_warning", message)
+
     async def reserve_call(self, task_id, owner, token_reserve=None):
         task = await self.check(task_id, owner)
         if (
@@ -252,11 +273,17 @@ class Store:
             or task.tokens + (token_reserve or settings.max_output_tokens) > settings.max_total_tokens
             or task.cost_usd >= settings.max_cost_usd
         ):
-            raise BudgetExceeded("Task LLM budget reached; inspect usage before starting another task")
+            raise BudgetExceeded(
+                "Task LLM budget exhausted; use /report and /logs, then create a new bounded task "
+                "or obtain an approved policy change. /retry does not reset lifetime usage."
+            )
+        before = self._budget_ratio(task)
         await self.update(task_id, owner, llm_calls=task.llm_calls + 1)
+        await self._emit_budget_warnings(task_id, owner, before, await self.get(task_id))
 
     async def record_usage(self, task_id, owner, tokens, cost):
         task = await self.check(task_id, owner)
+        before = self._budget_ratio(task)
         await self.update(
             task_id,
             owner,
@@ -264,6 +291,7 @@ class Store:
             cost_usd=task.cost_usd + (cost or 0),
             cost_incomplete=task.cost_incomplete or cost is None,
         )
+        await self._emit_budget_warnings(task_id, owner, before, await self.get(task_id))
 
     async def cancel(self, task_id):
         async with self.sessions() as s, s.begin():

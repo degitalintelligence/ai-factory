@@ -3,7 +3,8 @@ import json
 
 from app.config import settings
 from app.llm import json_completion
-from app.schemas import DeveloperAction, LeadPlan, ReviewResult
+from app.schemas import DeveloperAction, LeadPlan, PlanBudget, ReviewResult
+from app.skills import SKILLS, select_skills
 
 POST_PUBLICATION_MARKERS = (
     "pull request",
@@ -18,13 +19,40 @@ POST_PUBLICATION_MARKERS = (
 )
 
 
-def normalize_lead_plan(plan: LeadPlan) -> LeadPlan:
-    """Make publication-only acceptance criteria explicit before review."""
+def normalize_lead_plan(plan: LeadPlan, requirement: str = "") -> LeadPlan:
+    """Make publication criteria, skill selection, and control gates explicit."""
     deferred = set(plan.post_publication_criteria)
     for index, criterion in enumerate(plan.acceptance_criteria, start=1):
         if any(marker in criterion.lower() for marker in POST_PUBLICATION_MARKERS):
             deferred.add(index)
-    return plan.model_copy(update={"post_publication_criteria": sorted(deferred)})
+
+    known = set(SKILLS.ids())
+    requested = [skill for skill in plan.skills if skill in known]
+    skills = list(dict.fromkeys((*requested, *select_skills(requirement))))
+    if not skills:
+        skills = ["engineering"]
+
+    approval_gates = list(dict.fromkeys(plan.approval_gates))
+    if plan.risk == "high":
+        approval_gates.append("Dedi approval before implementation")
+    if plan.deployment_required:
+        approval_gates.append("Dedi approval before production deployment")
+    if not approval_gates:
+        approval_gates.append("Independent review and deterministic gates before publication")
+
+    budget = plan.budget or PlanBudget()
+    rollback = plan.rollback_plan or (
+        "Revert the reviewed commit and disable the change if outcome metrics regress."
+    )
+    return plan.model_copy(
+        update={
+            "post_publication_criteria": sorted(deferred),
+            "skills": skills,
+            "approval_gates": list(dict.fromkeys(approval_gates)),
+            "budget": budget,
+            "rollback_plan": rollback,
+        }
+    )
 
 
 BOUNDARY = """You are part of AI Factory, a general software engineering engine.
@@ -39,11 +67,14 @@ For other requirements, build only in the explicitly registered target repositor
 
 async def lead_plan(requirement: str, context: str = "") -> LeadPlan:
     plan = await json_completion(
-        model=settings.lead_model,
+        model=settings.model_for("lead"),
         schema=LeadPlan,
         system=BOUNDARY
         + """You are the engineering lead. Inspect the provided repository context and produce an implementable plan.
 Numbered acceptance_criteria must be specific and independently verifiable; include failure cases.
+The plan must also include assumptions, dependencies, skills, a bounded budget, approval_gates, and rollback_plan.
+Select only skill IDs from the supplied registry. A cross-functional objective must name every relevant skill;
+draft-only skills may recommend work but may not execute external side effects.
 Put a criterion index in post_publication_criteria only when it can never be judged before the PR exists,
 such as PR body content, PR URL, or published CI/deployment records. Everything else stays pre-publication.
 Break implementation into steps covering architecture, code, meaningful tests, documentation, and requested deployment.
@@ -53,10 +84,14 @@ Set deployment_required when Docker/Compose/Coolify/deployment or a deployable c
 Set persistence_required for stored user data; require restart/recreation and user-isolation tests.
 LioBot is the product implemented by this engine, not a separate target application.
 Quant Factory, Kedaya, and other business products remain separate registered products.
+Return a plan that keeps authority separate from confidence. The operator-configured budget and policy remain hard ceilings.
 """,
-        user=f"REQUIREMENT:\n{requirement}\n\nREPOSITORY CONTEXT:\n{context}",
+        user=(
+            f"REQUIREMENT:\n{requirement}\n\nREPOSITORY CONTEXT:\n{context}"
+            f"\n\nSKILL REGISTRY:\n{json.dumps(SKILLS.prompt_view(), sort_keys=True)}"
+        ),
     )
-    return normalize_lead_plan(plan)
+    return normalize_lead_plan(plan, requirement)
 
 
 async def developer_loop(
@@ -115,7 +150,7 @@ If requirements cannot be met within the environment, report the limitation in n
             window.append(record)
             budget -= cost
         action = await json_completion(
-            model=settings.developer_model,
+            model=settings.model_for("developer"),
             system=system,
             user=context + "\nTOOL HISTORY:\n" + "\n".join(reversed(window)),
             schema=DeveloperAction,
@@ -189,7 +224,7 @@ async def review_change(
         else ""
     )
     return await json_completion(
-        model=settings.reviewer_model,
+        model=settings.model_for("reviewer"),
         schema=ReviewResult,
         system=BOUNDARY
         + """You are the independent code reviewer. You did NOT author this code.

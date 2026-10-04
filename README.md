@@ -7,6 +7,20 @@ engineering engine. `telegram-lab` is a test/acceptance harness only; it is not 
 second LioBot product. Quant Factory, Kedaya, and other business products remain
 separate registered repositories and runtimes.
 
+## LioBot Core v0.3 direction
+
+The v0.2 engine is the guarded execution foundation. The v0.3 requirements are
+tracked in [docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md](docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md)
+and are delivered by milestone, not by weakening the v0.2 gates.
+
+M1 currently adds channel-neutral intent/plan API aliases, a bounded skill
+registry, explicit plan assumptions/dependencies/skills/budget/approval gates,
+configurable `bunny-alpha` model alias resolution, and actionable budget
+warnings. Context/memory, Decision Inbox, and self-improvement contracts already
+present in v0.2 remain the source of truth for later M2–M4 work. Telegram is
+still only an adapter and `telegram-lab` remains the acceptance harness.
+
+
 ## What works
 
 - Persistent PostgreSQL queue, task events, plans, diffs, test reports and review evidence.
