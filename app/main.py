@@ -353,6 +353,30 @@ async def create_improvement(request: ImprovementRequest, operator_id=Depends(au
         raise HTTPException(422, str(exc)) from exc
 
 
+class MemoryLockRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    reason: str = Field(default="", max_length=500)
+
+
+@app.post("/v1/memory/{memory_id}/lock", dependencies=[Depends(authorize)])
+async def lock_memory(memory_id: int, request: MemoryLockRequest, operator_id=Depends(authorize)):
+    """Dedi's freeze action: the memory can no longer be corrected or retracted by agents."""
+    try:
+        row = await store.lock_memory(memory_id, request.reason or "Operator lock", owner=operator_id)
+    except ValueError as exc:
+        if "Memory not found" in str(exc):
+            raise HTTPException(404, str(exc)) from exc
+        raise HTTPException(409, str(exc)) from exc
+    return {
+        "id": row.id,
+        "key": row.key,
+        "scope": row.scope,
+        "owner": row.owner,
+        "locked": row.locked,
+        "state": row.state,
+    }
+
+
 @app.get("/v1/memory/search", dependencies=[Depends(authorize)])
 async def search_memory(
     keys: str = "",

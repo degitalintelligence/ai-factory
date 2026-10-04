@@ -7,6 +7,7 @@ import pytest
 from app.config import settings
 from app.contracts import decision_inbox
 from app.main import app
+from app.schemas import MemoryWrite
 from app.telegram_control import (
     decide_handler,
     improve_handler,
@@ -254,3 +255,28 @@ def update_new(update_id):
     event = update()
     event.update_id = update_id
     return event
+
+
+async def test_memory_lock_endpoint_freezes_for_the_operator(db, monkeypatch):
+    monkeypatch.setattr(settings, "api_token", "operator-test-token")
+    monkeypatch.setattr(settings, "api_operator_user_id", 7)
+    stored = await db.remember(
+        MemoryWrite(key="deploy.target", value="prod-web", source="operator note", scope="lab")
+    )
+    headers = {"Authorization": "Bearer operator-test-token"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
+        wrong = {"Authorization": "Bearer not-the-token"}
+        assert (
+            await client.post(f"/v1/memory/{stored.id}/lock", headers=wrong, json={})
+        ).status_code == 401  # wrong token never reaches the store
+        ok = await client.post(
+            f"/v1/memory/{stored.id}/lock", headers=headers, json={"reason": "verified SOP"}
+        )
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body["locked"] is True and body["owner"] == 7 and body["state"] == "active"
+        # A repeated request is the same one action, not a new event.
+        again = await client.post(f"/v1/memory/{stored.id}/lock", headers=headers, json={})
+        assert again.status_code == 200 and again.json()["locked"] is True
+        missing = await client.post("/v1/memory/99999/lock", headers=headers, json={})
+        assert missing.status_code == 404

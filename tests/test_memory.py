@@ -350,3 +350,74 @@ async def test_credentials_in_provenance_fields_are_refused(db):
         await remember(item(source="requirements section 17 api_key=abcd1234efgh5678"))
     with pytest.raises(ValueError, match="Remove credentials"):
         await remember(item(evidence_ref="https://example.test/x?token=abcd1234efgh5678"))
+
+
+# --- Dedi's lock action ---------------------------------------------------------
+
+
+async def test_lock_freezes_a_memory_against_agent_edits(db):
+    stored = await remember(item(), owner=7)
+    locked = await db.lock_memory(stored.id, "verified SOP", owner=7)
+    assert locked.locked is True
+    with pytest.raises(ValueError, match="locked by Dedi"):
+        await db.correct_memory(locked.id, "staging-web", source="agent guess")
+    with pytest.raises(ValueError, match="only be retracted by their owner"):
+        await db.retract_memory(locked.id, "agent cleanup")
+    # The owner keeps control of the frozen row, and the correction inherits the lock.
+    corrected = await db.correct_memory(locked.id, "staging-web", source="Dedi correction", owner=7)
+    assert corrected.version == 2 and corrected.locked is True
+
+
+async def test_a_repeated_lock_is_one_action(db):
+    stored = await remember(item(), owner=7)
+    first = await db.lock_memory(stored.id, "freeze", owner=7)
+    again = await db.lock_memory(stored.id, "freeze again", owner=7)
+    assert again.id == first.id and again.locked is True
+
+
+async def test_only_the_owner_can_lock_a_memory(db):
+    stored = await remember(item(), owner=7)
+    with pytest.raises(ValueError, match="Only the memory owner can lock"):
+        await db.lock_memory(stored.id, "hijack", owner=8)
+    async with db.sessions() as s:
+        assert (await s.get(MemoryItem, stored.id)).locked is False
+
+
+async def test_locking_requires_a_principal(db):
+    stored = await remember(item())  # unowned shared row
+    with pytest.raises(ValueError, match="requires an owner"):
+        await db.lock_memory(stored.id, "system lock")
+    async with db.sessions() as s:
+        assert (await s.get(MemoryItem, stored.id)).locked is False
+
+
+async def test_locking_an_unowned_row_adopts_the_locking_owner(db):
+    stored = await remember(item())  # shared inside the tenant
+    locked = await db.lock_memory(stored.id, "verified", owner=7)
+    assert locked.locked is True and locked.owner == 7
+    # Adoption follows the isolation rule: an owned row is visible only to its owner.
+    assert (await db.recall(role="lead"))[0] == []
+    assert [v.value for v in (await db.recall(role="lead", owner=7))[0]] == ["prod-web"]
+
+
+async def test_another_tenant_cannot_lock_a_memory(db):
+    stored = await remember(item(value="acme-web"), tenant="acme")
+    with pytest.raises(ValueError, match="Memory not found"):
+        await db.lock_memory(stored.id, "intrusion", tenant="globex")
+    assert (await db.recall(role="lead", tenant="acme"))[0][0].state == MemoryState.ACTIVE
+
+
+async def test_a_retracted_memory_cannot_be_locked(db):
+    stored = await remember(item())
+    await db.retract_memory(stored.id, "obsolete")
+    with pytest.raises(ValueError, match="lock the active version"):
+        await db.lock_memory(stored.id, "freeze")
+
+
+async def test_lock_actions_are_audited_on_the_task_timeline(db):
+    task = await db.create("Freeze the deploy target")
+    stored = await remember(item(), task_id=task.id)
+    # The unowned shared row is adopted by principal 7, the human reviewer's principal.
+    await db.lock_memory(stored.id, "verified SOP", owner=7, task_id=task.id)
+    messages = [e.message for e in await db.events(task.id)]
+    assert any("locked: verified SOP" in m for m in messages)

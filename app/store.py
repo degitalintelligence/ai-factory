@@ -1054,6 +1054,43 @@ class Store:
             await s.refresh(row)
             return row
 
+    async def lock_memory(self, memory_id, reason, owner=None, task_id=None, tenant=DEFAULT_TENANT):
+        """Freeze one memory so later corrections and retractions need its owner.
+
+        Dedi's lock action is the human review gate on shared knowledge: a locked memory
+        can no longer be edited by agents or other principals, only by the person who
+        holds it. Because the isolation model makes every owned row private, locking an
+        unowned shared row adopts the requesting principal as its owner — the same
+        adoption a correction already performs — so the freeze always stays reachable by
+        exactly one accountable person.
+        """
+        async with self.sessions() as s:
+            row = await s.get(MemoryItem, memory_id, with_for_update=True)
+            if not row or row.tenant != tenant:
+                raise ValueError("Memory not found")
+            if row.state != MemoryState.ACTIVE:
+                raise ValueError(f"Memory is {row.state}; lock the active version instead")
+            if row.owner is not None and owner != row.owner:
+                raise ValueError("Only the memory owner can lock this memory")
+            if row.owner is None and owner is None:
+                raise ValueError("Locking requires an owner; no principal was supplied")
+            if row.locked:
+                return row  # A repeated lock request is one action, not an error.
+            row.locked = True
+            if row.owner is None:
+                row.owner = owner
+            if task_id:
+                s.add(
+                    Event(
+                        task_id=task_id,
+                        kind="memory",
+                        message=redact(f"Memory '{row.key}' locked: {reason}"),
+                    )
+                )
+            await s.commit()
+            await s.refresh(row)
+            return row
+
     async def memory_history(self, key, owner=None, tenant=DEFAULT_TENANT):
         """Every version of a key, newest first, so a correction can be inspected.
 
