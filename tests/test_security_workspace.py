@@ -194,6 +194,21 @@ def test_common_credential_shapes_are_redacted(leaked):
     assert secret_present(leaked)
 
 
+def test_code_side_lookups_are_not_mistaken_for_literal_secrets():
+    """Reading a secret from the environment is exactly how a target repo should work."""
+    for line in (
+        'token = os.environ.get("TELEGRAM_BOT_TOKEN")',
+        'token = os.environ.get("TELEGRAM_BOT_TOKEN", "fallback")',
+        'api_key = os.getenv("OPENROUTER_API_KEY")',
+        "password = os.environ['DATABASE_PASSWORD']",
+        "token = settings.GITHUB_TOKEN",
+        'secret = config["BOT_TOKEN"]',
+    ):
+        assert not secret_present(line), line
+        # Detection ignores code, but reports still render the code unchanged.
+        assert redact(line) == line, line
+
+
 def test_ordinary_prose_is_not_mangled_by_redaction():
     """Redaction must not destroy normal engineering text."""
     for line in (

@@ -3,6 +3,16 @@ from pathlib import PurePosixPath
 
 from app.config import settings
 
+# A credential value is a literal. A value that starts a function call, a subscript or
+# brace template, or an attribute chain — os.environ.get("X"), config["X"], f"{VAR}",
+# settings.API_TOKEN — is code that reads a secret from configuration and must be
+# neither flagged nor mangled in reports. The lookaheads reject those value shapes.
+_NOT_CODE_VALUE = (
+    r"(?![\w.]+\()"
+    r"(?![\w.]*(?:\[|\{))"
+    r"(?![A-Za-z_]\w*\.[A-Za-z_])"
+)
+
 SECRET_PATTERNS = [
     r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----",
     r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b",
@@ -18,9 +28,11 @@ SECRET_PATTERNS = [
     # scheme://user:password@host — credentials embedded in connection strings.
     r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@",
     # key=value pairs for any credential-bearing setting name. The value must look like a
-    # credential (no spaces, at least 8 characters) so ordinary prose is not mangled.
-    r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key)\b\s*[=:]\s*\S{8,}",
-    r"(?i)\bauthorization\b\s*:\s*(?:bearer|basic|token)\s+\S{8,}",
+    # literal credential: no whitespace, at least 8 characters, and not a code lookup.
+    r"(?i)\b(?:api[_-]?key|secret|token|password|passwd|pwd|access[_-]?key)\b\s*[=:]\s*"
+    + _NOT_CODE_VALUE
+    + r"[\"']?\S{8,}",
+    r"(?i)\bauthorization\b\s*:\s*(?:bearer|basic|token)\s+" + _NOT_CODE_VALUE + r"\S{8,}",
     # PEM/OpenSSH public keys are not secret but do not belong in a PR body or memory.
     r"-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PUBLIC KEY-----",
 ]
