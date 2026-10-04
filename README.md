@@ -115,7 +115,9 @@ ruff check app sandbox tests scripts
 
 PostgreSQL integration uses `TEST_POSTGRES_URL` pointing **only to a disposable test database**; the integration test recreates its tables. CI supplies PostgreSQL 16 and a separate real Docker sandbox smoke test. Unit/integration tests stub external model/GitHub/Coolify calls and incur no API spend.
 
-For local API development, set `WORKER_ENABLED=false`, leave the Telegram token empty and use an `API_TOKEN`. Run `uvicorn app.main:app --port 8080`. Workers in a real deployment require PostgreSQL and a healthy sandbox.
+For local API development, set `WORKER_ENABLED=false`, leave the Telegram token empty and use an `API_TOKEN`. `API_OPERATOR_USER_ID` is required whenever `API_TOKEN` is set: startup fails closed without it, and requests are rejected rather than acting as nobody. Run `uvicorn app.main:app --port 8080`. Workers in a real deployment require PostgreSQL and a healthy sandbox.
+
+Memory is isolated per tenant, and within a tenant a memory owned by a person is readable only by that person. A read with no principal returns shared unowned memory only, and `ROLE_CLEARANCE_JSON` narrows by role on top of that — it never widens across an owner boundary.
 
 ## Current limits
 

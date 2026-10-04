@@ -37,6 +37,8 @@ services:
       REVIEWER_MODEL: ${REVIEWER_MODEL:?REVIEWER_MODEL is required}
       MODEL_ALIASES_JSON: ${MODEL_ALIASES_JSON:-}
       API_TOKEN: ${API_TOKEN:-}
+      API_OPERATOR_USER_ID: ${API_OPERATOR_USER_ID:-}
+      ROLE_CLEARANCE_JSON: ${ROLE_CLEARANCE_JSON:-}
       SANDBOX_URL: http://sandbox:8090
       SANDBOX_TOKEN: ${SANDBOX_TOKEN:?Generate a separate long random sandbox token}
       MAX_ITERATIONS: ${MAX_ITERATIONS:-4}
