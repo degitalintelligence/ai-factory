@@ -24,6 +24,10 @@ class SkillDefinition(BaseModel):
     evaluator: str = Field(min_length=1, max_length=500)
     rollback: str = Field(min_length=1, max_length=500)
     owner: str = Field(min_length=1, max_length=120)
+    model_policy: str = "operator-configured bunny-alpha alias; no silent fallback"
+    budget_policy: str = "subtask, task and daily operator ceilings; retry never resets usage"
+    input_schema: str = "ContextItem[] and WorkItem"
+    output_schema: str = "StaffOutput; engineering also uses DeveloperAction/TestReport/ReviewResult"
     execution_state: str = Field(pattern=r"^(verified|draft_only|disabled)$")
 
 
