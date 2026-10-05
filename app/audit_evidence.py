@@ -347,6 +347,46 @@ def audit_facts(context: list[ContextItem]) -> dict[str, dict[str, str]]:
     return facts
 
 
+def proposes_production_tests(text: str) -> bool:
+    """Detect an affirmative test-execution proposal, scoped to its own clause.
+
+    Only explicit verbs count; mentions of runtime, CI or missing production
+    evidence are not executable recommendations. Negation belongs to the nearest
+    action governing the test, never to the whole paragraph.
+    """
+    verbs = r"jalankan|menjalankan|dijalankan|lakukan|melakukan|dilakukan|eksekusi|mengeksekusi|pertimbangkan|sarankan|run|running|execute|executing|executed|perform|performing|consider|recommend"
+    actions = re.compile(r"\b(?:" + verbs + r")\b", re.I)
+    tests = re.compile(r"\b(?:tests?|tes|pytest|pengujian|testing)\b", re.I)
+    production = re.compile(r"\b(?:produksi|production|prod)\b", re.I)
+    negated = re.compile(
+        r"\b(?:jangan|tanpa|tidak|bukan|dilarang|hindari|without|never|avoid|not|don['’]t)\b(?:\s+\w+){0,4}\s*$",
+        re.I,
+    )
+    clauses = re.split(
+        r"[;,.!?]|\b(?:tetapi|namun|but|however)\b|\b(?:dan|and)\b(?=\s+(?:"
+        + verbs
+        + r"|jangan|tanpa|do not|don't|no|not|without|never)\b)",
+        text,
+        flags=re.I,
+    )
+    for clause in clauses:
+        found = list(actions.finditer(clause))
+        for test in tests.finditer(clause):
+            before = [action for action in found if action.end() <= test.start()]
+            after = [action for action in found if action.start() >= test.end()]
+            action = before[-1] if before else after[0] if after else None
+            if action is None or abs(action.start() - test.start()) > 100:
+                continue
+            start, end = min(action.start(), test.start()), max(action.end(), test.end())
+            if not production.search(clause[start : min(len(clause), end + 80)]):
+                continue
+            # E.g. "tanpa menjalankan tes di produksi" / "do not run tests".
+            # A later affirmative clause is still checked independently.
+            if not negated.search(clause[: action.start()]):
+                return True
+    return False
+
+
 def audit_consistency(output: StaffOutput, context: list[ContextItem]) -> list[str]:
     """Reject Task #48 omissions and explicit contradictions before publication."""
     issues = []
@@ -411,22 +451,10 @@ def audit_consistency(output: StaffOutput, context: list[ContextItem]) -> list[s
                     ):
                         continue
                     issues.append(f"Audit consistency {topic}: prose denies an available observation")
-    if re.search(
-        r"(?:jalankan|lakukan|pertimbangkan|run|execute|consider).{0,100}(?:test|tes|pytest|pengujian).{0,60}(?:produksi|production)",
-        output.next_action,
-        re.I,
-    ) and not re.search(
-        r"jangan.{0,40}(?:test|tes|pengujian)|do not.{0,40}(?:test|execute|run)", output.next_action, re.I
-    ):
+    if proposes_production_tests(output.next_action):
         scope = next(item for item in context if item.source == "repository_audit_scope")
         requirement = json.loads(scope.content).get("requirement", "")
-        if re.search(
-            r"(?:jangan|do not).{0,70}(?:test|tes|pytest).{0,40}(?:produksi|production)", requirement, re.I
-        ) or not re.search(
-            r"\b(?:jalankan|run|execute).{0,60}(?:test|tes|pytest).{0,40}(?:produksi|production)",
-            requirement,
-            re.I,
-        ):
+        if not proposes_production_tests(requirement):
             issues.append(
                 "Audit consistency: do not recommend production test execution outside requested scope"
             )

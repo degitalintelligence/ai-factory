@@ -12,7 +12,14 @@ from app import audit_evidence, staff
 from app.audit_scope import SELF_REPOSITORY
 from app.config import settings
 from app.db import DailyBudget
-from app.staff_schemas import AuditCheck, ChatRequest, OutputEvaluation, ResolvedIntent, StaffOutput
+from app.staff_schemas import (
+    AuditCheck,
+    ChatRequest,
+    ContextItem,
+    OutputEvaluation,
+    ResolvedIntent,
+    StaffOutput,
+)
 
 SHA = "a" * 40
 REQUIREMENT = (
@@ -623,3 +630,81 @@ async def test_production_test_prohibition_is_not_treated_as_a_request(db, monke
     result = covered_output(context)
     result.next_action = "Jalankan test di produksi."
     assert any("production test execution" in i for i in staff.validate_output(result, context))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Verifikasi panggilan model aktual di runtime dan penegakan budget secara real-time; lengkapi bukti eksekusi workflow dan readiness bisnis; pertahankan pengujian CI yang sudah ada tanpa menjalankan tes di produksi.",
+        "Pertahankan CI tanpa menjalankan tes di produksi.",
+        "Jangan menjalankan tes di produksi; verifikasi hasil CI.",
+        "Do not run tests in production; maintain CI.",
+        "Maintain CI without executing tests in production.",
+        "Never run tests in production.",
+        "Runtime siap; tidak ada bukti pengujian produksi.",
+        "Verifikasi runtime dan hasil test CI; bukti produksi belum tersedia.",
+        "Jalankan tests di staging, jangan jalankan test di produksi.",
+    ],
+)
+async def test_task_50_prohibitions_and_ci_observations_are_not_execution_proposals(db, monkeypatch, text):
+    assert not audit_evidence.proposes_production_tests(text)
+    task = await goal(db)
+    fake_github(monkeypatch)
+    context = await staff.assemble_context(task)
+    result = covered_output(context)
+    result.next_action = text
+    assert staff.validate_output(result, context) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Jalankan tes di produksi.",
+        "Pertimbangkan pengujian di lingkungan produksi untuk validasi tes.",
+        "Run pytest in production.",
+        "Jangan matikan CI; jalankan tes di produksi.",
+        "Jangan jalankan tes di produksi, lalu jalankan pytest di produksi.",
+        "Do not stop CI; execute tests in production.",
+        "Jangan jalankan tes di produksi dan jalankan pytest di produksi.",
+        "Jalankan tests di staging dan produksi.",
+    ],
+)
+async def test_task_50_affirmative_execution_is_not_hidden_by_other_negation(db, monkeypatch, text):
+    assert audit_evidence.proposes_production_tests(text)
+    task = await goal(db)
+    fake_github(monkeypatch)
+    context = await staff.assemble_context(task)
+    result = covered_output(context)
+    result.next_action = text
+    assert any("production test execution" in i for i in staff.validate_output(result, context))
+
+
+async def test_actual_task_50_initial_and_repair_drafts_validate_and_complete_without_retry(db, monkeypatch):
+    fixture = json.loads(Path("tests/fixtures/task_50_audit.json").read_text())
+    context = [ContextItem.model_validate(item) for item in fixture["context"]]
+    outputs = [StaffOutput.model_validate(fixture[key]) for key in ("initial_output", "repaired_output")]
+    for output in outputs:
+        assert staff.validate_output(output, context) == []
+    task = await goal(db)
+    sha = json.loads(next(i.content for i in context if i.source == "repository_audit_scope"))["base_sha"]
+    await db.update(task.id, base_sha=sha)
+    await db.claim("worker")
+    monkeypatch.setattr(staff, "assemble_context", AsyncMock(return_value=context))
+    seen = []
+
+    async def complete(*, schema, role, **kwargs):
+        seen.append((schema, role))
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective=REQUIREMENT, desired_outcome="Audit evidence")
+        if schema is StaffOutput:
+            return outputs[0].model_copy(deep=True)
+        return OutputEvaluation(approved=True, summary="Evidence and constraints satisfied")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    saved = await db.get(task.id)
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    assert saved.status == "completed", saved.last_message
+    assert len(seen) == 5 and sum(role == "reviewer" for _, role in seen) == 2
+    assert "review_repair" not in artifacts and "staff_failure" not in artifacts
+    assert StaffOutput.model_validate_json(artifacts["staff_result"]) == outputs[0]
