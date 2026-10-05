@@ -14,6 +14,7 @@ from app.store import store
 
 T = TypeVar("T", bound=BaseModel)
 run_context: ContextVar[tuple[int, str] | None] = ContextVar("run_context", default=None)
+subtask_context: ContextVar[tuple[int, int] | None] = ContextVar("subtask_context", default=None)
 
 
 def prompt_digest(messages) -> str:
@@ -118,6 +119,7 @@ async def json_completion(
             if context:
                 await store.reserve_call(
                     *context,
+                    subtask=subtask_context.get(),
                     token_reserve=sum(len(m["content"].encode()) for m in messages)
                     + settings.max_output_tokens
                     + 100,
