@@ -181,3 +181,34 @@ Task #27 supplied the regression: a two-call subtask used one output call, then
 its reviewer returned invalid JSON and had no retry allowance. Tests exercise the
 actual JSON gateway with mocked HTTP responses, including valid and repeatedly
 invalid reviewer retries. They do not establish real-provider compatibility.
+
+### Bounded factual task explanations
+
+The explicit read-only request `Analisis task #24 saja. Jelaskan satu penyebab
+berhenti berdasarkan evidence yang tersedia. Maksimal 150 kata. Jangan melakukan
+perubahan.` now uses `FactualOutput`, without priority, alternatives, or decision
+fields. The supported conservative contract accepts task/tujuan/intent IDs and
+word limits from 30 to 150; other wording continues through the normal planner.
+Named evidence is still filtered by tenant, owner, registered project scope and
+current policy. Unavailable or unauthorized evidence stops without model calls.
+This contract reads only the named task summary and bounded diagnostics, without
+repository requests, unrelated tasks, decisions, or memory.
+
+A fixed single-engineering-step plan replaces the model planning call. Intent
+resolution, step review, final synthesis/review, leases, immutable checkpoints,
+call/token/cost/daily ceilings and fail-closed evaluation remain in place. A valid
+run uses five model calls before retries. Fresh call allowance is at most charged
+intake calls plus seven, capped by the operator; token/cost defaults remain
+120,000 tokens and USD 1, also capped by the operator. Saved plans are never raised
+or converted to the new contract. No model or provider change is included.
+
+The rendered factual response must fit the requested word limit, cite supplied
+references and receive independent approval. Review checks human prose, rather
+than treating required schema keys/enums as language defects. A locally valid
+draft and its review are retained as `factual_draft` and
+`factual_draft_evaluation`, including rejected drafts; they are not completed
+results. ValueError notifications include the redacted failure reason.
+Mocked gateway and regression tests do not prove configured-provider output
+quality. Deploy the exact merged SHA, then send the request above as a new goal
+and inspect its response/report before claiming live acceptance. Existing failed
+tasks retain their lifetime budget and saved contracts on retry.
