@@ -401,17 +401,22 @@ def validate_output(output: StaffOutput, context: list[ContextItem]) -> list[str
     return list(dict.fromkeys(issues))
 
 
-async def complete(*, schema, role: str, user: str):
+async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
     if secret_present(user):
         raise ValueError("Credentials cannot enter a model prompt")
     context = run_context.get()
     if context and (await store.budget_status(context[0]))["utilization"] >= 0.8:
         user += "\nBudget degradation: keep findings and drafts short; avoid optional expansion. Do not omit evidence or review."
+    if schema is ResolvedIntent:
+        user += "\nKeep the intent JSON under 1500 characters. Objective and outcome each one sentence; at most 3 short scope items. Do not write the audit findings or repeat supplied evidence in intent fields. Use evidence_gaps for absent proof."
+    elif schema is StaffPlan:
+        user += "\nKeep the plan JSON under 3500 characters: at most 3 steps, 3 short success criteria, 3 risks and 3 gates; each step objective under 220 characters. Keep evidence refs in context rather than repeating them in every field. Plan the work, do not write the final report inside the plan."
     output = await json_completion(
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-3",
+        prompt_version="staff-v03-4",
+        max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
     )
@@ -594,6 +599,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             revised = await complete(
                 schema=StaffPlan,
                 role="lead",
+                max_attempts=1,
                 user=f"Revise this infeasible L0/L1 plan once. At most {max_steps} steps; "
                 f"each step needs 2 calls and final synthesis/review need 2. Preserve scope, "
                 f"success criteria, required skill coverage and approval gates. Do not increase budget. "
@@ -794,26 +800,26 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
     except Exception as exc:
         # Never leak raw provider output or source. Runtime failures are actionable and durable.
         kind = "Budget exhausted" if isinstance(exc, BudgetExceeded) else type(exc).__name__
-        await transition(
-            "failed",
-            f"Pekerjaan berhenti ({kind}). Periksa evidence; jawab informasi yang kurang atau buat tujuan lebih sempit. Budget tidak direset.",
-        )
-        await store.artifact(
-            task_id, "staff_failure", json.dumps({"category": kind, "detail": redact(str(exc))[:2000]})
-        )
+        detail = redact(str(exc))[:2000]
+        message = f"Pekerjaan berhenti ({kind})."
+        if isinstance(exc, BudgetExceeded):
+            message += " Alasan: " + excerpt(detail, 600)
+        message += f" Evidence: /report {task_id} dan /logs {task_id}. Budget tidak direset."
+        await transition("failed", message)
+        await store.artifact(task_id, "staff_failure", json.dumps({"category": kind, "detail": detail}))
         await store.create_decision(
             DecisionRequest(
                 task_id=task.id,
                 project=task.project,
                 category="blocked",
                 title=f"Intent #{task.id} blocked",
-                situation=kind,
+                situation=detail,
                 why_now="Execution stopped before publishing an unverified result.",
                 options=[
-                    {"id": "narrow", "label": "Provide evidence or narrow the goal"},
+                    {"id": "inspect", "label": "Inspect the recorded failure before retrying"},
                     {"id": "stop", "label": "Stop"},
                 ],
-                recommendation="narrow",
+                recommendation="inspect",
                 evidence=[f"task:{task.id}"],
                 risk_level="medium",
             ),
