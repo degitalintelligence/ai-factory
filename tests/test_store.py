@@ -72,7 +72,7 @@ async def test_intake_rolls_back_when_the_brief_cannot_be_stored(db):
             raise RuntimeError("brief serialization failed")
 
     with pytest.raises(RuntimeError, match="brief serialization failed"):
-        await db.create("Improve the parser", kind="self_improvement", brief=ExplodingBrief())
+        await db.create("Improve the parser", "self", kind="self_improvement", brief=ExplodingBrief())
     assert await db.list() == []
     assert await db.claim("worker") is None
 
@@ -199,7 +199,7 @@ async def test_idempotency_key_binds_the_whole_request_not_only_the_requirement(
     )
     first = await db.create(
         "Improve the parser",
-        "lab",
+        "self",
         chat_id=42,
         user_id=7,
         idempotency_key="api:1",
@@ -210,7 +210,7 @@ async def test_idempotency_key_binds_the_whole_request_not_only_the_requirement(
     await db.claim("worker")
     again = await db.create(
         "Improve the parser",
-        "lab",
+        "self",
         chat_id=42,
         user_id=7,
         idempotency_key="api:1",
@@ -218,8 +218,19 @@ async def test_idempotency_key_binds_the_whole_request_not_only_the_requirement(
         brief=brief,
     )
     assert again.id == first.id
+    # The self-target alias gate fires before idempotency, so a wrong target is refused
+    # deterministically instead of colliding with the bound request.
+    with pytest.raises(ValueError, match="must target the registered self-target alias"):
+        await db.create(
+            "Improve the parser",
+            "other",
+            chat_id=42,
+            user_id=7,
+            idempotency_key="api:1",
+            kind="self_improvement",
+            brief=brief,
+        )
     for changed in (
-        {"project": "other"},
         {"chat_id": 43},
         {"user_id": 8},
         {"kind": "engineering", "brief": None},
@@ -227,7 +238,7 @@ async def test_idempotency_key_binds_the_whole_request_not_only_the_requirement(
         with pytest.raises(ValueError, match="different request"):
             await db.create(
                 "Improve the parser",
-                changed.get("project", "lab"),
+                changed.get("project", "self"),
                 chat_id=changed.get("chat_id", 42),
                 user_id=changed.get("user_id", 7),
                 idempotency_key="api:1",
@@ -238,7 +249,7 @@ async def test_idempotency_key_binds_the_whole_request_not_only_the_requirement(
     with pytest.raises(ValueError, match="different request"):
         await db.create(
             "Improve the parser",
-            "lab",
+            "self",
             chat_id=42,
             user_id=7,
             idempotency_key="api:1",

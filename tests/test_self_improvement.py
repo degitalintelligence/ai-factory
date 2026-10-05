@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+from app.config import settings
 from app.contracts import create_self_improvement
 from app.schemas import ImprovementOutcome, SelfImprovementBrief, TaskKind, TaskRequest
 
@@ -84,18 +85,20 @@ def test_sensitive_files_are_detected_through_a_path_prefix():
 
 
 async def test_self_improvement_task_is_created_isolated_with_durable_brief(db):
-    task, needs_approval, areas = await create_self_improvement(brief(), "lab")
+    task, needs_approval, areas = await create_self_improvement(brief(), "self")
     assert task.kind == "self_improvement"
     # Isolated branch, never main.
     assert task.branch == f"ai-factory/task-{task.id}"
     assert task.branch != task.base_branch
     stored = {a.kind: a.content for a in await db.artifacts(task.id)}
     assert '"hypothesis"' in stored["self_improvement_brief"]
-    assert needs_approval is False and areas == []
+    # Self-improvement is always gated: even an ordinary brief stops for approval,
+    # because the worker approves no self_improvement task without Dedi.
+    assert needs_approval is True and areas == []
 
 
 async def test_sensitive_self_improvement_reports_that_approval_is_required(db):
-    task, needs_approval, areas = await create_self_improvement(brief(touched_areas=["app/gates.py"]), "lab")
+    task, needs_approval, areas = await create_self_improvement(brief(touched_areas=["app/gates.py"]), "self")
     assert needs_approval is True
     assert "app/gates.py" in areas
     assert task.kind == "self_improvement"
@@ -106,6 +109,21 @@ async def test_store_refuses_self_improvement_without_a_brief(db):
         await db.create("Improve the parser", "lab", kind="self_improvement")
 
 
+async def test_self_improvement_refuses_anything_but_the_registered_self_target(db, monkeypatch):
+    """Self-improvement must never fall back to the default lab harness (AGENTS.md §15)."""
+    monkeypatch.setattr(settings, "self_project", "self")
+    with pytest.raises(ValueError, match="must target the registered self-target alias"):
+        await db.create("Improve the parser", kind="self_improvement", brief=brief())
+    with pytest.raises(ValueError, match="must target the registered self-target alias"):
+        await db.create("Improve the parser", "other", kind="self_improvement", brief=brief())
+
+
+async def test_self_improvement_fails_closed_without_a_registered_self_target(db, monkeypatch):
+    monkeypatch.setattr(settings, "self_project", "")
+    with pytest.raises(ValueError, match="no registered self-target alias"):
+        await db.create("Improve the parser", "lab", kind="self_improvement", brief=brief())
+
+
 async def test_normal_tasks_default_to_engineering(db):
     assert (await db.create("Change the return value")).kind == "engineering"
 
@@ -114,7 +132,7 @@ async def test_normal_tasks_default_to_engineering(db):
 
 
 async def completed_self_improvement(db):
-    task = await db.create("Improve the retry parser", kind="self_improvement", brief=brief())
+    task = await db.create("Improve the retry parser", "self", kind="self_improvement", brief=brief())
     await db.update(task.id, status="completed")
     return task
 
@@ -133,7 +151,7 @@ async def test_outcome_measurement_is_recorded_after_completion(db):
 
 
 async def test_outcome_requires_a_completed_task(db):
-    task = await db.create("Improve the retry parser", kind="self_improvement", brief=brief())
+    task = await db.create("Improve the retry parser", "self", kind="self_improvement", brief=brief())
     with pytest.raises(ValueError, match="measure the outcome after completion"):
         await db.record_outcome(task.id, outcome())
 

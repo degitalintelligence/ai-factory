@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     developer_model: str = "bunny-alpha"
     reviewer_model: str = "bunny-alpha"
     projects_json: str = ""
+    # Self-improvement must target an explicitly registered self-hosting alias, never
+    # the default lab harness (AGENTS.md §15: register ai-factory explicitly before
+    # self-editing core). Empty means self-improvement intake fails closed.
+    self_project: str = ""
     telegram_allowed_user_ids: str = ""
     api_token: str = ""
     # HTTP is a shared operator credential, so the server—not the request body—
@@ -164,7 +168,9 @@ class Settings(BaseSettings):
         return {int(x.strip()) for x in self.telegram_allowed_user_ids.split(",") if x.strip()}
 
     def validate_runtime(self):
-        self.projects()
+        projects = self.projects()
+        if self.self_project and self.self_project not in projects:
+            raise ValueError("SELF_PROJECT must name a registered project alias")
         self.role_clearance()
         if self.telegram_bot_token and not self.allowed_users():
             raise ValueError("TELEGRAM_ALLOWED_USER_IDS is required; bot access fails closed")

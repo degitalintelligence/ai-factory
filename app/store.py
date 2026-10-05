@@ -104,8 +104,22 @@ class Store:
         policy = settings.projects().get(project)
         if policy is None:
             raise ValueError("Unknown project alias; use /projects")
-        if kind == "self_improvement" and brief is None:
-            raise ValueError("self_improvement tasks require a SelfImprovementBrief")
+        if kind == "self_improvement":
+            if brief is None:
+                raise ValueError("self_improvement tasks require a SelfImprovementBrief")
+            # Self-improvement must target the explicitly registered self-hosting
+            # alias, never a default fallback such as the lab harness (AGENTS.md §15).
+            self_target = settings.self_project
+            if not self_target:
+                raise ValueError(
+                    "Self-improvement has no registered self-target alias; "
+                    "set SELF_PROJECT to one before creating self_improvement tasks"
+                )
+            if project != self_target:
+                raise ValueError(
+                    f"Self-improvement must target the registered self-target alias "
+                    f"'{self_target}', not '{project}'"
+                )
         try:
             async with self.sessions() as s, s.begin():
                 # Same lock as claim(): a queued task must not appear between a worker's
@@ -547,8 +561,7 @@ class Store:
             await s.flush()
             return task
 
-    @staticmethod
-    async def _apply_resume(session, task_id, action, message=""):
+    async def _apply_resume(self, session, task_id, action, message="", user_id=None, close_card=True):
         """Apply one resume transition inside a caller-owned transaction.
 
         resolve_decision must reuse this exact logic so a decision and the task
@@ -559,6 +572,7 @@ class Store:
             raise ValueError("Task not found")
         if task.lease_until and task.lease_until > utcnow():
             raise ValueError("Task is still running; wait until its worker stops")
+        digest = None
         if action == "approve":
             if task.status != "awaiting_approval" or not task.plan_json:
                 raise ValueError("Task has no plan awaiting approval")
@@ -566,6 +580,28 @@ class Store:
             if message != digest[:12]:
                 raise ValueError("Approval must include the current plan hash shown by /plan")
             task.approved_plan_hash = digest
+            if close_card:
+                # A direct plan-hash approval (/approve, HTTP) is the same decision as
+                # resolving the card, so both commit together and the inbox never keeps
+                # a stale open gate for a task that already resumed. The acting
+                # principal is recorded on the card either way.
+                card = await session.scalar(
+                    select(Decision)
+                    .where(
+                        Decision.task_id == task_id,
+                        Decision.state == DecisionState.OPEN,
+                        Decision.kind == DecisionMessageType.APPROVAL_REQUIRED,
+                    )
+                    .order_by(Decision.id.desc())
+                    .with_for_update()
+                )
+                if card is not None:
+                    if self._card_plan_digest(card) not in (None, digest):
+                        raise ValueError(
+                            "This approval card is for a different plan version; "
+                            "reject it and run planning again"
+                        )
+                    self._close_decision_row(session, card, DecisionState.APPROVED, user_id)
         elif action == "answer":
             if task.status != "waiting_input" or not message.strip():
                 raise ValueError("Task is not waiting for input or answer is empty")
@@ -595,12 +631,16 @@ class Store:
         task.lease_owner = None
         task.lease_until = None
         task.recoveries = 0
-        session.add(Event(task_id=task_id, kind=action, message=redact(message or action)))
+        event_message = message or action
+        if action == "approve" and user_id is not None:
+            # The approval event carries the acting principal, not only the plan hash.
+            event_message = f"{message} by user {user_id}"
+        session.add(Event(task_id=task_id, kind=action, message=redact(event_message)))
         return task
 
-    async def resume(self, task_id, action, message=""):
+    async def resume(self, task_id, action, message="", user_id=None):
         async with self.sessions() as s, s.begin():
-            await self._apply_resume(s, task_id, action, message)
+            await self._apply_resume(s, task_id, action, message, user_id=user_id)
 
     async def create_decision(self, card):
         """Persist a decision card. It never lives only in a channel message."""
@@ -795,6 +835,26 @@ class Store:
             await s.refresh(decision)
             return decision
 
+    @staticmethod
+    def _close_decision_row(session, decision, target, user_id):
+        """Record the decision state change and its audit event, without task effects.
+
+        Shared by resolve_decision, expiry, and direct plan-hash approvals so every
+        closer records the same decided_by/decided_at fields and the same event.
+        """
+        decision.state = target
+        decision.decided_by = user_id
+        decision.decided_at = utcnow()
+        if not decision.task_id:
+            return
+        session.add(
+            Event(
+                task_id=decision.task_id,
+                kind="decision",
+                message=redact(f"Decision #{decision.id} -> {target} by {user_id}"),
+            )
+        )
+
     async def _close_decision(self, session, decision, target, user_id):
         """Record one decision outcome and apply its exact effect on the linked task.
 
@@ -802,19 +862,10 @@ class Store:
         is still parked on the plan digest the card carries. Every other outcome stops a
         gated task so the repository reservation is released instead of held forever.
         """
-        decision.state = target
-        decision.decided_by = user_id
-        decision.decided_at = utcnow()
+        self._close_decision_row(session, decision, target, user_id)
         task_id = decision.task_id
         if not task_id:
             return
-        session.add(
-            Event(
-                task_id=task_id,
-                kind="decision",
-                message=redact(f"Decision #{decision.id} -> {target} by {user_id}"),
-            )
-        )
         if decision.kind != DecisionMessageType.APPROVAL_REQUIRED:
             # A generic DECISION_REQUIRED card is a question about the work, never an
             # authorisation to execute it.
@@ -838,7 +889,9 @@ class Store:
             raise ValueError(
                 "This approval card is for a different plan version; reject it and run planning again"
             )
-        await self._apply_resume(session, task_id, "approve", digest[:12])
+        # close_card=False: this card is the one being resolved; re-running the
+        # card close here would duplicate the decision event.
+        await self._apply_resume(session, task_id, "approve", digest[:12], close_card=False)
 
     @staticmethod
     def _card_plan_digest(decision):
@@ -859,8 +912,11 @@ class Store:
 
         The improvement cycle ends with Observe outcome → Rollback atau retain, not at the
         merged PR. One measurement is exactly one outcome artifact, one timeline event, and
-        one shared lesson in memory keyed to the task. A different measurement for the same
-        change is refused — the numbers of one change are history, and a revised measurement
+        one shared lesson in memory keyed to the task. The task row is locked and the
+        artifact, event, and lesson commit in ONE transaction: two concurrent requests
+        serialise on the task lock, and the event can never claim the lesson was stored
+        when the memory write failed. A different measurement for the same change is
+        refused — the numbers of one change are history, and a revised measurement
         belongs to a fresh self-improvement task.
         """
         key = f"improvement.task-{task_id}"
@@ -873,8 +929,18 @@ class Store:
         if secret_present(value):
             raise ValueError("Remove credentials from the measurement; store them outside memory")
         payload = redact(outcome.model_dump_json())
-        async with self.sessions() as s:
-            task = await s.get(Task, task_id)
+        lesson = MemoryWrite(
+            key=key,
+            value=value,
+            scope="lesson",
+            source="self-improvement outcome",
+            evidence_ref=f"task:{task_id}",
+        )
+        async with self.sessions() as s, s.begin():
+            # Lock the task row so two concurrent measurements of the same task
+            # serialise here: the loser sees the committed artifact instead of
+            # racing to create a duplicate outcome/event pair.
+            task = await s.get(Task, task_id, with_for_update=True)
             if not task:
                 raise ValueError("Task not found")
             if task.kind != "self_improvement":
@@ -889,6 +955,24 @@ class Store:
                     "An outcome is already recorded for this task; a revised measurement "
                     "belongs in a new self-improvement task"
                 )
+            if existing is not None:
+                # A repeated identical measurement is the same one action: return the
+                # retained lesson instead of superseding it with a v2 of itself. The
+                # task lock has already serialised any competing write.
+                retained = await s.scalar(
+                    select(MemoryItem).where(
+                        MemoryItem.key == key,
+                        MemoryItem.tenant == tenant,
+                        MemoryItem.scope == "lesson",
+                        MemoryItem.state == MemoryState.ACTIVE,
+                    )
+                )
+                if retained is not None and retained.value == value:
+                    return retained
+            try:
+                row = await self._remember(s, lesson, task_id=task_id, tenant=tenant)
+            except IntegrityError as exc:
+                raise ValueError(f"Memory '{key}' was stored concurrently; retry") from exc
             if existing is None:
                 s.add(Artifact(task_id=task_id, kind="improvement_outcome", content=payload))
                 s.add(
@@ -900,30 +984,10 @@ class Store:
                         ),
                     )
                 )
-                await s.commit()
-            else:
-                # A repeated identical measurement is the same one action: return the
-                # retained lesson instead of superseding it with a v2 of itself.
-                row = await s.scalar(
-                    select(MemoryItem).where(
-                        MemoryItem.tenant == tenant,
-                        MemoryItem.key == key,
-                        MemoryItem.scope == "lesson",
-                        MemoryItem.state == MemoryState.ACTIVE,
-                    )
-                )
-                if row is not None and row.value == value:
-                    return row
-        lesson = MemoryWrite(
-            key=key,
-            value=value,
-            scope="lesson",
-            source="self-improvement outcome",
-            evidence_ref=f"task:{task_id}",
-        )
-        # The lesson is shared inside the tenant (no owner): retained learning is how
-        # the next brief inherits what this change actually did, not just what it promised.
-        return await self.remember(lesson, task_id=task_id, tenant=tenant)
+            # Falling through with an existing artifact means the lesson was left
+            # missing by an older partial write; _remember repairs it in this same
+            # transaction without adding a duplicate artifact or event.
+            return row
 
     async def remember(self, item: MemoryWrite, owner=None, task_id=None, tenant=DEFAULT_TENANT):
         """Store one memory, superseding any earlier active version of the same key.
@@ -932,69 +996,77 @@ class Store:
         so what was previously believed stays auditable. The unique active key is scoped to
         (tenant, key, scope), so one tenant never supersedes another tenant's memory.
         """
-        if item.locked and owner is None:
-            raise ValueError("Locked memories require an owner")
-        if secret_present(item.value) or secret_present(item.source) or secret_present(item.evidence_ref):
-            raise ValueError("Remove credentials before storing this as memory")
         async with self.sessions() as s:
-            previous = list(
-                await s.scalars(
-                    select(MemoryItem)
-                    .where(
-                        MemoryItem.key == item.key,
-                        MemoryItem.tenant == tenant,
-                        MemoryItem.scope == item.scope,
-                        MemoryItem.state == MemoryState.ACTIVE,
-                    )
-                    .with_for_update()
-                )
-            )
-            # A contradictory value for the same key is a conflict, not a silent overwrite.
-            if any(p.value != item.value for p in previous):
-                raise ValueError(
-                    f"Memory '{item.key}' already holds a different value; correct it explicitly"
-                )
-            if previous:
-                for row in previous:
-                    row.state = MemoryState.SUPERSEDED
-                version = max(p.version for p in previous) + 1
-                supersedes = previous[0].id
-                # Emit the SUPERSEDED update before inserting the replacement so the
-                # partial unique index never sees two active rows for one key.
-                await s.flush()
-            else:
-                version, supersedes = 1, None
-            row = MemoryItem(
-                key=item.key,
-                value=item.value,
-                tenant=tenant,
-                scope=item.scope,
-                sensitivity=item.sensitivity,
-                source=item.source,
-                evidence_ref=item.evidence_ref,
-                owner=owner,
-                confidence=item.confidence,
-                version=version,
-                supersedes=supersedes,
-                locked=item.locked,
-                expires_at=item.expires_at,
-            )
-            s.add(row)
-            if task_id:
-                s.add(
-                    Event(
-                        task_id=task_id,
-                        kind="memory",
-                        message=redact(f"Memory '{item.key}' v{version} stored ({item.source})"),
-                    )
-                )
             try:
+                row = await self._remember(s, item, owner=owner, task_id=task_id, tenant=tenant)
                 await s.commit()
             except IntegrityError as exc:
                 await s.rollback()
                 raise ValueError(f"Memory '{item.key}' was stored concurrently; retry") from exc
             await s.refresh(row)
             return row
+
+    async def _remember(self, session, item: MemoryWrite, owner=None, task_id=None, tenant=DEFAULT_TENANT):
+        """Store one memory inside a caller-owned transaction.
+
+        remember() wraps this with its own transaction; record_outcome() reuses it so
+        the lesson and the outcome artifact commit together or not at all.
+        """
+        if item.locked and owner is None:
+            raise ValueError("Locked memories require an owner")
+        if secret_present(item.value) or secret_present(item.source) or secret_present(item.evidence_ref):
+            raise ValueError("Remove credentials before storing this as memory")
+        previous = list(
+            await session.scalars(
+                select(MemoryItem)
+                .where(
+                    MemoryItem.key == item.key,
+                    MemoryItem.tenant == tenant,
+                    MemoryItem.scope == item.scope,
+                    MemoryItem.state == MemoryState.ACTIVE,
+                )
+                .with_for_update()
+            )
+        )
+        # A contradictory value for the same key is a conflict, not a silent overwrite.
+        if any(p.value != item.value for p in previous):
+            raise ValueError(f"Memory '{item.key}' already holds a different value; correct it explicitly")
+        if previous:
+            for row in previous:
+                row.state = MemoryState.SUPERSEDED
+            version = max(p.version for p in previous) + 1
+            supersedes = previous[0].id
+            # Emit the SUPERSEDED update before inserting the replacement so the
+            # partial unique index never sees two active rows for one key.
+            await session.flush()
+        else:
+            version, supersedes = 1, None
+        row = MemoryItem(
+            key=item.key,
+            value=item.value,
+            tenant=tenant,
+            scope=item.scope,
+            sensitivity=item.sensitivity,
+            source=item.source,
+            evidence_ref=item.evidence_ref,
+            owner=owner,
+            confidence=item.confidence,
+            version=version,
+            supersedes=supersedes,
+            locked=item.locked,
+            expires_at=item.expires_at,
+        )
+        session.add(row)
+        if task_id:
+            session.add(
+                Event(
+                    task_id=task_id,
+                    kind="memory",
+                    message=redact(f"Memory '{item.key}' v{version} stored ({item.source})"),
+                )
+            )
+        await session.flush()
+        return row
 
     async def recall(self, keys=None, role=None, scope=None, limit=25, owner=None, tenant=DEFAULT_TENANT):
         """Return a permission-aware slice. Never returns a whole-table dump.

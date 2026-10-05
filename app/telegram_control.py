@@ -154,7 +154,10 @@ async def report_handler(update, context):
 async def action_handler(update, context):
     t = await owned_task(update, context)
     action = update.effective_message.text.split()[0].split("@")[0].removeprefix("/")
-    await reply(update, await perform_action(t.id, action, " ".join(context.args[1:])))
+    confirmation = await perform_action(
+        t.id, action, " ".join(context.args[1:]), user_id=update.effective_user.id
+    )
+    await reply(update, confirmation)
 
 
 def render_decision(decision):
@@ -213,13 +216,16 @@ async def improve_handler(update, context):
         if value.strip():
             fields[key.strip().lower()] = value.strip()
     missing = [
-        k for k in ("problem", "evidence", "hypothesis", "scope", "baseline", "rollback") if k not in fields
+        k
+        for k in ("problem", "evidence", "hypothesis", "scope", "baseline", "rollback", "project")
+        if k not in fields
     ]
     if missing:
         raise ValueError(
             "Missing fields: "
             + ", ".join(missing)
-            + "\nFormat: /improve problem:...; evidence:...; hypothesis:...; scope:...; baseline:...; rollback:...; project:lab"
+            + "\nFormat: /improve problem:...; evidence:...; hypothesis:...; scope:...; "
+            "baseline:...; rollback:...; project:<registered-self-target-alias>"
         )
     brief = SelfImprovementBrief(
         problem=fields["problem"],
@@ -233,16 +239,15 @@ async def improve_handler(update, context):
     )
     task, needs_approval, areas = await create_self_improvement(
         brief,
-        fields.get("project", "lab"),
+        fields["project"],
         update.effective_chat.id,
         update.effective_user.id,
         f"telegram:{update.update_id}",
     )
-    note = (
-        f"\n\nSensitive areas detected: {', '.join(areas)}.\nThis task stops at /approve before any code runs."
-        if needs_approval
-        else "\n\nNo sensitive area detected; it still stops at /approve like any gated task."
-    )
+    # Self-improvement is always gated, so the reply always names the approval stop.
+    note = "\n\nThis task stops at /approve before any code runs."
+    if areas:
+        note += f"\nSensitive areas detected: {', '.join(areas)}."
     await reply(
         update,
         f"Queued self-improvement #{task.id}\nBranch: {task.branch}\nProblem: {brief.problem}{note}",

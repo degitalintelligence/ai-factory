@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +9,7 @@ from app.config import settings
 from app.contracts import decision_inbox
 from app.main import app
 from app.schemas import MemoryWrite, SelfImprovementBrief
+from app.store import plan_hash
 from app.telegram_control import (
     decide_handler,
     improve_handler,
@@ -15,6 +17,8 @@ from app.telegram_control import (
     new_handler,
     status_handler,
 )
+
+PLAN = json.dumps({"steps": ["do the thing"], "risk": "high"})
 
 
 async def test_api_auth_and_idempotent_creation(db, monkeypatch):
@@ -178,6 +182,7 @@ async def test_improve_requires_every_mandatory_field_then_queues(db, monkeypatc
             "baseline:3 retries per response",
             "rollback:Revert the prompt commit",
             "areas:app/agents.py",
+            "project:self",
         ]
     )
     await improve_handler(update(), SimpleNamespace(args=[fields]))
@@ -199,6 +204,7 @@ async def test_improve_warns_when_sensitive_areas_are_touched(db, monkeypatch):
             "scope:Lower the approval threshold in app/gates.py",
             "baseline:3 rejections per task",
             "rollback:Revert the gate change",
+            "project:self",
         ]
     )
     event = update()
@@ -226,7 +232,8 @@ async def test_api_decision_records_the_answering_operator(db, monkeypatch):
         assert anonymous.status_code == 200 and anonymous.json()["decided_by"] == 42
 
 
-async def test_improve_can_target_a_registered_project(db, monkeypatch):
+async def test_improve_requires_the_registered_self_target_alias(db, monkeypatch):
+    """Self-improvement never falls back to the lab harness; the caller names the target."""
     monkeypatch.setattr(settings, "telegram_allowed_user_ids", "7")
     base = "; ".join(
         [
@@ -238,17 +245,22 @@ async def test_improve_can_target_a_registered_project(db, monkeypatch):
             "rollback:Revert the prompt commit",
         ]
     )
-    await improve_handler(update(), SimpleNamespace(args=[base + "; project:other"]))
-    await improve_handler(update_new(101), SimpleNamespace(args=[base]))  # no project field → lab
-    assert [(t.project, t.repo) for t in await db.list()] == [
-        ("lab", "owner/repo"),
-        ("other", "owner/other"),
-    ]
+    event = update_new(101)
+    await improve_handler(event, SimpleNamespace(args=[base]))  # no project field at all
+    rendered = "\n".join(texts(event))
+    assert "Missing fields" in rendered and "project" in rendered
 
     event = update_new(102)
+    await improve_handler(event, SimpleNamespace(args=[base + "; project:other"]))
+    assert "must target the registered self-target alias" in "\n".join(texts(event))
+
+    event = update_new(103)
     await improve_handler(event, SimpleNamespace(args=[base + "; project:ghost"]))
     assert "Unknown project alias" in "\n".join(texts(event))
-    assert len(await db.list()) == 2
+    assert await db.list() == []
+
+    await improve_handler(update_new(104), SimpleNamespace(args=[base + "; project:self"]))
+    assert [(t.project, t.repo) for t in await db.list()] == [("self", "owner/self")]
 
 
 def update_new(update_id):
@@ -296,6 +308,7 @@ async def test_improvement_outcome_endpoint_closes_the_loop(db, monkeypatch):
     }
     task = await db.create(
         "Improve the retry parser",
+        "self",
         kind="self_improvement",
         brief=SelfImprovementBrief(**retry_brief),
     )
@@ -324,6 +337,7 @@ async def test_improvement_outcome_endpoint_closes_the_loop(db, monkeypatch):
         # A task that never shipped cannot be measured.
         pending = await db.create(
             "Improve the retry parser again",
+            "self",
             kind="self_improvement",
             brief=SelfImprovementBrief(**retry_brief),
         )
@@ -334,3 +348,36 @@ async def test_improvement_outcome_endpoint_closes_the_loop(db, monkeypatch):
         assert "measure the outcome after completion" in response.json()["detail"]
         missing = await client.post("/v1/improvements/99999/outcome", headers=headers, json=measurement)
         assert missing.status_code == 404
+
+
+async def test_plan_approval_endpoint_closes_the_card_and_records_the_actor(db, monkeypatch):
+    """A direct plan-hash approval is the same decision as resolving the card.
+
+    The open APPROVAL_REQUIRED card must close in the same transaction as the
+    resume, and the approval event must carry the acting principal (review of
+    a64e469: the endpoint left a stale open gate and recorded no actor).
+    """
+    monkeypatch.setattr(settings, "api_token", "operator-test-token")
+    monkeypatch.setattr(settings, "api_operator_user_id", 7)
+    task = await db.create("Ship a risky change")
+    await db.update(task.id, status="awaiting_approval", plan_json=PLAN)
+    task = await db.get(task.id)
+    digest = plan_hash(PLAN)
+    card = await db.ensure_task_approval_decision(task, "High-risk plan", digest)
+
+    headers = {"Authorization": "Bearer operator-test-token"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
+        response = await client.post(
+            f"/v1/plans/{task.id}/approve", headers=headers, json={"plan_hash": digest}
+        )
+    assert response.status_code == 200
+    assert response.json()["status"] == "received"
+
+    # The card closed with the resume in one transaction: no stale open gate
+    # survives, and the closing principal is the operator that called the endpoint.
+    assert await decision_inbox(state="open") == []
+    closed = (await decision_inbox(state="approved"))[0]
+    assert closed.id == card.id
+    assert closed.decided_by == 7 and closed.decided_at is not None
+    events = await db.events(task.id)
+    assert any(e.kind == "approve" and "by user 7" in e.message for e in events)

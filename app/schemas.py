@@ -293,7 +293,9 @@ class PlanApprovalRequest(BaseModel):
 
 class ImprovementRequest(BaseModel):
     brief: SelfImprovementBrief
-    project: str = "lab"
+    # Self-improvement intake has no default target: the caller must name a project
+    # alias, and store.create rejects anything but the registered self-target alias.
+    project: str
     idempotency_key: str | None = Field(default=None, max_length=160)
 
 
