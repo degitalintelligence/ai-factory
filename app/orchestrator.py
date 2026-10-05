@@ -123,6 +123,10 @@ async def run_task(task_id, notify=None, owner=None):
     task = await store.get(task_id)
     if not task or not owner:
         raise TaskStopped("Tasks must be claimed by a durable worker")
+    if task.kind == "orchestration":
+        from app.staff import run_staff_task
+
+        return await run_staff_task(task_id, owner, notify)
     token = run_context.set((task_id, owner))
 
     async def check():
