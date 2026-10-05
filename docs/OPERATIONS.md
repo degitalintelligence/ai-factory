@@ -349,3 +349,36 @@ stops the task. Both skill output and final synthesis follow this rule; factual-
 is unchanged. Existing lifetime budgets, provider configuration and history remain
 unchanged. Mock-provider tests establish bounded correction and gate enforcement,
 not live semantic accuracy or overall v0.3 acceptance.
+
+### Direct observations versus generated audit history (task #37)
+
+Task #37 completed, but its token-truncation and budget-exhaustion findings cited
+#35 (completed) and #36 (a confidence-validation rejection). Those citations did
+not support the diagnoses. Lowering confidence on a separate derived decision
+and receiving reviewer approval did not repair these claims.
+
+New context assembly projects orchestration history as recorded status, usage,
+model-run metadata, engine validation/budget diagnostics and the latest structured
+failure category and engine-local validation issues. Generated progress summaries, completion/failure prose, plans,
+drafts, results and review verdicts are omitted from direct diagnostic excerpts;
+artifact/event identity remains visible. Budget-stop details remain available
+from the engine's structured budget failure even when newer generated artifacts
+push it outside the latest-three excerpt window. Non-budget rejection prose is
+not promoted into factual claims about the audited system. Existing history,
+reports and derived decision cards are retained; cards remain unverified.
+Other decision context exposes metadata only, so model rejection explanations
+cannot become independent proof through blocked decision cards.
+
+Generation and review instructions require that the content of each cited source
+supports the claim. A warning is not exhaustion, a completed task is not failed,
+and schema/confidence rejection is not token truncation. Missing live evidence
+in the supplied context remains a bounded limitation, not proof of a failed
+production deployment. Prompt version is `staff-v03-14`; model configuration,
+budgets, schemas and mandatory independent review are unchanged.
+
+Regression fixtures cover the #35/#36 evidence pattern, retained historical
+records, bounded and scoped observations, actual truncation/budget diagnostics,
+and a rejected unsupported claim through the gateway/review workflow. The
+reviewer's semantic judgement is still model-dependent; these tests do not prove
+live audit accuracy. Deploy the reviewed commit and use a new goal, since saved
+context and completed historical audits are not rewritten by an upgrade.
