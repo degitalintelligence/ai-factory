@@ -1,0 +1,240 @@
+{
+  "context": [
+    {
+      "ref": "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:scope",
+      "source": "repository_audit_scope",
+      "scope": "self",
+      "owner": 7,
+      "created_at": "2026-10-05T23:35:01.141852",
+      "confidence": 1.0,
+      "label": "current",
+      "content": "{\"required_checks\": [\"models\", \"workflow\", \"budget\", \"readiness\", \"tests\"], \"requirement\": \"Audit current main repository ai-factory setelah deployment terbaru. Verifikasi konfigurasi model aktif Lead, Developer, Reviewer; workflow evidence-audit-v1 dan resolved skills; limit serta penggunaan budget tenant harian; readiness; dan hasil CI pada exact base SHA.\\n\\nSebutkan nilai model dan angka budget yang tersedia. Pastikan ringkasan konsisten dengan setiap pemeriksaan. Bedakan bukti kode, konfigurasi/pengamatan runtime, dan CI. Nyatakan keterbatasan secara spesifik. Jangan mengubah apa pun dan jangan menjalankan test di produksi.\", \"repository\": \"degitalintelligence/ai-factory\", \"base_sha\": \"41b3a68212a8b7f0c86d58e38f6c8491c3a125de\", \"rule\": \"Answer each requested check; unavailable proof is an explicit unverified check. Documentation is design evidence only; source is implementation evidence; CI is not live runtime.\"}"
+    },
+    {
+      "ref": "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:configured-models",
+      "source": "factory_runtime_configuration",
+      "scope": "self",
+      "owner": 7,
+      "created_at": "2026-10-05T23:35:01.142264",
+      "confidence": 1.0,
+      "label": "current",
+      "content": "{\"observed_at\": \"2026-10-05T23:35:01.142145\", \"roles\": {\"lead\": {\"alias\": \"openai/gpt-4.1-mini\", \"provider_model\": \"openai/gpt-4.1-mini\"}, \"developer\": {\"alias\": \"openai/gpt-4.1-mini\", \"provider_model\": \"openai/gpt-4.1-mini\"}, \"reviewer\": {\"alias\": \"openai/gpt-4.1-mini\", \"provider_model\": \"openai/gpt-4.1-mini\"}}, \"scope\": \"effective configuration of current control process, not proof of actual calls by all three roles or independently attested deployed commit\"}"
+    },
+    {
+      "ref": "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:budget",
+      "source": "factory_runtime_budget",
+      "scope": "self",
+      "owner": 7,
+      "created_at": "2026-10-05T23:35:01.152218",
+      "confidence": 1.0,
+      "label": "current",
+      "content": "{\"observed_at\": \"2026-10-05T23:35:01.152117\", \"period\": \"UTC calendar day\", \"tenant\": \"default\", \"daily_limits\": {\"calls\": 1000, \"reserved_tokens\": 20000000, \"reported_cost_usd\": 50.0}, \"daily_usage\": {\"calls\": 127, \"reserved_tokens\": 4562716, \"reported_cost_usd\": 0.7985027999999998}, \"current_task\": {\"id\": 50, \"calls\": 0, \"tokens\": 0, \"reported_cost_usd\": 0.0, \"cost_incomplete\": false}, \"scope\": \"snapshot before this audit's model calls; reserved tokens are not billed tokens\"}"
+    },
+    {
+      "ref": "repo:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:app/staff.py",
+      "source": "registered_repository_source",
+      "scope": "self",
+      "owner": 7,
+      "created_at": "2026-10-05T23:35:04.458659",
+      "confidence": 1.0,
+      "label": "current",
+      "content": "Repository source excerpt; not execution evidence. path=app/staff.py; full_source_sha256=2e941344c537f0d3578e11538d4a768b949b13df3be5a8b325a92af1d510d4fa; omitted lines are not inspected here.\nL263: def evidence_audit_request(requirement: str) -> bool:\nL264:     \"\"\"Only the explicit read-only, available-evidence audit uses this profile.\"\"\"\nL265:     original = requirement.strip()\nL266:     return bool(\nL267:         re.fullmatch(\nL268:             r\"Audit AI Factory berdasarkan evidence yang tersedia\\.\\s*\"\nL269:             r\"Tunjukkan tiga masalah paling penting, rekomendasi perbaikan, dan keputusan \"\nL270:             r\"yang harus saya ambil minggu ini\\.\\s*\"\nL271:             r\"Nyatakan bukti yang belum tersedia sebagai keterbatasan\\.\\s*\"\nL272:             r\"Jangan melakukan perubahan\\.\",\nL273:             original,\nL274:             re.I,\nL275:         )\nL276:     )\nL856:         )\nL857:         contract = \"factual-v2\" if exact_factual else \"factual-v1\" if factual else \"staff-v1\"\nL858:         evidence_audit = (\nL859:             evidence_audit_request(task.requirement) or readonly_repository_audit(task.requirement)\nL860:         ) and not task.plan_json\nL861:         if task.plan_json and artifacts.get(\"output_contract\") == \"evidence-audit-v1\":\nL862:             evidence_audit = evidence_audit_request(task.requirement) or readonly_repository_audit(\nL863:                 task.requirement\nL864:             )\nL865:         if evidence_audit:\nL866:             contract = \"evidence-audit-v1\"\nL867:             # Inbox metadata cannot establish a diagnosis. Keep direct sources,\nL868:             # not generated proposals, in this available-evidence audit profile.\nL869:             context = [item for item in context if item.source != \"decisions\"]\nL870:         await checkpoint(\"output_contract\", contract)\nL871:         final_calls = 0 if exact_factual or evidence_audit else 2\nL872:         output_rules = (\nL873:             f\"Jelaskan tepat satu penyebab, maksimal {factual[1]} kata bahasa Indonesia \"\nL874:             \"termasuk keterbatasan, judul, dan rujukan. Gunakan evidence_refs yang tersedia. \"\nL875:             \"Jelaskan kondisi berhenti yang tercatat; bedakan dari akar masalah yang belum terbukti. \"\nL997:                 steps=[\nL998:                     {\nL999:                         \"id\": \"audit_evidence\",\nL1000:                         \"skill\": \"engineering\",\nL1001:                         \"objective\": \"Audit requested repository checks against pinned source, current-process observations and exact-SHA CI; preserve evidence kinds and scoped limitations.\"\nL1002:                         if readonly_repository_audit(task.requirement)\nL1003:                         else output_rules,\nL1004:                         \"max_llm_calls\": 5,\nL1005:                     },\nL1006:                     {\nL1007:                         \"id\": \"audit_decisions\",\nL1008:                         \"skill\": \"product_research\",\nL1009:                         \"objective\": \"Prepare the final read-only audit using all requested checks, exact observed fields and supported limitations; independently review the answer before completion.\"\nL1010:                         if readonly_repository_audit(task.requirement)\nL1011:                         else \"Susun jawaban final dari bukti: maksimal tiga temuan, rekomendasi, keputusan operator, keterbatasan. Jangan menambahkan diagnosis tanpa bukti.\",\nL1012:                         \"dependencies\": [\"audit_evidence\"],\nL1013:                         \"max_llm_calls\": 5,\nL1014:                     },\nL1015:                 ],\nL1016:                 risks=[\"Bukti terbatas; akar masalah tidak diasumsikan\"],\nL1060:             return\nL1061:         stage = \"skill_validation\"\nL1062:         selected = [\"engineering\", \"product_research\"] if evidence_audit else select_skills(task.requirement)\n[excerpt bounded; remaining selected lines omitted]"
+    },
+    {
+      "ref": "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:readiness",
+      "source": "factory_runtime_readiness",
+      "scope": "self",
+      "owner": 7,
+      "created_at": "2026-10-05T23:35:01.306722",
+      "confidence": 1.0,
+      "label": "current",
+      "content": "{\"status\": \"ready\", \"endpoint\": \"/ready\", \"method\": \"in-process handler\", \"worker_checks_enabled\": true, \"telegram_checks_enabled\": true, \"scope\": \"current factory control process only; no ARM/business acceptance proof\"}"
+    },
+    {
+      "ref": "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:ci",
+      "source": "repository_ci",
+      "scope": "self",
+      "owner": 7,
+      "created_at": "2026-10-05T23:35:02.537589",
+      "confidence": 1.0,
+      "label": "current",
+      "content": "{\"base_sha\": \"41b3a68212a8b7f0c86d58e38f6c8491c3a125de\", \"runs\": [{\"run_id\": 37382967920, \"head_sha\": \"41b3a68212a8b7f0c86d58e38f6c8491c3a125de\", \"url\": \"https://github.com/degitalintelligence/ai-factory/actions/runs/37382967920\", \"status\": \"completed\", \"conclusion\": \"success\", \"jobs\": [{\"name\": \"compose\", \"status\": \"completed\", \"conclusion\": \"success\", \"steps\": [{\"name\": \"Validate Compose interpolation\", \"conclusion\": \"success\"}]}, {\"name\": \"sandbox\", \"status\": \"completed\", \"conclusion\": \"success\", \"steps\": [{\"name\": \"Verify namespace isolation and failure gates\", \"conclusion\": \"success\"}]}, {\"name\": \"engine\", \"status\": \"completed\", \"conclusion\": \"success\", \"steps\": [{\"name\": \"Run ruff check app sandbox tests scripts\", \"conclusion\": \"success\"}, {\"name\": \"Run ruff format --check app sandbox tests scripts\", \"conclusion\": \"success\"}, {\"name\": \"Run python -m pytest -q\", \"conclusion\": \"success\"}]}]}], \"scope\": \"CI metadata for this exact repository commit; not tests executed in production. No matching run is unavailable proof, not a failed suite.\"}"
+    }
+  ],
+  "initial_output": {
+    "summary": "Audit repository ai-factory menunjukkan model aktif openai/gpt-4.1-mini untuk lead, developer, dan reviewer; workflow evidence-audit-v1 dengan skills engineering dan product_research; serta batasan budget harian 1000 panggilan, 20 juta token, dan 50 USD dengan penggunaan rendah. Readiness status siap dengan metode handler proses internal, dan hasil CI pada SHA 41b3a68212a8b7f0c86d58e38f6c8491c3a125de sukses tanpa kegagalan.",
+    "findings": [],
+    "audit_checks": [
+      {
+        "topic": "models",
+        "verification": "runtime",
+        "observation": "Model aktif untuk lead, developer, dan reviewer adalah openai/gpt-4.1-mini sesuai konfigurasi runtime saat audit.",
+        "observed_values": {
+          "lead": "openai/gpt-4.1-mini",
+          "developer": "openai/gpt-4.1-mini",
+          "reviewer": "openai/gpt-4.1-mini"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:configured-models"
+        ],
+        "limitation": "Konfigurasi model tercatat, namun tidak ada bukti panggilan aktual oleh ketiga peran secara independen."
+      },
+      {
+        "topic": "workflow",
+        "verification": "repository",
+        "observation": "Workflow evidence-audit-v1 aktif dengan skills engineering dan product_research terdaftar dalam konfigurasi kode.",
+        "observed_values": {
+          "contract": "evidence-audit-v1",
+          "skills": "engineering, product_research"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:scope",
+          "repo:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:app/staff.py"
+        ],
+        "limitation": "Hanya konfigurasi workflow yang tersedia, tanpa bukti eksekusi proses lengkap."
+      },
+      {
+        "topic": "budget",
+        "verification": "runtime",
+        "observation": "Batas harian tenant adalah 1000 panggilan, 20 juta token, dan 50 USD dengan penggunaan saat audit 127 panggilan, 4.56 juta token, dan 0.7985 USD.",
+        "observed_values": {
+          "daily_limits_calls": "1000",
+          "daily_limits_reserved_tokens": "20000000",
+          "daily_limits_reported_cost_usd": "50.0",
+          "daily_usage_calls": "127",
+          "daily_usage_reserved_tokens": "4562716",
+          "daily_usage_reported_cost_usd": "0.798503"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:budget"
+        ],
+        "limitation": "Snapshot budget tidak membuktikan penegakan real-time atau penanganan pelanggaran."
+      },
+      {
+        "topic": "readiness",
+        "verification": "runtime",
+        "observation": "Status readiness sistem adalah siap dengan metode pemeriksaan handler proses internal.",
+        "observed_values": {
+          "status": "ready",
+          "method": "in-process handler"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:readiness"
+        ],
+        "limitation": "Tidak ada bukti penerimaan bisnis atau pengujian ARM, hanya pemeriksaan proses internal."
+      },
+      {
+        "topic": "tests",
+        "verification": "ci",
+        "observation": "CI pada SHA 41b3a68212a8b7f0c86d58e38f6c8491c3a125de berhasil dengan status completed dan kesimpulan success pada langkah Run python -m pytest -q.",
+        "observed_values": {
+          "base_sha": "41b3a68212a8b7f0c86d58e38f6c8491c3a125de",
+          "run_id": "37382967920",
+          "status": "completed",
+          "conclusion": "success",
+          "test_step": "Run python -m pytest -q"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:ci"
+        ],
+        "limitation": "CI tidak membuktikan hasil pengujian di lingkungan produksi."
+      }
+    ],
+    "missing_information": [
+      "Tidak ada bukti panggilan model aktual oleh semua peran secara independen di runtime.",
+      "Tidak tersedia bukti eksekusi lengkap workflow, hanya konfigurasi.",
+      "Tidak ada bukti penegakan budget secara real-time atau penanganan pelanggaran.",
+      "Tidak ada bukti readiness dari sisi penerimaan bisnis atau pengujian ARM.",
+      "Tidak ada bukti pengujian di lingkungan produksi, hanya CI pada commit."
+    ],
+    "next_action": "Verifikasi panggilan model aktual di runtime dan penegakan budget secara real-time; lengkapi bukti eksekusi workflow dan readiness bisnis; pertahankan pengujian CI yang sudah ada tanpa menjalankan tes di produksi."
+  },
+  "repaired_output": {
+    "summary": "Audit repository ai-factory menunjukkan model aktif openai/gpt-4.1-mini untuk lead, developer, dan reviewer; workflow evidence-audit-v1 dengan skills engineering dan product_research; serta batasan budget harian 1000 panggilan, 20 juta token, dan 50 USD dengan penggunaan rendah. Readiness status siap dengan metode handler proses internal, dan hasil CI pada SHA 41b3a68212a8b7f0c86d58e38f6c8491c3a125de sukses tanpa kegagalan.",
+    "findings": [],
+    "audit_checks": [
+      {
+        "topic": "models",
+        "verification": "runtime",
+        "observation": "Model aktif untuk lead, developer, dan reviewer adalah openai/gpt-4.1-mini sesuai konfigurasi runtime saat audit.",
+        "observed_values": {
+          "lead": "openai/gpt-4.1-mini",
+          "developer": "openai/gpt-4.1-mini",
+          "reviewer": "openai/gpt-4.1-mini"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:configured-models"
+        ],
+        "limitation": "Konfigurasi model tercatat, namun tidak ada bukti panggilan aktual oleh ketiga peran secara independen."
+      },
+      {
+        "topic": "workflow",
+        "verification": "repository",
+        "observation": "Workflow evidence-audit-v1 aktif dengan skills engineering dan product_research terdaftar dalam konfigurasi kode.",
+        "observed_values": {
+          "contract": "evidence-audit-v1",
+          "skills": "engineering, product_research"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:scope",
+          "repo:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:app/staff.py"
+        ],
+        "limitation": "Hanya konfigurasi workflow yang tersedia, tanpa bukti eksekusi proses lengkap."
+      },
+      {
+        "topic": "budget",
+        "verification": "runtime",
+        "observation": "Batas harian tenant adalah 1000 panggilan, 20 juta token, dan 50 USD dengan penggunaan saat audit 127 panggilan, 4.56 juta token, dan 0.7985 USD.",
+        "observed_values": {
+          "daily_limits_calls": "1000",
+          "daily_limits_reserved_tokens": "20000000",
+          "daily_limits_reported_cost_usd": "50.0",
+          "daily_usage_calls": "127",
+          "daily_usage_reserved_tokens": "4562716",
+          "daily_usage_reported_cost_usd": "0.798503"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:budget"
+        ],
+        "limitation": "Snapshot budget tidak membuktikan penegakan real-time atau penanganan pelanggaran."
+      },
+      {
+        "topic": "readiness",
+        "verification": "runtime",
+        "observation": "Status readiness sistem adalah siap dengan metode pemeriksaan handler proses internal.",
+        "observed_values": {
+          "status": "ready",
+          "method": "in-process handler"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:readiness"
+        ],
+        "limitation": "Tidak ada bukti penerimaan bisnis atau pengujian ARM, hanya pemeriksaan proses internal."
+      },
+      {
+        "topic": "tests",
+        "verification": "ci",
+        "observation": "CI pada SHA 41b3a68212a8b7f0c86d58e38f6c8491c3a125de berhasil dengan status completed dan kesimpulan success pada langkah Run python -m pytest -q.",
+        "observed_values": {
+          "base_sha": "41b3a68212a8b7f0c86d58e38f6c8491c3a125de",
+          "run_id": "37382967920",
+          "status": "completed",
+          "conclusion": "success",
+          "test_step": "Run python -m pytest -q"
+        },
+        "evidence_refs": [
+          "audit:self:41b3a68212a8b7f0c86d58e38f6c8491c3a125de:ci"
+        ],
+        "limitation": "CI tidak membuktikan hasil pengujian di lingkungan produksi."
+      }
+    ],
+    "missing_information": [
+      "Tidak ada bukti panggilan model aktual oleh semua peran secara independen di runtime.",
+      "Tidak tersedia bukti eksekusi lengkap workflow, hanya konfigurasi.",
+      "Tidak ada bukti penegakan budget secara real-time atau penanganan pelanggaran.",
+      "Tidak ada bukti readiness dari sisi penerimaan bisnis atau pengujian ARM.",
+      "Tidak ada bukti pengujian di lingkungan produksi, hanya CI pada commit."
+    ],
+    "next_action": "Verifikasi panggilan model aktual di runtime dan penegakan budget secara real-time; lengkapi bukti eksekusi workflow dan readiness bisnis; pertahankan pengujian CI yang sudah ada tanpa menjalankan tes di produksi."
+  }
+}

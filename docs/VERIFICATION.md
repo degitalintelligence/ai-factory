@@ -87,3 +87,16 @@ and prompt rules are not copied into the 2,000-character plan step field. Reject
 schema-valid drafts are retained as redacted `staff_rejected_draft` diagnostics
 with step/phase and local issues, subject to existing task ownership/report rules.
 This diagnostic does not approve the answer or relax publication gates.
+
+Task #50 regression uses the actual rejected initial and repaired outputs in an
+anonymized fixture (only referenced evidence retained; operator owner replaced).
+Both validate, and the initial answer traverses both skills and independent
+reviews to completed with no repair and no rewrite. The production-test advisory
+check now uses word-boundary action verbs and negation of the nearest action in
+the same clause. Maintaining CI "tanpa menjalankan tes di produksi", runtime
+mentions, and missing production evidence are not execution proposals. Positive
+production-test directives still fail outside requested scope, even when another
+clause says "jangan" or "do not". This is a bounded advisory text check, not a
+general language parser or an authorization grant; permission/execution gates
+are unchanged. Provider acceptance after deployment remains separate from the
+exact-output replay and infrastructure tests.
