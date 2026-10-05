@@ -710,10 +710,10 @@ model prompts or code comments.
 | Default model | RESOLVED | Alias `bunny-alpha` (provider model `stealth/space-bunny-alpha`) for Lead, Developer, Reviewer through config. Record alias and resolved model per call. |
 | V0.3 capability levels L0 to L3 | RESOLVED | L0 read, L1 plan/draft in isolated workspace, L2 non-production change and staging deploy per project policy, L3 production, external message, financial transaction, credential. L3 always requires Dedi approval. An agent must not skip a level because it feels confident. |
 | V0.3 minimum data model and `/v1` API | ROADMAP | Add only when the milestone that needs it is active, with migration and contract tests. Business logic must remain usable without Telegram. |
-| Final Dedi interface | OPEN | Telegram, dashboard, or both; all adapters share one core inbox/state. |
-| Context/memory backend | OPEN | Choose only with permission, provenance, freshness, and retrieval tests. |
+| Final Dedi interface | RESOLVED | Telegram private natural chat and the same-origin operator dashboard share the existing core inbox/state. User authorized autonomous v0.3 design decisions; see V03_IMPLEMENTATION_AND_ACCEPTANCE.md. |
+| Context/memory backend | RESOLVED | Existing SQL memory with tenant/owner/role filtering, provenance, versioning, conflict records and withdrawal checks on checkpoint recovery. No additional memory service. |
 | Memory tenant isolation key | RESOLVED | Dedi chose a real `tenant` column as the hard boundary plus `owner` as a real filter within one tenant. Every read, write, correction, retraction, and history lookup filters on tenant. A row owned by a person is visible only to that owner, unowned rows are shared inside the tenant, and a read with no principal returns shared memory only. Role clearance applies after the owner filter and never widens across it. The active-key uniqueness is `(tenant, key, scope)`; `owner` stays outside it, so one tenant holds one active value per key and scope. A tenant registry/mapping is still OPEN. |
-| Skill registry and Team Planner implementation | ROADMAP | Do not invent a generic platform before a concrete skill/task needs it. |
+| Skill registry and Team Planner implementation | IMPLEMENTED CANDIDATE | Bounded six-skill DAG in the existing queue. Engineering uses the verified engine; other skills analyze/draft only. Release acceptance still requires real-provider/staging evidence. |
 | ai-factory self-target registry alias | OPEN | Add explicitly with branch, policy, budget, and approval rules before self-editing core. |
 | Domain skills beyond Engineering | ROADMAP | One domain at a time, with least-privilege connectors and staging evidence. |
 
