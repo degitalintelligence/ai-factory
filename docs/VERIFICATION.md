@@ -69,3 +69,21 @@ label after the existing authorization filters. Regression checks ensure all
 authorized refs survive this compaction. Real provider token savings and the
 new answer contract require one bounded post-deployment acceptance audit; local
 mock tests do not establish model quality.
+
+Task #49 acceptance adds positive cases for absent actual model execution logs,
+real-time/historical budget data and external endpoint proof while settings,
+budget snapshots and internal readiness are present. Negation checks now keep
+contrast and limitation clauses separate and look for the observed subject;
+explicit denial of available settings, budget snapshot/limits or readiness still
+fails. This remains a narrow consistency check, not general language entailment.
+CI observed_values now have an explicit exact-SHA run/status/test-step contract,
+using the same completed-successful-run rule as CI verification. Missing or wrong
+SHA CI cannot acquire verified fields. A valid audit regression must traverse
+both skills and independent reviews to completion without repair, alongside the
+existing rejected-output tests. Real provider acceptance remains required.
+
+Scoped audit plan objectives are short stable descriptions; observation fields
+and prompt rules are not copied into the 2,000-character plan step field. Rejected
+schema-valid drafts are retained as redacted `staff_rejected_draft` diagnostics
+with step/phase and local issues, subject to existing task ownership/report rules.
+This diagnostic does not approve the answer or relax publication gates.

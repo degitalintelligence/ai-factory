@@ -23,7 +23,7 @@ TOPICS = {
     "workflow": r"evidence-audit|\bworkflow\b|orchestration|orkestrasi",
     "budget": r"\bbudget\b|anggaran",
     "readiness": r"readiness|/ready|kesiapan",
-    "tests": r"\btests?\b|pytest|pengujian",
+    "tests": r"\btests?\b|pytest|pengujian|\bCI\b",
 }
 
 
@@ -285,6 +285,32 @@ async def audit_observations(task, github) -> list[ContextItem]:
     return items
 
 
+def successful_ci_test_run(data: dict) -> dict | None:
+    """A complete successful run with an executed test step at the locked SHA."""
+    for run in data.get("runs", []):
+        if (
+            run.get("head_sha") != data.get("base_sha")
+            or run.get("status") != "completed"
+            or run.get("conclusion") != "success"
+        ):
+            continue
+        for job in run.get("jobs", []):
+            if job.get("status") != "completed" or job.get("conclusion") != "success":
+                continue
+            for step in job.get("steps", []):
+                if step.get("conclusion") == "success" and re.search(
+                    r"pytest|(?:^|\s)test(?:\s|$)", step.get("name", ""), re.I
+                ):
+                    return {
+                        "base_sha": str(data["base_sha"]),
+                        "run_id": str(run.get("run_id", "")),
+                        "status": "completed",
+                        "conclusion": "success",
+                        "test_step": step["name"][:256],
+                    }
+    return None
+
+
 def audit_facts(context: list[ContextItem]) -> dict[str, dict[str, str]]:
     """Exact bounded fields to report, separate from conclusions and source defaults."""
     facts = {}
@@ -303,6 +329,10 @@ def audit_facts(context: list[ContextItem]) -> dict[str, dict[str, str]]:
                     for group in ("daily_limits", "daily_usage")
                     for key, value in data[group].items()
                 }
+        elif item.source == "repository_ci":
+            observed = successful_ci_test_run(json.loads(item.content))
+            if observed:
+                facts["tests"] = observed
         elif item.source == "factory_runtime_readiness":
             data = json.loads(item.content)
             if data.get("status") == "ready":
@@ -339,16 +369,26 @@ def audit_consistency(output: StaffOutput, context: list[ContextItem]) -> list[s
             "budget": "factory_runtime_budget",
             "readiness": "factory_runtime_readiness",
             "workflow": "registered_repository_source",
+            "tests": "repository_ci",
         }[topic]
         if not any(sources.get(ref) == expected for ref in check.evidence_refs):
             issues.append(
                 f"Audit consistency {topic}: observed values require their direct evidence reference"
             )
-        if check.verification != ("repository" if topic == "workflow" else "runtime"):
+        kind = "repository" if topic == "workflow" else "ci" if topic == "tests" else "runtime"
+        if check.verification != kind:
             issues.append(f"Audit consistency {topic}: available observation must retain its evidence kind")
-    # Clauses that explicitly deny an observed topic are inconsistent even when
-    # a correct check exists below. Not a general semantic entailment engine.
-    denial = r"(?:tidak|belum|no)\b.{0,100}(?:tersedia|ada|available|evidence)|unavailable|not available"
+
+    # Restrict denial checks to the observed subject within the same clause.
+    # Task #49: missing execution logs or live time-series is not missing settings
+    # or a missing budget snapshot. Contrast/limitation clauses cannot transfer
+    # their negation onto an affirmative observation in the next clause.
+    denial = r"(?:tidak|belum|no)\b.{0,70}(?:tersedia|ada|available|evidence)|unavailable|not available"
+    subjects = {
+        "models": r"konfigurasi(?:\s+model)?|model\s+aktif|configured\s+models?|active\s+models?",
+        "budget": r"(?:snapshot|limit|batas).{0,40}(?:budget|anggaran)|(?:budget|anggaran).{0,40}(?:snapshot|limit|batas)",
+        "readiness": r"readiness|/ready",
+    }
     texts = [
         output.summary,
         *output.missing_information,
@@ -356,22 +396,17 @@ def audit_consistency(output: StaffOutput, context: list[ContextItem]) -> list[s
         *(c.observation for c in output.audit_checks),
         *(c.limitation for c in output.audit_checks),
     ]
-    for topic in ("models", "budget", "readiness"):
+    for topic, subject in subjects.items():
         if topic not in facts:
             continue
-        name = {
-            "models": r"model|konfigurasi",
-            "budget": r"budget|anggaran",
-            "readiness": r"readiness|/ready",
-        }[topic]
         for text in texts:
-            for sentence in re.split(r"[.;!?]", text):
-                if re.search(name, sentence, re.I) and re.search(denial, sentence, re.I):
-                    # Actual model calls, deployed SHA attestation, longitudinal budget
-                    # and ARM/business acceptance remain legitimate unavailable proof.
+            for clause in re.split(
+                r"[,;!?]|(?<!\d)\.(?!\d)|\b(?:hanya|only|tetapi|namun|but|sedangkan)\b", text, flags=re.I
+            ):
+                if re.search(subject, clause, re.I) and re.search(denial, clause, re.I):
                     if re.search(
-                        r"panggilan|actual calls|semua peran|all roles|berkelanjutan|continuous|ARM|bisnis|business|deployed|deployment SHA",
-                        sentence,
+                        r"panggilan|penggunaan model|actual calls|semua peran|all roles|berkelanjutan|continuous|historis|historical|real[- ]time|ARM|bisnis|business|deployed|deployment SHA|eksternal|external",
+                        clause,
                         re.I,
                     ):
                         continue
@@ -385,8 +420,10 @@ def audit_consistency(output: StaffOutput, context: list[ContextItem]) -> list[s
     ):
         scope = next(item for item in context if item.source == "repository_audit_scope")
         requirement = json.loads(scope.content).get("requirement", "")
-        if not re.search(
-            r"(?:jalankan|run|execute).{0,60}(?:test|tes|pytest).{0,40}(?:produksi|production)",
+        if re.search(
+            r"(?:jangan|do not).{0,70}(?:test|tes|pytest).{0,40}(?:produksi|production)", requirement, re.I
+        ) or not re.search(
+            r"\b(?:jalankan|run|execute).{0,60}(?:test|tes|pytest).{0,40}(?:produksi|production)",
             requirement,
             re.I,
         ):
@@ -463,15 +500,8 @@ def audit_validation(output: StaffOutput, context: list[ContextItem]) -> list[st
         if check.verification == "ci":
             successful_test = any(
                 item.source == "repository_ci"
-                and any(
-                    step.get("conclusion") == "success"
-                    and re.search(r"pytest|(?:^|\s)test(?:\s|$)", step.get("name", ""), re.I)
-                    for run in json.loads(item.content).get("runs", [])
-                    for job in run.get("jobs", [])
-                    if job.get("conclusion") == "success"
-                    and run.get("head_sha") == json.loads(scopes[0].content)["base_sha"]
-                    for step in job.get("steps", [])
-                )
+                and json.loads(item.content).get("base_sha") == json.loads(scopes[0].content)["base_sha"]
+                and successful_ci_test_run(json.loads(item.content))
                 for item in sources
             )
             if check.topic != "tests" or not successful_test:

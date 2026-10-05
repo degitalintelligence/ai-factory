@@ -726,6 +726,17 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             "review_repair_validation", json.dumps({"step_id": step_id, "local_issues": local_issues})
         )
         if local_issues:
+            await checkpoint(
+                "staff_rejected_draft",
+                json.dumps(
+                    {
+                        "step_id": step_id,
+                        "phase": "repair",
+                        "local_issues": local_issues,
+                        "redacted_output": redact(corrected.model_dump_json()),
+                    }
+                ),
+            )
             return corrected, evaluation, local_issues
         await checkpoint(
             "review_repair_draft",
@@ -895,7 +906,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             output_rules += (
                 " REQUIRED OBSERVED_VALUES: "
                 + json.dumps(audit_facts(context))
-                + " Copy these exact string fields into each matching audit_check.observed_values, cite the direct observation, and retain runtime (or repository for workflow) verification. Do not replace settings evidence with actual-call evidence gaps. Summary must agree with checks. No production test execution recommendation. Use at most two evidence refs per check when sufficient."
+                + " Copy these exact string fields into each matching audit_check.observed_values, cite the direct observation, and retain runtime (repository for workflow, ci for tests) verification. Topics without supplied fields must use observed_values={}. Do not replace settings evidence with actual-call evidence gaps. Summary must agree with checks. No production test execution recommendation. Use at most two evidence refs per check when sufficient."
             )
             context_json = json.dumps(
                 [{"ref": i.ref, "source": i.source, "content": i.content, "label": i.label} for i in context],
@@ -987,13 +998,15 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                     {
                         "id": "audit_evidence",
                         "skill": "engineering",
-                        "objective": output_rules,
+                        "objective": "Audit requested repository checks against pinned source, current-process observations and exact-SHA CI; preserve evidence kinds and scoped limitations."
+                        if readonly_repository_audit(task.requirement)
+                        else output_rules,
                         "max_llm_calls": 5,
                     },
                     {
                         "id": "audit_decisions",
                         "skill": "product_research",
-                        "objective": output_rules[:2000]
+                        "objective": "Prepare the final read-only audit using all requested checks, exact observed fields and supported limitations; independently review the answer before completion."
                         if readonly_repository_audit(task.requirement)
                         else "Susun jawaban final dari bukti: maksimal tiga temuan, rekomendasi, keputusan operator, keterbatasan. Jangan menambahkan diagnosis tanpa bukti.",
                         "dependencies": ["audit_evidence"],
@@ -1278,6 +1291,18 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         )
                         if issues:
                             raise ValueError("Skill evaluation failed: " + "; ".join(issues))
+                    if issues and evidence_audit:
+                        await checkpoint(
+                            "staff_rejected_draft",
+                            json.dumps(
+                                {
+                                    "step_id": step.id,
+                                    "phase": "initial",
+                                    "local_issues": issues,
+                                    "redacted_output": redact(output.model_dump_json()),
+                                }
+                            ),
+                        )
                     if not issues:
                         if factual:
                             await checkpoint("factual_draft", output.model_dump_json())
