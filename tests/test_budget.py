@@ -8,6 +8,18 @@ from app.config import settings
 from app.store import BUDGET_WARNING_THRESHOLDS, BudgetExceeded
 
 
+async def test_reservation_rejection_reports_next_call_not_actual_exhaustion(db, monkeypatch):
+    monkeypatch.setattr(settings, "max_total_tokens", 120000)
+    task = await db.create("Read-only audit")
+    await db.claim("w")
+    await db.update(task.id, "w", tokens=83281)
+    with pytest.raises(BudgetExceeded, match="used=83281, next_reserve=40000, limit=120000"):
+        await db.reserve_call(task.id, "w", token_reserve=40000)
+    assert (await db.get(task.id)).llm_calls == 0
+    await db.reserve_call(task.id, "w", token_reserve=30000)
+    assert (await db.get(task.id)).llm_calls == 1
+
+
 async def test_plan_budget_can_only_lower_the_operator_ceiling(db, monkeypatch):
     monkeypatch.setattr(settings, "max_llm_calls", 20)
     monkeypatch.setattr(settings, "max_total_tokens", 200000)
