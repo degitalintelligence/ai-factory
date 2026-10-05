@@ -30,9 +30,24 @@ def validation_detail(exc: ValueError, schema: type[BaseModel]) -> str:
     """Describe errors without copying model output, unknown keys, or input values."""
     if isinstance(exc, ValidationError):
         details = []
+        contract = schema.model_json_schema()
         for error in exc.errors(include_input=False, include_url=False)[:8]:
-            field = error["loc"][0] if error["loc"] else "object"
-            field = field if field in schema.model_fields else "object"
+            node = contract
+            path = ""
+            for part in error["loc"][:8]:
+                # Only names from our schema and numeric list positions may be
+                # exposed. Provider-supplied extra keys and values stay private.
+                while "$ref" in node:
+                    node = contract.get("$defs", {}).get(node["$ref"].split("/")[-1], {})
+                if isinstance(part, int) and part >= 0 and "items" in node:
+                    path += f"[{part}]"
+                    node = node["items"]
+                elif isinstance(part, str) and part in node.get("properties", {}):
+                    path += ("." if path else "") + part
+                    node = node["properties"][part]
+                else:
+                    break
+            field = path or "object"
             required_error = str(error.get("ctx", {}).get("error", ""))
             if required_error in {
                 "path is required",
@@ -42,7 +57,14 @@ def validation_detail(exc: ValueError, schema: type[BaseModel]) -> str:
             }:
                 details.append(required_error)
                 continue
-            details.append(f"{field}: {error['type']}")
+            bounds = []
+            if error["type"] in {"too_long", "too_short", "string_too_long", "string_too_short"}:
+                for key in ("min_length", "max_length", "actual_length"):
+                    value = error.get("ctx", {}).get(key)
+                    if type(value) is int and value >= 0:
+                        bounds.append(f"{key}={value}")
+            suffix = " (" + ", ".join(bounds) + ")" if bounds else ""
+            details.append(f"{field}: {error['type']}{suffix}")
         return "schema_validation: " + "; ".join(details)
     if isinstance(exc, json.JSONDecodeError):
         return f"invalid_json: line {exc.lineno}, column {exc.colno}"
@@ -232,6 +254,10 @@ async def json_completion(
                         "Regenerate one complete JSON object matching the supplied schema and action rules. "
                         "Use exact field names at the top level; no wrappers, arrays, extra fields or commentary. "
                         "Include required fields with correct types. Keep the response small. "
+                        "For length errors, obey the reported field's min_length/max_length: "
+                        "select only the strongest supporting references for an evidence_refs list, "
+                        "combine overlapping findings for a findings list, or shorten only the named prose field. "
+                        "Preserve required findings, uncertainty and evidence; do not expand unrelated fields. "
                         "No action from the rejected response was executed.",
                     }
                 )

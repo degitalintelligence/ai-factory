@@ -119,7 +119,9 @@ class CompactFinding(Finding):
     alternative: str = Field(min_length=1, max_length=250)
     risk: str = Field(min_length=1, max_length=200)
     evidence_refs: list[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(
-        min_length=1, max_length=4
+        min_length=1,
+        max_length=4,
+        description="Select 1-4 exact evidence references supporting this finding; never copy the entire context reference list.",
     )
 
 
