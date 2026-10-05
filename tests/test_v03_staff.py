@@ -447,6 +447,7 @@ async def test_generated_proposal_context_is_not_independent_proof(db):
     derived = [c for c in context if c.source == "decisions"]
     assert derived and all(c.label == "unverified" and c.confidence == 0.5 for c in derived)
     assert all("not independent evidence" in c.content for c in derived)
+    assert all("Repeated budget failure" not in c.content for c in derived)
     assert all(c.label == "current" for c in context if c.source == "task_diagnostics")
 
 
@@ -816,7 +817,7 @@ async def test_single_step_model_budget_accounts_for_intake_and_honors_caps(
     assert saved.status == expected
     artifacts = await db.artifacts(goal.id)
     if expected == "completed":
-        assert saved.llm_calls == 6 and db.budget_envelope(saved)["max_llm_calls"] == 8
+        assert saved.llm_calls == 6 and db.budget_envelope(saved)["max_llm_calls"] == 10
         assert any(a.kind == "plan_budget_accounting" for a in artifacts)
     else:
         assert saved.llm_calls == 2 and db.budget_envelope(saved)["max_llm_calls"] == 5
@@ -1341,7 +1342,7 @@ async def test_rejected_staff_review_preserves_draft_and_never_publishes(db, mon
         result = await base(**kwargs)
         if kwargs["schema"] is OutputEvaluation:
             reviews += 1
-            if reviews == (3 if final else 1):
+            if reviews >= (3 if final else 1):
                 return OutputEvaluation(
                     approved=approved,
                     issues=["Klaim memperluas bukti dua audit ke semua eksekusi; batasi cakupan."],
@@ -1451,10 +1452,12 @@ async def test_confidence_correction_is_bounded_and_requires_review(db, monkeypa
     else:
         assert saved.status == "failed" and "staff_result" not in artifacts
         assert len(repair_requests) == (0 if mode == "no_room" else 1)
-        assert saved.llm_calls == {"invalid": 4, "no_room": 3, "review_reject": 5}[mode]
+        assert saved.llm_calls == {"invalid": 4, "no_room": 3, "review_reject": 7}[mode]
     async with db.sessions() as session:
         steps = list(await session.scalars(select(Subtask).where(Subtask.task_id == task.id)))
-    assert all(step.calls <= (2 if mode == "no_room" else 3) for step in steps)
+    assert all(
+        step.calls <= (2 if mode == "no_room" else 5 if mode == "review_reject" else 3) for step in steps
+    )
 
 
 async def test_completed_audit_and_rejected_audit_do_not_launder_generated_claims(db):
@@ -1580,8 +1583,148 @@ async def test_review_receives_observations_and_rejects_warning_as_exhaustion(db
 
     monkeypatch.setattr(staff, "json_completion", gateway)
     await staff.run_staff_task(task.id, "worker")
-    assert calls == ["ResolvedIntent", "StaffPlan", "CompactStaffOutput", "OutputEvaluation"]
+    assert calls == [
+        "ResolvedIntent",
+        "StaffPlan",
+        "CompactStaffOutput",
+        "OutputEvaluation",
+        "CompactStaffOutput",
+        "OutputEvaluation",
+    ]
     assert (await db.get(task.id)).status == "failed"
     artifacts = await db.artifacts(task.id)
     assert any(a.kind == "staff_draft_evaluation" and '"approved": false' in a.content for a in artifacts)
     assert not any(a.kind == "staff_result" for a in artifacts)
+
+
+@pytest.mark.parametrize(
+    "mode", ["skill", "confidence_then_review", "final", "rejected", "unsafe", "no_room"]
+)
+async def test_review_feedback_gets_one_funded_repair_and_independent_review(db, monkeypatch, mode):
+    import json
+
+    task, source = await setup_goal(db)
+    await db.update(source.id, kind="orchestration", status="completed")
+    await db.event(source.id, "budget_warning", "Budget warning 80%: calls=9/11")
+    async with db.sessions() as session, session.begin():
+        card = Decision(
+            owner=7,
+            tenant=settings.tenant_id,
+            category="recommendation",
+            title="Budget habis",
+            situation="Unsupported old audit",
+        )
+        session.add(card)
+        await session.flush()
+        derived_ref = f"decision:{card.id}"
+    if mode == "no_room":
+        await db.update(task.id, requirement=task.requirement + " Budget 11 calls.")
+    calls = []
+    base = provider(db, f"task:{source.id}:evidence", calls)
+    drafts = 0
+    reviews = 0
+    repairs = []
+    corrected = output(f"task:{source.id}:evidence")
+    corrected.summary = (
+        "Peringatan anggaran tercatat; tugas tetap selesai. Penyebab kegagalan tidak terbukti."
+    )
+    corrected.findings = corrected.findings[:1]
+    corrected.findings[0].title = "Peringatan anggaran, bukan penghentian"
+    corrected.findings[0].situation = "Tugas selesai meskipun terdapat peringatan anggaran."
+
+    async def complete(**kwargs):
+        nonlocal drafts, reviews
+        result = await base(**kwargs)
+        user = kwargs["user"]
+        if kwargs["schema"] is ResolvedIntent:
+            result.evidence_gaps = ["Log lengkap tidak tersedia."]
+        if kwargs["schema"] is StaffOutput:
+            drafts += 1
+            if "REVIEW_FEEDBACK:" in user:
+                repairs.append(kwargs)
+                assert kwargs["max_attempts"] == 1
+                assert "Bukan kegagalan budget" in user
+                result = corrected.model_copy(deep=True)
+                if mode == "unsafe":
+                    result.findings[0].evidence_refs = ["task:999999"]
+            elif "DEFECTS:" in user:
+                result.findings[0].evidence_refs = [derived_ref]
+                result.findings[0].confidence = 0.5
+            elif drafts == (3 if mode == "final" else 1):
+                result.findings[0].title = "Budget habis"
+                if mode == "confidence_then_review":
+                    result.findings[0].evidence_refs = [derived_ref]
+                    result.findings[0].confidence = 0.9
+            else:
+                result = corrected.model_copy(deep=True)
+        if kwargs["schema"] is OutputEvaluation:
+            reviews += 1
+            target = 3 if mode == "final" else 1
+            if reviews == target or (mode == "rejected" and reviews == target + 1):
+                return OutputEvaluation(
+                    approved=False,
+                    issues=["Bukan kegagalan budget; bukti menunjukkan peringatan dan status selesai."],
+                    summary="Perbaiki klaim.",
+                )
+            if "corrected answer" in user:
+                checked = json.loads(user.split("OUTPUT:", 1)[1])
+                assert checked["findings"][0]["title"] == corrected.findings[0].title
+                if mode == "final":
+                    assert "Log lengkap tidak tersedia." in checked["missing_information"]
+        return result
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    saved = await db.get(task.id)
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    assert len(repairs) == (0 if mode == "no_room" else 1)
+    if mode in {"skill", "confidence_then_review", "final"}:
+        assert saved.status == "completed"
+        assert saved.llm_calls == (11 if mode == "confidence_then_review" else 10)
+        final = StaffOutput.model_validate_json(artifacts["staff_result"])
+        assert final.findings[0].title == corrected.findings[0].title
+        assert "Log lengkap tidak tersedia." in final.missing_information
+        assert json.loads(artifacts["review_repair_evaluation"])["evaluation"]["approved"]
+        if mode != "final":
+            async with db.sessions() as session:
+                done = await session.scalar(
+                    select(Subtask).where(Subtask.task_id == task.id, Subtask.key == "audit")
+                )
+                assert (
+                    StaffOutput.model_validate_json(done.output_json).findings[0].title
+                    == corrected.findings[0].title
+                )
+                assert OutputEvaluation.model_validate_json(done.evaluation_json).approved
+    else:
+        assert saved.status == "failed" and "staff_result" not in artifacts
+        assert saved.llm_calls == {"rejected": 6, "unsafe": 5, "no_room": 4}[mode]
+        if mode == "unsafe":
+            assert "review_repair_draft" not in artifacts and "review_repair_evaluation" not in artifacts
+    async with db.sessions() as session:
+        steps = list(await session.scalars(select(Subtask).where(Subtask.task_id == task.id)))
+    assert all(step.calls <= (3 if mode == "no_room" else 5) for step in steps)
+
+
+async def test_lower_cost_candidate_routes_all_roles_without_silent_fallback(db, monkeypatch):
+    task, source = await setup_goal(db)
+    for role in ("lead", "developer", "reviewer"):
+        monkeypatch.setattr(settings, f"{role}_model", "openai/gpt-4.1-mini")
+    observed = []
+
+    async def gateway(**kwargs):
+        observed.append((kwargs["role"], kwargs["model"]))
+        await db.reserve_call(*run_context.get(), token_reserve=1, subtask=subtask_context.get())
+        schema = kwargs["schema"]
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective="Audit", desired_outcome="Bounded answer")
+        if schema is StaffPlan:
+            return plan()
+        if schema is OutputEvaluation:
+            return OutputEvaluation(approved=True, summary="Bukti sesuai.")
+        return schema.model_validate(output(f"task:{source.id}").model_dump())
+
+    monkeypatch.setattr(staff, "json_completion", gateway)
+    await staff.run_staff_task(task.id, "worker")
+    assert (await db.get(task.id)).status == "completed"
+    assert {role for role, _ in observed} == {"lead", "developer", "reviewer"}
+    assert {model for _, model in observed} == {"openai/gpt-4.1-mini"}
