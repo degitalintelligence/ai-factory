@@ -61,7 +61,7 @@ Ask only questions necessary to define the target, requested outcome, or safe au
 Never infer that an absent record proves success, failure, or a root cause.
 Decision cards, improvement proposals and prior audit outputs are derived records, not independent proof of their claims. Prefer direct task diagnostics when they conflict. Do not recycle a rejected audit's claims as verified facts or confuse schema/review failures with token truncation or exhausted task budgets.
 Task refs support recorded status and usage only. For orchestration history, generated summaries, drafts and review verdicts are deliberately omitted from direct diagnostics. Artifact/event existence does not prove the claims it once contained. A budget_warning proves a warning, not exhaustion; completed is not failed. Token truncation requires a recorded length/truncation diagnostic; a ValueError or schema rejection is not that diagnostic. Repository verification instructions prove a documented procedure, not a failed deployment or absence of tests everywhere.
-For unverified context, do not exceed its supplied confidence or present its counts as confirmed. Prefer findings with direct supporting evidence; label derived claims and proposed priorities as inference. Decisions requested by the user must describe a concrete choice, not merely repeat a recommendation.
+For unverified context, do not exceed its supplied confidence or present its counts as confirmed. Decision metadata supports inbox state only, not a diagnosis; do not infer omitted proposal text. Build findings from observed task diagnostics and supplied repository facts. If three proven problems are unavailable, report fewer supported findings and explicit evidence gaps rather than fill a quota. An evidence gap can justify a verification decision, but is not an observed production failure. Decisions requested by the user must describe a concrete choice, not merely repeat a recommendation.
 Authority is operator-owned; an approval for analysis grants no external execution authority.
 """
 
@@ -372,8 +372,7 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                     label="unverified" if generated else "current",
                     content=redact(
                         (
-                            "Derived proposal, not independent evidence; verify counts and claims against task diagnostics. Legacy recurring-budget proposals may include non-budget failures. "
-                            + f"{row.title}: {row.situation[:1400]}; "
+                            "Derived proposal, not independent evidence; narrative omitted to avoid recycling prior audit claims. "
                             if generated
                             else "Decision metadata only; its explanation is not independent proof of audited claims. "
                         )
@@ -526,7 +525,7 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-14",
+        prompt_version="staff-v03-15",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -599,6 +598,57 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             "confidence_repair_validation", json.dumps({"step_id": step_id, "local_issues": repaired_issues})
         )
         return repaired, repaired_issues
+
+    async def repair_review(output, evaluation, issues, objective, role, available_calls, step_id):
+        # One generation plus one independent review. Never retry unsafe local
+        # drafts, enlarge saved budgets, or convert a correction into approval.
+        if factual or issues or (evaluation.approved and not evaluation.issues) or available_calls < 2:
+            return output, evaluation, issues
+        feedback = evaluation.issues or [evaluation.summary]
+        await checkpoint(
+            "review_repair",
+            json.dumps(
+                {"step_id": step_id, "plan_hash": execution_hash, "feedback": feedback, "max_attempts": 1}
+            ),
+        )
+        corrected = await complete(
+            schema=StaffOutput,
+            role=role,
+            max_attempts=1,
+            user=f"{output_rules}\nRevise this rejected answer using the review feedback. Fix actual claims and supporting refs, not only confidence numbers. Remove unsupported diagnoses and report evidence gaps explicitly. Fewer supported findings are preferable to invented ones. Preserve concrete operator choices and the original scope.\nOBJECTIVE:{objective}\nCONTEXT:{context_json}\nDRAFT:{output.model_dump_json()}\nREVIEW_FEEDBACK:{json.dumps(feedback)}",
+        )
+        if step_id == "final":
+            corrected.missing_information = list(
+                dict.fromkeys(corrected.missing_information + intent.evidence_gaps)
+            )[:10]
+        local_issues = validate_output(corrected, context)
+        await checkpoint(
+            "review_repair_validation", json.dumps({"step_id": step_id, "local_issues": local_issues})
+        )
+        if local_issues:
+            return corrected, evaluation, local_issues
+        await checkpoint(
+            "review_repair_draft",
+            json.dumps({"step_id": step_id, "plan_hash": execution_hash, "output": corrected.model_dump()}),
+        )
+        reviewed = await complete(
+            schema=OutputEvaluation,
+            role="reviewer",
+            max_attempts=1,
+            user=f"{output_rules}\nIndependently review the corrected answer against the original objective and cited facts. Prior feedback is not approval. Reject remaining unsupported claims.\nOBJECTIVE:{objective}\nPLAN:{plan.model_dump_json()}\nCONTEXT:{context_json}\nOUTPUT:{corrected.model_dump_json()}",
+        )
+        await checkpoint(
+            "review_repair_evaluation",
+            json.dumps(
+                {
+                    "step_id": step_id,
+                    "plan_hash": execution_hash,
+                    "evaluation": reviewed.model_dump(),
+                    "local_issues": local_issues,
+                }
+            ),
+        )
+        return corrected, reviewed, local_issues
 
     try:
         artifacts = {a.kind: a.content for a in await store.artifacts(task_id)}
@@ -785,13 +835,13 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             consumed = await store.get(task_id)
             minimum = consumed.llm_calls + await plan_call_requirement(consumed, plan, requirement_hash)
             if minimum <= settings.max_llm_calls:
-                # Output and review share one retry allowance per step; final work gets
-                # one separate allowance. These are fresh estimates, never saved caps.
+                # Optional correction/re-review fits inside the operator ceiling.
+                # Saved plans and explicit budgets are never widened.
                 retry_slots = max(0, settings.max_llm_calls - minimum - 1)
                 for step in plan.steps:
-                    if step.max_llm_calls == 2 and retry_slots:
-                        step.max_llm_calls = 3
-                        retry_slots -= 1
+                    extra = min(3, retry_slots)
+                    step.max_llm_calls = max(step.max_llm_calls, 2 + extra)
+                    retry_slots -= max(0, step.max_llm_calls - 2)
                 funded = consumed.llm_calls + sum(step.max_llm_calls for step in plan.steps) + 2
             else:
                 funded = minimum
@@ -937,7 +987,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                     # synthesis/review before allowing the output gateway to retry.
                     future_calls = 2 * (len(remaining) - 1) + final_calls
                     output_attempts = min(
-                        3,
+                        2,
                         step.max_llm_calls - row.calls - 1,
                         store.budget_envelope(current)["max_llm_calls"]
                         - current.llm_calls
@@ -1000,7 +1050,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         charged = await session.get(Subtask, row.id)
                         remaining_step_calls = step.max_llm_calls - charged.calls
                     review_attempts = min(
-                        3,
+                        2,
                         remaining_step_calls,
                         store.budget_envelope(current)["max_llm_calls"] - current.llm_calls - future_calls,
                     )
@@ -1028,6 +1078,18 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                                 }
                             ),
                         )
+                    current = await store.get(task_id)
+                    async with store.sessions() as session:
+                        charged = await session.get(Subtask, row.id)
+                        available = min(
+                            step.max_llm_calls - charged.calls,
+                            store.budget_envelope(current)["max_llm_calls"]
+                            - current.llm_calls
+                            - future_calls,
+                        )
+                    output, evaluation, issues = await repair_review(
+                        output, evaluation, issues, step.objective, "developer", available, step.id
+                    )
                     subtask_context.reset(budget_token)
                     calls = (await store.get(task_id)).llm_calls - before
                     if issues or not evaluation.approved or evaluation.issues or calls > step.max_llm_calls:
@@ -1148,6 +1210,11 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 json.dumps(
                     {"plan_hash": execution_hash, "evaluation": review.model_dump(), "local_issues": issues}
                 ),
+            )
+            current = await store.get(task_id)
+            available = store.budget_envelope(current)["max_llm_calls"] - current.llm_calls
+            result, review, issues = await repair_review(
+                result, review, issues, task.requirement, "lead", available, "final"
             )
             if issues or not review.approved or review.issues:
                 raise ValueError(
