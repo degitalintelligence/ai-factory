@@ -312,6 +312,7 @@ async def test_chat_and_telegram_share_intake_and_reject_wrong_principal(db, mon
     await chat_handler(update, SimpleNamespace())
     tasks = await db.list(user_id=7)
     assert len(tasks) == 1 and tasks[0].kind == "orchestration" and tasks[0].chat_id == 77
+    assert f"tujuan #{tasks[0].id} [received]" in message.reply_text.call_args.args[0]
     await chat_handler(update, SimpleNamespace())
     assert len(await db.list(user_id=7)) == 1
     update.effective_user.id = 8
@@ -524,3 +525,32 @@ async def test_bounded_context_retains_knowledge_alongside_large_task_history(db
     assert any(item.ref == f"memory:{memory.id}:v1" for item in context)
     assert any(item.ref.startswith("task:") for item in context)
     assert sum(len(item.model_dump_json()) for item in context) <= 24000
+
+
+async def test_staff_sends_start_before_slow_context_or_provider(db, monkeypatch):
+    task, _ = await setup_goal(db)
+    notify = AsyncMock()
+
+    async def slow_context(task):
+        assert notify.await_count == 1
+        assert "Analisis dimulai" in notify.call_args.args[0]
+        raise RuntimeError("Simulated source failure")
+
+    monkeypatch.setattr(staff, "assemble_context", slow_context)
+    complete = AsyncMock()
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker", notify)
+    assert (await db.get(task.id)).status == "failed"
+    assert not complete.called
+    assert notify.await_count == 2
+
+
+async def test_staff_delivery_failures_preserve_completed_result(db, monkeypatch):
+    task, source = await setup_goal(db)
+    monkeypatch.setattr(staff, "complete", provider(db, f"task:{source.id}", []))
+    notify = AsyncMock(side_effect=RuntimeError("Simulated delivery outage"))
+    await staff.run_staff_task(task.id, "worker", notify)
+    assert (await db.get(task.id)).status == "completed"
+    assert any(a.kind == "staff_result" for a in await db.artifacts(task.id))
+    assert any(e.kind == "notification_failed" for e in await db.events(task.id))
+    assert len([d for d in await db.inbox() if d.task_id == task.id]) == 3
