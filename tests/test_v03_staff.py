@@ -617,10 +617,12 @@ async def test_oversized_fresh_plan_is_repaired_once_within_original_budget(db, 
     real = provider(db, f"task:{source.id}", [])
     plans = []
 
-    async def oversized(*, schema, role, user):
+    async def oversized(*, schema, role, user, max_attempts=3):
         result = await real(schema=schema, role=role, user=user)
         if schema is StaffPlan:
             plans.append(user)
+            if len(plans) == 2:
+                assert max_attempts == 1
             data = result.model_dump()
             data["budget"]["max_llm_calls"] = 10 if len(plans) == 1 else 100
             if len(plans) == 1:
@@ -655,7 +657,7 @@ async def test_still_infeasible_plan_never_requests_execution_approval(db, monke
     real = provider(db, f"task:{source.id}", [])
     planning_calls = []
 
-    async def oversized(*, schema, role, user):
+    async def oversized(*, schema, role, user, max_attempts=3):
         result = await real(schema=schema, role=role, user=user)
         if schema is StaffPlan:
             planning_calls.append(user)
@@ -687,4 +689,6 @@ async def test_saved_infeasible_plan_is_not_silently_rewritten(db, monkeypatch):
     await staff.run_staff_task(task.id, "worker")
     assert (await db.get(task.id)).status == "failed"
     assert calls == ["ResolvedIntent"]
+    assert "Plan cannot fit:" in (await db.get(task.id)).last_message
+    assert f"/report {task.id}" in (await db.get(task.id)).last_message
     assert not any(d.kind == "APPROVAL_REQUIRED" for d in await db.inbox(state="open"))
