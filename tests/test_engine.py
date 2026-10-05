@@ -307,3 +307,44 @@ async def test_revoked_project_policy_stops_task(db, engine_fakes, monkeypatch):
     monkeypatch.setattr(settings, "projects_json", '{"lab":{"repo":"other/repository"}}')
     task = await execute(db, task.id)
     assert task.status == "failed" and "policy changed" in task.last_message
+
+
+async def test_task_44_command_reaches_lead_audit_without_lab_or_old_task_context(
+    db, repo, engine_fakes, monkeypatch
+):
+    from app.audit_scope import SELF_REPOSITORY
+    from app.schemas import MemoryWrite
+
+    state, refs = engine_fakes
+    requirement = (
+        "Audit current main repository ai-factory setelah deployment terbaru. "
+        "Verifikasi konfigurasi model, evidence-audit-v1, budget diagnostics, readiness dan test suite. "
+        "Bedakan bukti repository dari hal yang belum dapat diverifikasi di runtime. Jangan mengubah apa pun."
+    )
+    task = await db.create(requirement, project="self", user_id=7)
+    lab = await db.create("LAB-POISON old lab task", user_id=7)
+    await db.update(lab.id, status="pr_created", last_message="LAB-POISON")
+    await db.remember(MemoryWrite(key="global", value="GLOBAL-POISON", source="fixture"), owner=7)
+    seen = []
+
+    async def lead(requirement, context):
+        saved = await db.get(task.id)
+        assert saved.base_sha == refs["main"] and saved.repo == SELF_REPOSITORY
+        assert "LAB-POISON" not in context and "GLOBAL-POISON" not in context
+        seen.append("lead")
+        return LeadPlan(
+            objective="Audit repository",
+            acceptance_criteria=["Existing behavior remains valid"],
+            risk="low",
+            review_only=True,
+        )
+
+    monkeypatch.setattr(orchestrator, "lead_plan", lead)
+    saved = await execute(db, task.id)
+    assert saved.status == "reviewed", saved.last_message
+    assert saved.project == "self" and saved.repo == SELF_REPOSITORY
+    assert seen == ["lead"] and state["develop"] == state["prs"] == state["pushes"] == 0
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    assert json.loads(artifacts["audit_target"])["base_sha"] == refs["main"]
+    assert json.loads(artifacts["resolved_skills"])["workflow"] == "lead/audit"
+    assert "tests" in artifacts and "review" in artifacts

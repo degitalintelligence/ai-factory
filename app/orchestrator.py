@@ -5,6 +5,7 @@ import logging
 import re
 
 from app.agents import developer_loop, lead_plan, normalize_lead_plan, review_change
+from app.audit_scope import referenced_tasks, repository_audit, target_project, validate_sha
 from app.config import Project, settings
 from app.contracts import context_slice
 from app.gates import deployment_issues, post_publication_issues, quality_issues
@@ -36,6 +37,8 @@ SELF_BASELINE_DOCUMENTS = ("README.md", "AGENTS.md")
 
 
 async def repository_context(workspace, task):
+    if repository_audit(task.requirement):
+        validate_sha(task.base_sha)
     files = workspace.list_files()
     is_self = str(getattr(task, "kind", "")) == "self_improvement"
     context_limit = settings.self_task_context_chars if is_self else 120000
@@ -79,7 +82,12 @@ async def repository_context(workspace, task):
         previous = [
             t
             for t in await store.list(30)
-            if t.repo == task.repo and t.id != task.id and t.status == "pr_created"
+            if t.repo == task.repo
+            and t.id != task.id
+            and t.status == "pr_created"
+            and t.user_id == task.user_id
+            and getattr(t, "tenant", "default") == getattr(task, "tenant", "default")
+            and (not repository_audit(task.requirement) or t.id in referenced_tasks(task.requirement))
         ][:3]
         chunks += [
             f"Previous completed task #{t.id}: {t.requirement[:1000]}\n{t.last_message[:2000]}"
@@ -94,6 +102,8 @@ async def repository_context(workspace, task):
         scope=task.project,
         limit=15,
         owner=task.user_id,
+        tenant=getattr(task, "tenant", settings.tenant_id),
+        exact_scope=repository_audit(task.requirement),
         char_budget=min(4000, context_limit // 10),
     )
     if slice_text:
@@ -134,6 +144,9 @@ async def run_task(task_id, notify=None, owner=None):
 
     async def transition(status, message, **kwargs):
         await check()
+        nonlocal stage
+        if status != "failed":
+            stage = status
         await store.update(task_id, owner, status=status, last_message=message, **kwargs)
         await store.event(task_id, status, message)
         if notify:
@@ -142,7 +155,9 @@ async def run_task(task_id, notify=None, owner=None):
             except Exception:
                 logger.warning("Notification unavailable for task %s", task_id)
 
+    stage = "target_resolution"
     try:
+        target_project(task.requirement, task.project, settings.projects())
         current = settings.projects().get(task.project)
         policy = Project.model_validate_json(task.policy_json)
         if current is None or current.model_dump() != policy.model_dump():
@@ -152,6 +167,7 @@ async def run_task(task_id, notify=None, owner=None):
             pr = await api.find_pr(task.repo, task.branch)
             if not pr or pr["state"] != "open":
                 raise RuntimeError("Feedback needs an open task PR; start a new task after merge")
+        stage = "baseline_lock"
         workspace = Workspace(task.id, task.repo, task.branch, policy, task.base_sha)
         base_sha = await asyncio.to_thread(workspace.prepare, existing_branch=bool(task.pr_url))
         await store.update(task_id, owner, base_sha=base_sha)
@@ -234,6 +250,29 @@ async def run_task(task_id, notify=None, owner=None):
             await transition("publishing", "Reconciling previously approved publication")
             await publish(task.head_sha, task.review_digest, "Publication recovered without duplicate PR")
             return
+        if repository_audit(task.requirement):
+            validate_sha(task.base_sha)
+            requested = re.findall(r"\b[0-9a-f]{40}\b", task.requirement)
+            if requested and set(requested) != {task.base_sha}:
+                raise ValueError(
+                    "Requested audit commit differs from locked workspace baseline; create a fresh audit"
+                )
+            await store.artifact(
+                task_id,
+                "audit_target",
+                json.dumps({"repository": task.repo, "project": task.project, "base_sha": task.base_sha}),
+            )
+        await store.artifact(
+            task_id,
+            "resolved_skills",
+            json.dumps(
+                {
+                    "selected": ["engineering"],
+                    "workflow": "lead/audit" if repository_audit(task.requirement) else "engineering",
+                }
+            ),
+        )
+        stage = "context_gathering"
         context, baseline = await repository_context(workspace, task)
         await store.artifact(task_id, "baseline", baseline)
         if task.plan_json:
@@ -244,6 +283,7 @@ async def run_task(task_id, notify=None, owner=None):
                 await store.update(task_id, owner, plan_json=task.plan_json)
                 await store.artifact(task_id, "plan", task.plan_json)
         else:
+            stage = "lead_planning"
             await transition("planning", "Lead is analysing requirements and repository context")
             plan = await lead_plan(task.requirement, context)
             plan.deployment_required = plan.deployment_required or policy.require_deployment
@@ -464,6 +504,11 @@ async def run_task(task_id, notify=None, owner=None):
     except TaskStopped:
         raise
     except Exception as exc:
+        await store.artifact(
+            task_id,
+            "failure",
+            json.dumps({"stage": stage, "category": type(exc).__name__, "detail": redact(str(exc))[:2000]}),
+        )
         message = redact(f"{type(exc).__name__}: {exc}")[:4000]
         await transition("failed", message)
     finally:

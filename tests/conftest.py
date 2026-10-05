@@ -24,7 +24,7 @@ async def db(monkeypatch):
     monkeypatch.setattr(
         settings,
         "projects_json",
-        '{"lab":{"repo":"owner/repo"},"other":{"repo":"owner/other"},"self":{"repo":"owner/self"}}',
+        '{"lab":{"repo":"owner/repo"},"other":{"repo":"owner/other"},"self":{"repo":"degitalintelligence/ai-factory"}}',
     )
     # Self-improvement intake is gated on the registered self-target alias, so tests
     # exercise it with "self" instead of the default lab harness.

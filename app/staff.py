@@ -16,6 +16,13 @@ import httpx
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
+from app.audit_scope import (
+    readonly_repository_audit,
+    referenced_tasks,
+    repository_audit,
+    target_project,
+    validate_sha,
+)
 from app.config import settings
 from app.db import (
     Artifact,
@@ -162,7 +169,9 @@ async def create_intent(
     tenant = tenant or settings.tenant_id
     if secret_present(request.message):
         raise ValueError("Remove credentials from the objective")
-    if request.project and request.project not in settings.projects():
+    projects = settings.projects()
+    project = target_project(request.message, request.project, projects)
+    if project and project not in projects:
         raise ValueError("Unknown project alias")
     key = "chat:" + hashlib.sha256(f"{tenant}:{actor}:{request.idempotency_key}".encode()).hexdigest()
 
@@ -171,7 +180,7 @@ async def create_intent(
             row = await s.scalar(select(Task).where(Task.idempotency_key == key))
             if row and (
                 row.requirement != request.message
-                or row.project != request.project
+                or row.project != project
                 or row.chat_id != chat_id
                 or row.user_id != actor
                 or row.tenant != tenant
@@ -186,12 +195,13 @@ async def create_intent(
         async with store.sessions() as s, s.begin():
             task = Task(
                 requirement=request.message,
-                project=request.project,
+                project=project,
                 tenant=tenant,
                 user_id=actor,
                 chat_id=chat_id,
                 kind="orchestration",
-                repo=f"liobot/{uuid4().hex}",
+                repo=projects[project].repo if project else f"liobot/{uuid4().hex}",
+                base_branch=projects[project].base_branch if project else "main",
                 idempotency_key=key,
                 policy_json=json.dumps(
                     {"projects": {k: v.model_dump() for k, v in settings.projects().items()}}
@@ -264,10 +274,12 @@ async def assemble_context(task: Task) -> list[ContextItem]:
     if any(current.get(k) != v for k, v in snapshot.items()):
         raise ValueError("Project policy changed; create a fresh intent")
     projects = {task.project} if task.project else set(snapshot)
-    referenced_tasks = {
-        int(value)
-        for value in re.findall(r"\b(?:task|tujuan|intent)\s*#?\s*(\d+)\b", task.requirement, re.I)[:10]
-    }
+    task_refs = referenced_tasks(task.requirement)
+    scoped_audit = repository_audit(task.requirement)
+    if scoped_audit:
+        validate_sha(task.base_sha)
+        if not task.project or snapshot.get(task.project, {}).get("repo") != task.repo:
+            raise ValueError("Audit target does not match its registered policy snapshot")
     focused = factual_request(task.requirement)
     task_scopes = projects | ({""} if not task.project else set())
     items = []
@@ -281,8 +293,9 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                     Task.project.in_(task_scopes),
                     Task.id != task.id,
                     Task.id == focused[0] if focused else True,
+                    Task.id.in_(task_refs) if scoped_audit else True,
                 )
-                .order_by(Task.id.in_(referenced_tasks).desc(), Task.updated_at.desc())
+                .order_by(Task.id.in_(task_refs).desc(), Task.updated_at.desc())
                 .limit(30)
             )
         )
@@ -296,6 +309,7 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                         (Decision.owner.is_(None) & Decision.task_id.in_([t.id for t in tasks])),
                     ),
                     or_(Decision.project.in_(projects), Decision.project == ""),
+                    Decision.task_id.in_(task_refs) if scoped_audit else True,
                 )
                 .order_by(Decision.id.desc())
                 .limit(30)
@@ -403,7 +417,11 @@ async def assemble_context(task: Task) -> list[ContextItem]:
         for alias in sorted(projects):
             policy = settings.projects()[alias]
             try:
-                revision = await github.branch_sha(policy.repo, policy.base_branch)
+                revision = (
+                    task.base_sha
+                    if scoped_audit
+                    else await github.branch_sha(policy.repo, policy.base_branch)
+                )
                 if not revision:
                     continue
                 for path in (
@@ -456,11 +474,13 @@ async def assemble_context(task: Task) -> list[ContextItem]:
     least_role = min(
         ("lead", "developer", "reviewer"), key=lambda r: CLEARANCE.get(clearance.get(r, "none"), -1)
     )
-    for scope in ["", *sorted(projects)]:
+    for scope in sorted(projects) if scoped_audit else ["", *sorted(projects)]:
         views, _ = await store.recall(
             role=least_role, scope=scope, owner=task.user_id, tenant=task.tenant, limit=15
         )
         for view in views:
+            if scoped_audit and view.scope not in projects:
+                continue
             memory[view.id] = view
     words = {w.casefold().strip(".,!?;") for w in task.requirement.split() if len(w) > 3}
     ranked = sorted(
@@ -666,7 +686,42 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
         )
         return corrected, reviewed, local_issues
 
+    stage = "target_resolution"
     try:
+        if repository_audit(task.requirement):
+            target_project(task.requirement, task.project, settings.projects())
+            snapshot = json.loads(task.policy_json).get("projects", {})
+            policy = settings.projects().get(task.project)
+            if not policy or snapshot.get(task.project) != policy.model_dump() or task.repo != policy.repo:
+                raise ValueError("Audit target missing or policy changed; create a fresh scoped audit")
+            stage = "baseline_lock"
+            if not task.base_sha:
+                requested = re.findall(r"\b[0-9a-f]{40}\b", task.requirement)
+                if len(set(requested)) > 1:
+                    raise ValueError("Audit has multiple commit references; specify one base SHA")
+                sha = requested[0] if requested else await GitHubAPI().branch_sha(task.repo, task.base_branch)
+                sha = validate_sha(sha)
+                commit = await GitHubAPI().request("GET", f"{task.repo}/commits/{sha}")
+                if commit.get("sha") != sha:
+                    raise ValueError("Audit base commit is not verified in the target repository")
+                await store.update(task_id, owner, base_sha=sha)
+                task.base_sha = sha
+            validate_sha(task.base_sha)
+            requested = re.findall(r"\b[0-9a-f]{40}\b", task.requirement)
+            if requested and set(requested) != {task.base_sha}:
+                raise ValueError("Requested audit commit differs from locked baseline; create a fresh audit")
+            await checkpoint(
+                "audit_target",
+                json.dumps(
+                    {
+                        "repository": task.repo,
+                        "project": task.project,
+                        "base_sha": task.base_sha,
+                        "base_branch": task.base_branch,
+                    }
+                ),
+            )
+        stage = "context_gathering"
         artifacts = {a.kind: a.content for a in await store.artifacts(task_id)}
         if "staff_result" in artifacts:
             await transition("completed", "Hasil sudah tersimpan; buka evidence untuk rekomendasi.")
@@ -676,7 +731,11 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             "Analisis dimulai. Membaca konteks yang diizinkan, lalu menyiapkan rencana. Hasil model mungkin memerlukan waktu.",
         )
         requirement_hash = hashlib.sha256(task.requirement.encode()).hexdigest()
-        if artifacts.get("context_requirement_hash") == requirement_hash and "context" in artifacts:
+        if (
+            not repository_audit(task.requirement)
+            and artifacts.get("context_requirement_hash") == requirement_hash
+            and "context" in artifacts
+        ):
             context = [ContextItem.model_validate(item) for item in json.loads(artifacts["context"])]
             # Re-check permissions and withdrawals before replaying frozen evidence.
             await assemble_context(task)
@@ -721,9 +780,13 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             factual and (not task.plan_json or artifacts.get("output_contract") == "factual-v2")
         )
         contract = "factual-v2" if exact_factual else "factual-v1" if factual else "staff-v1"
-        evidence_audit = evidence_audit_request(task.requirement) and not task.plan_json
+        evidence_audit = (
+            evidence_audit_request(task.requirement) or readonly_repository_audit(task.requirement)
+        ) and not task.plan_json
         if task.plan_json and artifacts.get("output_contract") == "evidence-audit-v1":
-            evidence_audit = evidence_audit_request(task.requirement)
+            evidence_audit = evidence_audit_request(task.requirement) or readonly_repository_audit(
+                task.requirement
+            )
         if evidence_audit:
             contract = "evidence-audit-v1"
             # Inbox metadata cannot establish a diagnosis. Keep direct sources,
@@ -752,6 +815,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
         await store.artifact(task_id, "context", context_json, owner=owner)
         await store.artifact(task_id, "context_requirement_hash", requirement_hash, owner=owner)
         requirement_hash = hashlib.sha256(task.requirement.encode()).hexdigest()
+        stage = "intent_resolution"
         intent = (
             ResolvedIntent.model_validate_json(artifacts["resolved_intent"])
             if artifacts.get("resolved_requirement_hash") == requirement_hash
@@ -796,6 +860,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
         if intent.missing_information:
             await transition("waiting_input", "Perlu informasi: " + " | ".join(intent.missing_information))
             return
+        stage = "audit_planning" if evidence_audit else "skill_planning"
         planning_task = await store.get(task_id)
         planning_limits = store.budget_envelope(planning_task)
         plan = (
@@ -889,9 +954,22 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 "failed", "Aksi L2/L3 belum dijalankan. Decision Inbox menjelaskan workflow yang diperlukan."
             )
             return
-        selected = select_skills(task.requirement)
+        stage = "skill_validation"
+        selected = ["engineering", "product_research"] if evidence_audit else select_skills(task.requirement)
+        await checkpoint(
+            "resolved_skills",
+            json.dumps(
+                {
+                    "selected": selected,
+                    "steps": [step.skill for step in plan.steps],
+                    "workflow": "evidence-audit-v1" if evidence_audit else "staff-v1",
+                }
+            ),
+        )
         if len(selected) > 1 and len({step.skill for step in plan.steps}) < 2:
-            raise ValueError("Cross-functional goals require at least two distinct skills")
+            raise ValueError(
+                f"Skill coverage mismatch: required {selected}; resolved {[step.skill for step in plan.steps]}. Repository audits use evidence-audit-v1; other goals require an explicit multi-skill plan"
+            )
         # A new model estimate is not an operator limit. Include all charged intake calls
         # before admitting it; saved plans and user-specified budgets are never widened.
         if (
@@ -936,6 +1014,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 )
         await store.update(task_id, owner, plan_json=plan.model_dump_json())
         await checkpoint("plan", plan.model_dump_json())
+        stage = "plan_admission"
         current = await store.get(task_id)
         limits = store.budget_envelope(current)
         required_calls = await plan_call_requirement(current, plan, requirement_hash, final_calls=final_calls)
@@ -966,7 +1045,9 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 revised.risk = "high"
             revised.approval_gates = list(dict.fromkeys(plan.approval_gates + revised.approval_gates))[:10]
             if len(selected) > 1 and len({step.skill for step in revised.steps}) < 2:
-                raise ValueError("Cross-functional goals require at least two distinct skills")
+                raise ValueError(
+                    f"Revised skill coverage mismatch: required {selected}; resolved {[step.skill for step in revised.steps]}"
+                )
             plan = revised
             await store.update(task_id, owner, plan_json=plan.model_dump_json())
             await checkpoint("plan", plan.model_dump_json())
@@ -1050,6 +1131,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 if row.status == "completed":
                     output = output_schema.model_validate_json(row.output_json)
                 else:
+                    stage = "audit_execution" if evidence_audit else "skill_execution"
                     budget_token = subtask_context.set((row.id, step.max_llm_calls))
                     before = (await store.get(task_id)).llm_calls
                     current = await store.get(task_id)
@@ -1132,6 +1214,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         raise BudgetExceeded(
                             "No independent review call available within reserved task/subtask limits"
                         )
+                    stage = "audit_review" if evidence_audit else "skill_review"
                     evaluation = await complete(
                         max_attempts=review_attempts,
                         schema=OutputEvaluation,
@@ -1357,7 +1440,9 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             message += " Alasan: " + excerpt(detail, 600)
         message += f" Evidence: /report {task_id} dan /logs {task_id}. Budget tidak direset."
         await transition("failed", message)
-        await store.artifact(task_id, "staff_failure", json.dumps({"category": kind, "detail": detail}))
+        await store.artifact(
+            task_id, "staff_failure", json.dumps({"category": kind, "detail": detail, "stage": stage})
+        )
         await store.create_decision(
             DecisionRequest(
                 task_id=task.id,

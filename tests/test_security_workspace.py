@@ -224,9 +224,14 @@ def test_ci_fixture_lines_do_not_block_snapshot_but_real_credentials_still_do(re
     workspace, _ = repo
     workflow = workspace.path / ".github/workflows/ci.yml"
     workflow.parent.mkdir(parents=True, exist_ok=True)
-    workflow.write_text("SANDBOX_TOKEN: ci-only-local-sandbox-token\nPOSTGRES_PASSWORD: factory_ci\n", encoding="utf-8")
+    workflow.write_text(
+        "SANDBOX_TOKEN: ci-only-local-sandbox-token\nPOSTGRES_PASSWORD: factory_ci\n", encoding="utf-8"
+    )
     workspace.snapshot()
 
-    workflow.write_text("SANDBOX_TOKEN: ci-only-local-sandbox-token\nAPI_KEY: real-private-credential-value\n", encoding="utf-8")
+    workflow.write_text(
+        "SANDBOX_TOKEN: ci-only-local-sandbox-token\nAPI_KEY: real-private-credential-value\n",
+        encoding="utf-8",
+    )
     with pytest.raises(WorkspaceError, match="Credential detected"):
         workspace.snapshot()

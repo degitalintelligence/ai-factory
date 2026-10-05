@@ -126,7 +126,7 @@ async def resolve_decision(decision_id, phrase, user_id=None, reason="", delegat
 
 
 async def context_slice(
-    keys, role, scope=None, limit=25, owner=None, tenant=DEFAULT_TENANT, char_budget=4000
+    keys, role, scope=None, limit=25, owner=None, tenant=DEFAULT_TENANT, char_budget=4000, exact_scope=False
 ):
     """Render a memory slice for a prompt. Provenance travels with every item.
 
@@ -144,6 +144,8 @@ async def context_slice(
     )
     lines = []
     for item in items:
+        if exact_scope and item.scope != scope:
+            continue
         line = (
             f"- [{item.id}] {item.key} = {item.value} [{item.label}; "
             f"v{item.version}; source={item.source or 'unspecified'}; "
