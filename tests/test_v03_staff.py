@@ -613,6 +613,7 @@ async def test_task_diagnostics_are_bounded_and_owner_tenant_scoped(db):
 
 
 async def test_oversized_fresh_plan_is_repaired_once_within_original_budget(db, monkeypatch):
+    monkeypatch.setattr(settings, "max_llm_calls", 10)
     task, source = await setup_goal(db)
     real = provider(db, f"task:{source.id}", [])
     plans = []
@@ -653,6 +654,7 @@ async def test_oversized_fresh_plan_is_repaired_once_within_original_budget(db, 
 
 
 async def test_still_infeasible_plan_never_requests_execution_approval(db, monkeypatch):
+    monkeypatch.setattr(settings, "max_llm_calls", 10)
     task, source = await setup_goal(db)
     real = provider(db, f"task:{source.id}", [])
     planning_calls = []
@@ -692,3 +694,70 @@ async def test_saved_infeasible_plan_is_not_silently_rewritten(db, monkeypatch):
     assert "Plan cannot fit:" in (await db.get(task.id)).last_message
     assert f"/report {task.id}" in (await db.get(task.id)).last_message
     assert not any(d.kind == "APPROVAL_REQUIRED" for d in await db.inbox(state="open"))
+
+
+async def test_named_chat_task_diagnostics_are_in_context_without_scope_leak(db):
+    source = await staff.create_intent(
+        ChatRequest(message="Audit stopped previously", idempotency_key="previous"), 7
+    )
+    await db.update(source.id, status="failed")
+    async with db.sessions() as session, session.begin():
+        session.add(
+            Artifact(task_id=source.id, kind="staff_failure", content="7 calls used + 4 required; limit 10")
+        )
+    private = await staff.create_intent(
+        ChatRequest(message="Private chat evidence", idempotency_key="private"), 8
+    )
+    goal = await staff.create_intent(
+        ChatRequest(message=f"Analisis task #{source.id} saja", idempotency_key="diagnose"), 7
+    )
+    context = await staff.assemble_context(goal)
+    assert any(
+        item.ref == f"task:{source.id}:evidence" and "7 calls used + 4 required" in item.content
+        for item in context
+    )
+    assert not any(item.ref.startswith(f"task:{private.id}") for item in context)
+    # A project-specific goal must not widen to unscoped cross-project chat history.
+    scoped = await staff.create_intent(
+        ChatRequest(message=f"Analisis task #{source.id} saja", project="self", idempotency_key="scoped"), 7
+    )
+    assert not any(item.ref.startswith(f"task:{source.id}") for item in await staff.assemble_context(scoped))
+
+
+@pytest.mark.parametrize(
+    "operator_limit, explicit_budget, expected",
+    [(10, False, "completed"), (5, False, "failed"), (10, True, "failed")],
+)
+async def test_single_step_model_budget_accounts_for_intake_and_honors_caps(
+    db, monkeypatch, operator_limit, explicit_budget, expected
+):
+    monkeypatch.setattr(settings, "max_llm_calls", operator_limit)
+    source = await db.create("Recorded task evidence", user_id=7)
+    await db.update(source.id, status="failed")
+    message = f"Analisis task #{source.id} saja. Jelaskan satu penyebab berhenti."
+    if explicit_budget:
+        message += " Budget maksimal 5 calls."
+    goal = await staff.create_intent(ChatRequest(message=message, idempotency_key="single"), 7)
+    await db.claim("worker")
+    real = provider(db, f"task:{source.id}", [])
+
+    async def underestimated(*, schema, role, user):
+        result = await real(schema=schema, role=role, user=user)
+        if schema is StaffPlan:
+            data = result.model_dump()
+            data["steps"] = [data["steps"][0]]
+            data["budget"]["max_llm_calls"] = 5
+            return StaffPlan.model_validate(data)
+        return result
+
+    monkeypatch.setattr(staff, "complete", underestimated)
+    await staff.run_staff_task(goal.id, "worker")
+    saved = await db.get(goal.id)
+    assert saved.status == expected
+    artifacts = await db.artifacts(goal.id)
+    if expected == "completed":
+        assert saved.llm_calls == 6 and db.budget_envelope(saved)["max_llm_calls"] == 7
+        assert any(a.kind == "plan_budget_accounting" for a in artifacts)
+    else:
+        assert saved.llm_calls == 2 and db.budget_envelope(saved)["max_llm_calls"] == 5
+        assert not any(a.kind == "plan_budget_accounting" for a in artifacts)
