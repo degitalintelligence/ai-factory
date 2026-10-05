@@ -382,3 +382,48 @@ and a rejected unsupported claim through the gateway/review workflow. The
 reviewer's semantic judgement is still model-dependent; these tests do not prove
 live audit accuracy. Deploy the reviewed commit and use a new goal, since saved
 context and completed historical audits are not rewritten by an upgrade.
+
+### Bounded reviewer-feedback correction and cheaper model trial (task #38)
+
+Task #38's reviewer correctly rejected recycled token-truncation and budget-stop
+claims. The confidence correction changed numbers without repairing those claims.
+The workflow then stopped without applying the reviewer feedback. New context
+omits generated decision titles/situations as well as prior audit narratives;
+decision state/category/task linkage remain visible and derived cards remain
+unverified. Historical inbox and report records are not edited or deleted.
+
+For non-factual skill and final answers, a locally safe rejected draft may receive
+one correction generation and one new independent review, each with one attempt.
+The correction must fix claims/evidence, not merely confidence. Unsafe refs or
+credentials, repeated rejection, unavailable task/subtask allowance or withdrawn
+lease still stop publication. The original rejected draft/evaluation are retained;
+`review_repair`, `review_repair_validation`, `review_repair_draft` and
+`review_repair_evaluation` identify the correction, step and plan. Corrections
+never approve themselves and never grant execution authority.
+
+Fresh, non-explicit model budget estimates reserve up to five calls per skill
+inside the existing operator ceiling: output, optional confidence correction,
+review, optional feedback correction and review. Initial output/review gateway
+retries are capped at two; corrections are capped at one. This is optional
+headroom, not guaranteed completion after every invalid response. Already saved
+plans and explicit user budgets are not enlarged; lifetime usage is never reset.
+The normal successful two-step audit still uses eight calls. Factual-v2's exact
+reviewed-output path remains unchanged. Prompt version is `staff-v03-15`.
+
+Dedi approved a lower-cost model trial. `.env.example` now suggests
+`openai/gpt-4.1-mini` for LEAD_MODEL, DEVELOPER_MODEL and REVIEWER_MODEL through
+the existing configurable role mechanism, with no automatic provider fallback.
+Existing Coolify environment values override examples and must be changed by the
+operator; merging this change does not switch a deployed model. Keep prior values
+for rollback. Published OpenRouter rates checked on 2026-10-05 are $0.40 input and
+$1.60 output per million tokens, versus GPT-4.1's $2/$8: 80% lower uncached
+token rates, not a promise of equal quality or 80% lower total spend.
+Sources: https://openrouter.ai/openai/gpt-4.1-mini and
+https://openrouter.ai/openai/gpt-4.1 .
+
+Mock-provider regressions cover correction after confidence repair, skill/final
+review, permanent rejection, insufficient allowance, unsafe corrected refs and
+configured mini routing for all roles. They do not establish mini's live audit or
+coding quality. Deploy the reviewed SHA with the three role environment values,
+run one new read-only audit and inspect evidence support, correction outcome,
+resolved model IDs, calls and reported cost before expanding engineering use.
