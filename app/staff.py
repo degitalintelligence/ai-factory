@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 from urllib.parse import quote
 from uuid import uuid4
 
@@ -169,6 +170,11 @@ async def assemble_context(task: Task) -> list[ContextItem]:
     if any(current.get(k) != v for k, v in snapshot.items()):
         raise ValueError("Project policy changed; create a fresh intent")
     projects = {task.project} if task.project else set(snapshot)
+    referenced_tasks = {
+        int(value)
+        for value in re.findall(r"\b(?:task|tujuan|intent)\s*#?\s*(\d+)\b", task.requirement, re.I)[:10]
+    }
+    task_scopes = projects | ({""} if not task.project else set())
     items = []
     async with store.sessions() as s:
         tasks = list(
@@ -177,10 +183,10 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                 .where(
                     Task.tenant == task.tenant,
                     Task.user_id == task.user_id,
-                    Task.project.in_(projects),
+                    Task.project.in_(task_scopes),
                     Task.id != task.id,
                 )
-                .order_by(Task.updated_at.desc())
+                .order_by(Task.id.in_(referenced_tasks).desc(), Task.updated_at.desc())
                 .limit(30)
             )
         )
@@ -415,7 +421,7 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-4",
+        prompt_version="staff-v03-5",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -580,6 +586,31 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
         selected = select_skills(task.requirement)
         if len(selected) > 1 and len({step.skill for step in plan.steps}) < 2:
             raise ValueError("Cross-functional goals require at least two distinct skills")
+        # A new model estimate is not an operator limit. Include all charged intake calls
+        # before admitting it; saved plans and user-specified budgets are never widened.
+        if not task.plan_json and not re.search(
+            r"\b(?:budget|anggaran|calls?|panggilan|tokens?|usd)\b|\$", task.requirement, re.I
+        ):
+            consumed = await store.get(task_id)
+            minimum = consumed.llm_calls + await plan_call_requirement(consumed, plan, requirement_hash)
+            if plan.budget.max_llm_calls < minimum <= settings.max_llm_calls:
+                estimate = plan.budget.max_llm_calls
+                admitted = min(settings.max_llm_calls, minimum + 1)
+                plan.budget.max_llm_calls = admitted
+                await checkpoint(
+                    "plan_budget_accounting",
+                    json.dumps(
+                        {
+                            "model_estimate_calls": estimate,
+                            "used_calls": consumed.llm_calls,
+                            "minimum_total_calls": minimum,
+                            "admitted_calls": admitted,
+                            "operator_limit_calls": settings.max_llm_calls,
+                            "retry_headroom": admitted - minimum,
+                            "reason": "Fresh model estimate omitted charged workflow calls; operator ceiling unchanged",
+                        }
+                    ),
+                )
         await store.update(task_id, owner, plan_json=plan.model_dump_json())
         await checkpoint("plan", plan.model_dump_json())
         current = await store.get(task_id)
