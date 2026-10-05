@@ -17,6 +17,9 @@ from sqlalchemy import (
     select,
     text,
 )
+from sqlalchemy import (
+    event as sa_event,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -78,6 +81,7 @@ REPOSITORY_RESERVED = REPOSITORY_BLOCKING | {"received"}
 class Task(Base):
     __tablename__ = "tasks"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant: Mapped[str] = mapped_column(String(120), default="default", server_default="default", index=True)
     requirement: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="received", index=True)
     branch: Mapped[str | None] = mapped_column(String(200))
@@ -110,6 +114,64 @@ class Task(Base):
     kind: Mapped[str] = mapped_column(
         String(32), default="engineering", server_default="engineering", index=True
     )
+
+
+class AuditLog(Base):
+    """Append-only application audit; privileged DB administrators remain outside this boundary."""
+
+    __tablename__ = "audit_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(120), default="default", index=True)
+    actor: Mapped[int | None] = mapped_column(BigInteger)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), index=True)
+    scope: Mapped[str] = mapped_column(String(120), default="")
+    action: Mapped[str] = mapped_column(String(80))
+    correlation_id: Mapped[str] = mapped_column(String(100), default="")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Subtask(Base):
+    __tablename__ = "subtasks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
+    key: Mapped[str] = mapped_column(String(40))
+    skill: Mapped[str] = mapped_column(String(60))
+    skill_version: Mapped[str] = mapped_column(String(32))
+    plan_hash: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    dependencies_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(32), default="received")
+    output_json: Mapped[str] = mapped_column(Text, default="{}")
+    evaluation_json: Mapped[str] = mapped_column(Text, default="{}")
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class ImprovementProposal(Base):
+    __tablename__ = "improvement_proposals"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(120), default="default", index=True)
+    owner: Mapped[int] = mapped_column(BigInteger)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(32), default="proposed")
+    brief_json: Mapped[str] = mapped_column(Text)
+    evidence_json: Mapped[str] = mapped_column(Text)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class MemoryConflict(Base):
+    __tablename__ = "memory_conflicts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(120), index=True)
+    owner: Mapped[int | None] = mapped_column(BigInteger)
+    memory_id: Mapped[int] = mapped_column(ForeignKey("memory_items.id"))
+    proposed_value: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(String(32), default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Event(Base):
@@ -216,6 +278,11 @@ class Decision(Base):
     decided_by: Mapped[int | None] = mapped_column(BigInteger)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime)
     decision_note: Mapped[str | None] = mapped_column(Text)
+    tenant: Mapped[str] = mapped_column(String(120), default="default", server_default="default", index=True)
+    owner: Mapped[int | None] = mapped_column(BigInteger)
+    category: Mapped[str] = mapped_column(
+        String(40), default="recommendation", server_default="recommendation"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
@@ -247,6 +314,24 @@ class MemoryItem(Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class DailyBudget(Base):
+    __tablename__ = "daily_budgets"
+    id: Mapped[str] = mapped_column(String(160), primary_key=True)
+    calls: Mapped[int] = mapped_column(Integer, default=0)
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+# Enforce audit immutability for application ORM mutations. Database administrators
+# can still perform disaster recovery; the application exposes no audit write/delete API.
+
+
+@sa_event.listens_for(AuditLog, "before_update")
+@sa_event.listens_for(AuditLog, "before_delete")
+def reject_audit_mutation(mapper, connection, target):
+    raise ValueError("Audit history is append-only")
 
 
 engine = create_async_engine(settings.database_url, pool_pre_ping=True)
@@ -287,6 +372,11 @@ MIGRATIONS = (
         "At most one open approval card per task, so a retry cannot stack duplicate decisions.",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_open_approval "
         "ON decisions (task_id) WHERE state = 'open' AND kind = 'APPROVAL_REQUIRED'",
+    ),
+    (
+        "0004_unique_subtask",
+        "One durable work item per intent and key.",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_subtask ON subtasks (task_id, key, plan_hash)",
     ),
 )
 
@@ -338,7 +428,7 @@ async def init_db(db_engine=None):
         if target.dialect.name == "postgresql":
             await conn.execute(text("SELECT pg_advisory_xact_lock(72803102)"))
         tables = await conn.run_sync(lambda c: inspect(c).get_table_names())
-        for model in (Task, MemoryItem, ModelRun):
+        for model in (Task, Decision, MemoryItem, ModelRun, Subtask):
             if model.__tablename__ not in tables:
                 continue
             name = model.__tablename__
@@ -351,3 +441,21 @@ async def init_db(db_engine=None):
                 await conn.execute(text(f'ALTER TABLE {name} ADD COLUMN "{column.name}" {sql_type}{default}'))
         await conn.run_sync(Base.metadata.create_all)
         await _apply_migrations(conn)
+        if target.dialect.name == "sqlite":
+            for action in ("UPDATE", "DELETE"):
+                await conn.execute(
+                    text(
+                        f"CREATE TRIGGER IF NOT EXISTS audit_no_{action.lower()} BEFORE {action} ON audit_log BEGIN SELECT RAISE(ABORT, 'Audit history is append-only'); END"
+                    )
+                )
+        elif target.dialect.name == "postgresql":
+            await conn.execute(
+                text(
+                    "CREATE OR REPLACE FUNCTION reject_audit_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'Audit history is append-only'; END; $$"
+                )
+            )
+            await conn.execute(
+                text(
+                    "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname='audit_append_only' AND tgrelid='audit_log'::regclass) THEN CREATE TRIGGER audit_append_only BEFORE UPDATE OR DELETE ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_audit_change(); END IF; END $$"
+                )
+            )
