@@ -496,3 +496,130 @@ async def test_task_48_compact_prompts_preserve_authorized_evidence_and_full_art
         separators=(",", ":"),
     )
     assert len(compact) < len(full) * 0.95
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "Tidak ada bukti langsung penggunaan model di runtime produksi, hanya konfigurasi dan observasi snapshot.",
+        "Tidak ada bukti penggunaan budget tenant harian secara real-time, hanya snapshot sebelum audit.",
+        "Tidak tersedia log eksekusi model; konfigurasi model aktif tersedia dari snapshot.",
+        "Model aktif tersedia, namun bukti panggilan aktual tidak tersedia.",
+        "Snapshot budget tersedia; data historis budget tidak tersedia.",
+        "Readiness internal ready, namun pengujian endpoint eksternal belum tersedia.",
+    ],
+)
+async def test_task_49_scoped_limitations_do_not_deny_supplied_observations(db, monkeypatch, gap):
+    task = await goal(db)
+    fake_github(monkeypatch)
+    context = await staff.assemble_context(task)
+    result = covered_output(context)
+    result.missing_information = [gap]
+    assert staff.validate_output(result, context) == []
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "Konfigurasi model aktif tidak tersedia.",
+        "Tidak ada bukti konfigurasi model aktif.",
+        "Snapshot budget tidak tersedia.",
+        "Tidak tersedia limit budget tenant.",
+        "Bukti runtime readiness tidak tersedia.",
+    ],
+)
+async def test_task_49_actual_snapshot_denials_still_fail(db, monkeypatch, claim):
+    task = await goal(db)
+    fake_github(monkeypatch)
+    context = await staff.assemble_context(task)
+    result = covered_output(context)
+    result.summary = claim
+    assert any("prose denies" in issue for issue in staff.validate_output(result, context))
+
+
+async def test_task_49_valid_report_reaches_both_skills_review_and_completion(db, monkeypatch):
+    task = await goal(db)
+    fake_github(monkeypatch)
+    await db.claim("worker")
+    drafts = []
+    reviews = []
+
+    async def complete(*, schema, user, **kwargs):
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective=REQUIREMENT, desired_outcome="Audit evidence")
+        if schema is StaffOutput:
+            result = covered_output(await staff.assemble_context(await db.get(task.id)))
+            result.missing_information = [
+                "Tidak ada bukti langsung penggunaan model di runtime produksi, hanya konfigurasi dan observasi snapshot.",
+                "Tidak ada bukti penggunaan budget tenant harian secara real-time, hanya snapshot sebelum audit.",
+            ]
+            assert result.audit_checks[-1].observed_values["base_sha"] == SHA
+            drafts.append(result)
+            return result
+        reviews.append(user)
+        return OutputEvaluation(approved=True, summary="Bukti dan keterbatasan sesuai")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    saved = await db.get(task.id)
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    assert saved.status == "completed", saved.last_message
+    assert len(drafts) == len(reviews) == 2
+    assert "review_repair" not in artifacts
+    plan = json.loads(artifacts["plan"])
+    assert all(len(step["objective"]) < 220 for step in plan["steps"])
+    assert StaffOutput.model_validate_json(artifacts["staff_result"]) == drafts[-1]
+
+
+async def test_task_49_ci_fields_reject_tampered_sha_and_unavailable_runs(db, monkeypatch):
+    task = await goal(db)
+    fake_github(monkeypatch)
+    context = await staff.assemble_context(task)
+    result = covered_output(context)
+    values = result.audit_checks[-1].observed_values
+    assert values["conclusion"] == "success" and "pytest" in values["test_step"]
+    values["base_sha"] = "b" * 40
+    assert any("observed_values must equal" in issue for issue in staff.validate_output(result, context))
+    fake_github(monkeypatch, ci_sha="b" * 40)
+    context = await staff.assemble_context(task)
+    assert "tests" not in audit_evidence.audit_facts(context)
+    assert any("no supplied observed_values" in issue for issue in staff.validate_output(result, context))
+    assert audit_evidence.requested_checks("Audit repository ai-factory: hasil CI") == ["tests"]
+
+
+async def test_rejected_audit_drafts_are_redacted_and_retained_for_diagnostics(db, monkeypatch):
+    task = await goal(db)
+    fake_github(monkeypatch)
+    await db.claim("worker")
+    secret = "sk-or-v1-" + "a" * 64
+
+    async def complete(*, schema, **kwargs):
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective=REQUIREMENT, desired_outcome="Audit evidence")
+        if schema is StaffOutput:
+            result = covered_output(await staff.assemble_context(await db.get(task.id)))
+            result.summary = "Snapshot budget tidak tersedia. " + secret
+            return result
+        return OutputEvaluation(approved=True, summary="Review cannot override local gates")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    diagnostic = json.loads(artifacts["staff_rejected_draft"])
+    assert diagnostic["phase"] == "initial" and diagnostic["step_id"] == "audit_evidence"
+    assert diagnostic["local_issues"] and secret not in artifacts["staff_rejected_draft"]
+    assert "Snapshot budget" in diagnostic["redacted_output"]
+    assert "staff_result" not in artifacts
+
+
+async def test_production_test_prohibition_is_not_treated_as_a_request(db, monkeypatch):
+    task = await goal(db)
+    fake_github(monkeypatch)
+    context = await staff.assemble_context(task)
+    scope = next(i for i in context if i.source == "repository_audit_scope")
+    data = json.loads(scope.content)
+    data["requirement"] += " Jangan menjalankan test di produksi."
+    scope.content = json.dumps(data)
+    result = covered_output(context)
+    result.next_action = "Jalankan test di produksi."
+    assert any("production test execution" in i for i in staff.validate_output(result, context))
