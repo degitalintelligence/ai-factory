@@ -14,13 +14,13 @@ jobs:
         env:
           POSTGRES_DB: factory_ci
           POSTGRES_USER: factory_ci
-          POSTGRES_PASSWORD: factory_ci
+          POSTGRES_PASSWORD: ${{ github.run_id }}
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U factory_ci -d factory_ci"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      TEST_POSTGRES_URL: postgresql+asyncpg://factory_ci:factory_ci@localhost:5432/factory_ci
+      TEST_POSTGRES_URL: postgresql+asyncpg://factory_ci:${{ github.run_id }}@localhost:5432/factory_ci
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,7 +45,7 @@ jobs:
         run: sudo bash scripts/install-sandbox-profile.sh
       - name: Verify namespace isolation and failure gates
         env:
-          SANDBOX_TOKEN: ci-only-local-sandbox-token
+          SANDBOX_TOKEN: ${{ github.run_id }}
         run: |
           docker run -d --name factory-sandbox --security-opt seccomp=unconfined --security-opt apparmor=ai-factory-sandbox --security-opt systempaths=unconfined --security-opt no-new-privileges:true --cap-drop ALL --memory 3g --pids-limit 128 --read-only --tmpfs /tmp:rw,nosuid,nodev,size=536870912 -e SANDBOX_TOKEN -p 127.0.0.1:8090:8090 factory-sandbox:ci
           for attempt in $(seq 1 30); do
@@ -64,12 +64,12 @@ jobs:
           persist-credentials: false
       - name: Validate Compose interpolation
         env:
-          POSTGRES_PASSWORD: ci-only
-          OPENROUTER_API_KEY: ci-only
-          TELEGRAM_BOT_TOKEN: ci-only
+          POSTGRES_PASSWORD: ${{ github.run_id }}
+          OPENROUTER_API_KEY: ${{ github.run_id }}
+          TELEGRAM_BOT_TOKEN: ${{ github.run_id }}
           TELEGRAM_ALLOWED_USER_IDS: "123456"
-          GITHUB_TOKEN: ci-only
-          SANDBOX_TOKEN: ci-only
+          GITHUB_TOKEN: ${{ github.run_id }}
+          SANDBOX_TOKEN: ${{ github.run_id }}
           LEAD_MODEL: ci-only
           DEVELOPER_MODEL: ci-only
           REVIEWER_MODEL: ci-only
