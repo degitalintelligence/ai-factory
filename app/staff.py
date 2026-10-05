@@ -225,6 +225,22 @@ def factual_request(requirement: str) -> tuple[int, int] | None:
     return None
 
 
+def evidence_audit_request(requirement: str) -> bool:
+    """Only the explicit read-only, available-evidence audit uses this profile."""
+    original = requirement.strip()
+    return bool(
+        re.fullmatch(
+            r"Audit AI Factory berdasarkan evidence yang tersedia\.\s*"
+            r"Tunjukkan tiga masalah paling penting, rekomendasi perbaikan, dan keputusan "
+            r"yang harus saya ambil minggu ini\.\s*"
+            r"Nyatakan bukti yang belum tersedia sebagai keterbatasan\.\s*"
+            r"Jangan melakukan perubahan\.",
+            original,
+            re.I,
+        )
+    )
+
+
 def validate_factual(output: FactualOutput, context: list[ContextItem], word_limit: int) -> list[str]:
     refs = {item.ref: item for item in context}
     issues = []
@@ -525,7 +541,7 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-15",
+        prompt_version="staff-v03-16",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -617,7 +633,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             max_attempts=1,
             user=f"{output_rules}\nRevise this rejected answer using the review feedback. Fix actual claims and supporting refs, not only confidence numbers. Remove unsupported diagnoses and report evidence gaps explicitly. Fewer supported findings are preferable to invented ones. Preserve concrete operator choices and the original scope.\nOBJECTIVE:{objective}\nCONTEXT:{context_json}\nDRAFT:{output.model_dump_json()}\nREVIEW_FEEDBACK:{json.dumps(feedback)}",
         )
-        if step_id == "final":
+        if step_id == "final" or evidence_audit:
             corrected.missing_information = list(
                 dict.fromkeys(corrected.missing_information + intent.evidence_gaps)
             )[:10]
@@ -705,8 +721,16 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             factual and (not task.plan_json or artifacts.get("output_contract") == "factual-v2")
         )
         contract = "factual-v2" if exact_factual else "factual-v1" if factual else "staff-v1"
+        evidence_audit = evidence_audit_request(task.requirement) and not task.plan_json
+        if task.plan_json and artifacts.get("output_contract") == "evidence-audit-v1":
+            evidence_audit = evidence_audit_request(task.requirement)
+        if evidence_audit:
+            contract = "evidence-audit-v1"
+            # Inbox metadata cannot establish a diagnosis. Keep direct sources,
+            # not generated proposals, in this available-evidence audit profile.
+            context = [item for item in context if item.source != "decisions"]
         await checkpoint("output_contract", contract)
-        final_calls = 0 if exact_factual else 2
+        final_calls = 0 if exact_factual or evidence_audit else 2
         output_rules = (
             f"Jelaskan tepat satu penyebab, maksimal {factual[1]} kata bahasa Indonesia "
             "termasuk keterbatasan, judul, dan rujukan. Gunakan evidence_refs yang tersedia. "
@@ -716,6 +740,14 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             if factual
             else ""
         )
+        if evidence_audit:
+            output_rules = (
+                "Audit read-only berdasarkan sumber yang diberikan. Tidak ada bukti tambahan "
+                "yang wajib diminta. Laporkan maksimal tiga temuan yang didukung, bukan kuota. "
+                "ValueError membuktikan kategori penghentian, bukan akar masalah. "
+                "Warning bukan exhaustion; narasi yang disembunyikan bukan bukti sistem gagal. "
+                "Sebutkan keterbatasan dan keputusan operator yang konkret."
+            )
         context_json = json.dumps([i.model_dump() for i in context], ensure_ascii=False)
         await store.artifact(task_id, "context", context_json, owner=owner)
         await store.artifact(task_id, "context_requirement_hash", requirement_hash, owner=owner)
@@ -729,6 +761,11 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 user=f"Resolve the requested objective without expanding its scope. Separate unavailable evidence into evidence_gaps; reserve missing_information for at most 3 questions that prevent defining the objective, target, or safe authority. Use supplied task evidence before asking for reports.\n{task.requirement}\nCONTEXT:\n{context_json}",
             )
         )
+        if evidence_audit and intent.execution == "analysis" and intent.requested_authority == "L0":
+            # This exact request already defines target, scope and authority.
+            # Optional extra reports are gaps, never prerequisites for this audit.
+            intent.evidence_gaps = list(dict.fromkeys(intent.evidence_gaps + intent.missing_information))[:10]
+            intent.missing_information = []
         await checkpoint("resolved_intent", intent.model_dump_json())
         await checkpoint("resolved_requirement_hash", requirement_hash)
         if factual and (
@@ -785,6 +822,38 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 },
             )
             if factual
+            else StaffPlan(
+                objective=task.requirement,
+                success_criteria=[
+                    "Temuan didukung sumber langsung; gaps bukan kegagalan",
+                    "Keputusan operator konkret",
+                    "Review independen tanpa isu",
+                ],
+                steps=[
+                    {
+                        "id": "audit_evidence",
+                        "skill": "engineering",
+                        "objective": output_rules,
+                        "max_llm_calls": 5,
+                    },
+                    {
+                        "id": "audit_decisions",
+                        "skill": "product_research",
+                        "objective": "Susun jawaban final dari bukti: maksimal tiga temuan, rekomendasi, keputusan operator, keterbatasan. Jangan menambahkan diagnosis tanpa bukti.",
+                        "dependencies": ["audit_evidence"],
+                        "max_llm_calls": 5,
+                    },
+                ],
+                risks=["Bukti terbatas; akar masalah tidak diasumsikan"],
+                approval_gates=["L0 read-only; tiap tahap wajib review independen"],
+                rollback_plan="Tidak ada perubahan; buang draf yang ditolak",
+                budget={
+                    "max_llm_calls": min(settings.max_llm_calls, planning_task.llm_calls + 10),
+                    "max_tokens": planning_limits["max_total_tokens"],
+                    "max_cost_usd": planning_limits["max_cost_usd"],
+                },
+            )
+            if evidence_audit
             else await complete(
                 schema=StaffPlan,
                 role="lead",
@@ -827,6 +896,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
         # before admitting it; saved plans and user-specified budgets are never widened.
         if (
             not factual
+            and not evidence_audit
             and not task.plan_json
             and not re.search(
                 r"\b(?:budget|anggaran|calls?|panggilan|tokens?|usd)\b|\$", task.requirement, re.I
@@ -1004,6 +1074,10 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         max_attempts=output_attempts,
                         user=f"{output_rules}\nSKILL:{step.skill}; objective:{step.objective}\nCONTEXT:{context_json}\nDEPENDENCIES:{json.dumps({d: done[d].model_dump() for d in step.dependencies})}",
                     )
+                    if evidence_audit:
+                        output.missing_information = list(
+                            dict.fromkeys(output.missing_information + intent.evidence_gaps)
+                        )[:10]
                     issues = (
                         validate_factual(output, context, factual[1])
                         if factual
@@ -1128,24 +1202,31 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         )
                 done[step.id] = output
                 remaining.remove(step)
-        if exact_factual:
+        if exact_factual or evidence_audit:
             # Publish the exact single reviewed answer, never another model rewrite.
-            if len(plan.steps) != 1 or len(done) != 1:
+            if exact_factual and (len(plan.steps) != 1 or len(done) != 1):
                 raise ValueError("Factual publication requires exactly one reviewed step")
-            result = done[plan.steps[0].id]
+            terminal_step = plan.steps[-1].id
+            if evidence_audit and (len(plan.steps) != 2 or plan.steps[-1].dependencies != [plan.steps[0].id]):
+                raise ValueError("Evidence audit publication requires the reviewed two-step chain")
+            result = done[terminal_step]
             async with store.sessions() as session:
                 completed = await session.scalar(
                     select(Subtask).where(
                         Subtask.task_id == task_id,
                         Subtask.plan_hash == execution_hash,
-                        Subtask.key == plan.steps[0].id,
+                        Subtask.key == terminal_step,
                         Subtask.status == "completed",
                     )
                 )
             if completed is None:
                 raise ValueError("Reviewed factual checkpoint unavailable")
             review = OutputEvaluation.model_validate_json(completed.evaluation_json)
-            issues = validate_factual(result, context, factual[1])
+            issues = (
+                validate_factual(result, context, factual[1])
+                if exact_factual
+                else validate_output(result, context)
+            )
             if issues or not review.approved or review.issues:
                 raise ValueError(
                     "Factual publication evaluation failed: " + "; ".join(issues + review.issues)
