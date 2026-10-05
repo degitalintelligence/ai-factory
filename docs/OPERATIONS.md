@@ -325,3 +325,27 @@ confidence ceiling, including a warning about legacy budget counts. Direct task
 diagnostics remain current evidence. Prompts require checking those diagnostics
 and distinguishing schema/review rejection, token truncation and budget stops.
 No migration, model change, budget increase or review bypass is introduced.
+
+### Bounded correction of evidence confidence (task #36)
+
+Task #36's reviewer approved a draft that the deterministic validator rejected
+for exceeding unverified evidence confidence. The previous diagnostic omitted
+the offending finding/ref and the workflow stopped without a correction attempt.
+The confidence gate remains authoritative even when the reviewer approves.
+
+Confidence diagnostics now identify the finding index, its stated confidence,
+the authorized reference and its label/ceiling. A draft whose only local defects
+are confidence violations is retained as `confidence_draft` with step/plan identity
+and local issues; credential-bearing or unauthorized-reference drafts are excluded.
+The workflow may request one corrected generation (`max_attempts=1`) only if the
+remaining task/subtask allowance funds that generation and mandatory independent
+review, while reserving other steps and finalization. The model must revise claims,
+evidence and uncertainty rather than merely relabel unsupported assertions.
+
+`confidence_repair` and `confidence_repair_validation` record the bounded attempt
+and local result. There is no automatic confidence clamp, reference removal or
+approval. A still-invalid correction, unavailable allowance or review rejection
+stops the task. Both skill output and final synthesis follow this rule; factual-v2
+is unchanged. Existing lifetime budgets, provider configuration and history remain
+unchanged. Mock-provider tests establish bounded correction and gate enforcement,
+not live semantic accuracy or overall v0.3 acceptance.
