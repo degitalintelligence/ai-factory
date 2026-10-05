@@ -507,3 +507,20 @@ async def test_withdrawn_memory_is_not_replayed_from_checkpoint(db, monkeypatch)
     monkeypatch.setattr(staff, "complete", calls)
     await staff.run_staff_task(task.id, "recovery")
     assert (await db.get(task.id)).status == "failed" and not calls.called
+
+
+async def test_bounded_context_retains_knowledge_alongside_large_task_history(db):
+    for index in range(20):
+        task = await db.create(f"Recorded engineering history {index} " + ("x" * 1500), user_id=7)
+        await db.update(task.id, status="failed")
+    memory = await db.remember(
+        MemoryWrite(key="business.strategy", value="Reliability is the weekly priority", source="Dedi"),
+        owner=7,
+    )
+    task = await staff.create_intent(
+        ChatRequest(message="Audit business reliability this week", idempotency_key="balanced"), 7
+    )
+    context = await staff.assemble_context(task)
+    assert any(item.ref == f"memory:{memory.id}:v1" for item in context)
+    assert any(item.ref.startswith("task:") for item in context)
+    assert sum(len(item.model_dump_json()) for item in context) <= 24000
