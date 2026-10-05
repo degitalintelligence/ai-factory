@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     # the default lab harness (AGENTS.md §15: register ai-factory explicitly before
     # self-editing core). Empty means self-improvement intake fails closed.
     self_project: str = ""
+    tenant_id: str = Field(default="default", pattern=r"^[A-Za-z0-9_-]{1,120}$")
+    global_max_llm_calls_per_day: int = Field(default=1000, ge=1)
+    global_max_tokens_per_day: int = Field(default=4_000_000, ge=1)
+    global_max_cost_usd_per_day: float = Field(default=30.0, gt=0)
+    dashboard_url: str = ""
+    self_improvement_enabled: bool = True
     telegram_allowed_user_ids: str = ""
     api_token: str = ""
     # HTTP is a shared operator credential, so the server—not the request body—
