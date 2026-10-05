@@ -94,3 +94,39 @@ resolved skills/workflow, context references and persisted failure stage. Histor
 records without these artifacts report unresolved/pending/not recorded explicitly.
 Rollback: revert the reviewed change; no schema migration, evidence deletion,
 model-policy change or deployment is part of this fix.
+
+### Evidence coverage for repository audits
+
+Read-only repository audits now persist an `audit_checks` result for every
+requested topic: model configuration, workflow, budget, readiness and tests.
+Each check names its verification kind (`repository`, `runtime`, `ci`, or
+`unverified`), observation, exact evidence refs and limitation. Historical staff
+outputs without this optional field remain readable; fresh scoped audit outputs
+cannot complete with missing checks, duplicated topics or mismatched evidence.
+
+The evidence collector reads topic-specific, line-numbered source excerpts at the
+locked SHA instead of only documentation prefixes. Source hashes describe the
+full fetched file; omitted lines are not claimed as inspected. Context remains
+bounded to the smaller of 32,000 characters and one third of the operator prompt
+ceiling (generic staff context retains its 24,000-character bound).
+
+For the explicitly registered ai-factory target, safe runtime observations include
+only effective role/model names, tenant daily budget counters/limits and the same
+readiness handler used by `/ready`. No credentials are collected. Snapshots are
+stamped before audit model calls, reserved tokens are distinct from actual billed
+tokens, and active model settings are distinct from proof of calls by every role.
+The repository target SHA does not independently attest the deployed process SHA.
+Other registered repositories never receive factory runtime observations.
+
+CI evidence is restricted to runs whose head SHA equals the locked repository SHA.
+A successful test step supports CI verification; an absent/unavailable/failed run
+cannot become a passed suite or a production runtime test result. Readiness errors
+are recorded as unavailable, with a safe category rather than raw deployment data.
+No repository code is executed by this read-only evidence collector.
+
+The independent reviewer checks scope and claim entailment. Deterministic gates
+also reject documentation-only verification, absent scope coverage, mismatched CI,
+false readiness success, known internal-instruction leakage and blanket reliability
+claims. Read-only audit gaps stay with the relevant check instead of blindly
+copying speculative intake gaps into the final result. The exact reviewed terminal
+answer is still published without another model rewrite.

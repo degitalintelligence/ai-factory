@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app import staff
+from app import audit_evidence, staff
 from app.audit_scope import SELF_REPOSITORY
 from app.config import settings
 from app.schemas import MemoryWrite
@@ -28,6 +28,15 @@ def event(number=44):
         effective_user=SimpleNamespace(id=7),
         effective_chat=SimpleNamespace(id=7, type="private"),
         effective_message=SimpleNamespace(reply_text=AsyncMock(), reply_document=AsyncMock()),
+    )
+
+
+@pytest.fixture(autouse=True)
+def no_live_readiness_probe(monkeypatch):
+    monkeypatch.setattr(
+        audit_evidence,
+        "readiness_observation",
+        AsyncMock(return_value={"status": "unavailable", "scope": "unit fixture; runtime not probed"}),
     )
 
 
@@ -70,6 +79,9 @@ async def test_task_44_locks_target_before_context_and_enters_audit_workflow(db,
         reads.append(path)
         if "/commits/" in path:
             return {"sha": SHA}
+        if path.endswith("/actions/runs"):
+            assert kwargs["params"]["head_sha"] == SHA
+            return {"workflow_runs": []}
         locked = await db.get(goal.id)
         assert locked.base_sha == SHA  # persisted before any source retrieval
         assert kwargs["params"]["ref"] == SHA
@@ -97,6 +109,15 @@ async def test_task_44_locks_target_before_context_and_enters_audit_workflow(db,
             return StaffOutput(
                 summary="Bukti repository tersedia; runtime belum diverifikasi.",
                 findings=[],
+                audit_checks=[
+                    {
+                        "topic": topic,
+                        "verification": "unverified",
+                        "observation": "Bukti perlu diperiksa.",
+                        "limitation": "Fixture tidak menjalankan runtime target.",
+                    }
+                    for topic in ["models", "workflow", "budget", "readiness", "tests"]
+                ],
                 next_action="Periksa runtime secara terpisah.",
             )
         assert schema is OutputEvaluation
@@ -112,7 +133,9 @@ async def test_task_44_locks_target_before_context_and_enters_audit_workflow(db,
     assert json.loads(artifacts["resolved_skills"])["steps"] == ["engineering", "product_research"]
     assert all(item["scope"] == "self" for item in json.loads(artifacts["context"]))
     assert (ResolvedIntent, "lead") in seen
-    assert len(reads) == 6 and "staff_failure" not in artifacts
+    assert any("/contents/app/config.py" in path for path in reads)
+    assert any("/contents/app/staff.py" in path for path in reads)
+    assert "staff_failure" not in artifacts
 
 
 async def test_audit_requires_locked_sha_and_scope_before_context(db):
