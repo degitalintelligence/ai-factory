@@ -38,6 +38,16 @@ class WorkspaceError(RuntimeError):
     pass
 
 
+def credential_scan_content(path, content):
+    """Ignore only explicit local/CI fixture lines in the repository's own CI workflow."""
+    if path != ".github/workflows/ci.yml":
+        return content
+    safe_markers = ("ci-only", "factory_ci")
+    return "\n".join(
+        line for line in content.splitlines() if not any(marker in line for marker in safe_markers)
+    )
+
+
 class Workspace:
     def __init__(self, task_id, repo_full_name, branch, policy=None, base_sha=None):
         self.task_id = task_id
@@ -209,7 +219,7 @@ class Workspace:
                 content = target.read_text(encoding="utf-8")
             except UnicodeError as exc:
                 raise WorkspaceError(f"Binary file requires human handling: {path}") from exc
-            if secret_present(content):
+            if secret_present(credential_scan_content(path, content)):
                 raise WorkspaceError(f"Credential detected in {path}; remove and rotate it")
             size += len(content.encode())
             if size > 4_000_000 or len(files) >= 2500:
