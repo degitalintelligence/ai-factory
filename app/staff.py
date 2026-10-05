@@ -449,13 +449,15 @@ def validate_output(output: StaffOutput, context: list[ContextItem]) -> list[str
     issues = []
     if secret_present(output.model_dump_json()):
         issues.append("Output contains credentials")
-    for finding in output.findings:
+    for index, finding in enumerate(output.findings):
         for ref in finding.evidence_refs:
             item = refs.get(ref)
             if item is None:
                 issues.append("Finding cites unknown or unauthorized evidence")
             elif item.label != "current" and finding.confidence > item.confidence:
-                issues.append("Finding overstates stale/unverified evidence confidence")
+                issues.append(
+                    f"Finding overstates stale/unverified evidence confidence: findings[{index}].confidence={finding.confidence}; ref={ref}, label={item.label}, maximum={item.confidence}"
+                )
     return list(dict.fromkeys(issues))
 
 
@@ -480,7 +482,7 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-12",
+        prompt_version="staff-v03-13",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -518,6 +520,41 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
 
     async def checkpoint(kind, content):
         await store.artifact(task_id, kind, content, owner=owner)
+
+    async def repair_confidence(output, issues, context, objective, role, available_calls, step_id):
+        # Only locally safe, authorized drafts qualify. Never clamp confidence
+        # or treat correction as approval; a fresh independent review follows.
+        if not issues or not all(
+            i.startswith("Finding overstates stale/unverified evidence confidence") for i in issues
+        ):
+            return output, issues
+        await checkpoint(
+            "confidence_draft",
+            json.dumps(
+                {
+                    "step_id": step_id,
+                    "plan_hash": execution_hash,
+                    "output": output.model_dump(),
+                    "local_issues": issues,
+                }
+            ),
+        )
+        if available_calls < 2:
+            return output, issues  # Keep one mandatory review call reserved.
+        await checkpoint(
+            "confidence_repair", json.dumps({"step_id": step_id, "issues": issues, "max_attempts": 1})
+        )
+        repaired = await complete(
+            schema=StaffOutput,
+            role=role,
+            max_attempts=1,
+            user=f"Correct the submitted draft using these deterministic validation defects. Do not merely relabel confidence while preserving unsupported claims: revise evidence, wording and uncertainty as needed. Preserve the objective, requested decisions and scope. Cite only supplied refs; do not claim missing evidence has been verified. Return a complete corrected answer; independent review is still required.\nRULES:{output_rules}\nTASK:{task.requirement}\nOBJECTIVE:{objective}\nCONTEXT:{json.dumps([c.model_dump() for c in context])}\nDRAFT:{output.model_dump_json()}\nDEFECTS:{json.dumps(issues)}",
+        )
+        repaired_issues = validate_output(repaired, context)
+        await checkpoint(
+            "confidence_repair_validation", json.dumps({"step_id": step_id, "local_issues": repaired_issues})
+        )
+        return repaired, repaired_issues
 
     try:
         artifacts = {a.kind: a.content for a in await store.artifacts(task_id)}
@@ -878,6 +915,28 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         if factual
                         else validate_output(output, context)
                     )
+                    if (
+                        not factual
+                        and issues
+                        and all(
+                            i.startswith("Finding overstates stale/unverified evidence confidence")
+                            for i in issues
+                        )
+                    ):
+                        current = await store.get(task_id)
+                        async with store.sessions() as session:
+                            charged = await session.get(Subtask, row.id)
+                            available = min(
+                                step.max_llm_calls - charged.calls,
+                                store.budget_envelope(current)["max_llm_calls"]
+                                - current.llm_calls
+                                - future_calls,
+                            )
+                        output, issues = await repair_confidence(
+                            output, issues, context, step.objective, "developer", available, step.id
+                        )
+                        if issues:
+                            raise ValueError("Skill evaluation failed: " + "; ".join(issues))
                     if not issues:
                         if factual:
                             await checkpoint("factual_draft", output.model_dump_json())
@@ -1010,6 +1069,24 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             issues = (
                 validate_factual(result, context, factual[1]) if factual else validate_output(result, context)
             )
+            if (
+                not factual
+                and issues
+                and all(
+                    i.startswith("Finding overstates stale/unverified evidence confidence") for i in issues
+                )
+            ):
+                current = await store.get(task_id)
+                available = store.budget_envelope(current)["max_llm_calls"] - current.llm_calls
+                result, issues = await repair_confidence(
+                    result, issues, context, task.requirement, "lead", available, "final"
+                )
+                result.missing_information = list(
+                    dict.fromkeys(result.missing_information + intent.evidence_gaps)
+                )[:10]
+                issues = validate_output(result, context)
+                if issues:
+                    raise ValueError("Final evaluation failed: " + "; ".join(issues))
             if not issues:
                 await checkpoint("staff_final_draft", result.model_dump_json())
             final_task = await store.get(task_id)
