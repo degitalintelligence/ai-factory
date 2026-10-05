@@ -7,6 +7,76 @@ from openai import AsyncOpenAI
 from app import llm
 from app.config import settings
 from app.schemas import DeveloperAction, LeadPlan
+from app.staff_schemas import CompactStaffOutput
+
+
+def compact_output():
+    return {
+        "summary": "Audit terbatas.",
+        "findings": [
+            {
+                "title": "Kegagalan audit",
+                "situation": "Dua audit gagal.",
+                "priority": "high",
+                "why_now": "Menghambat hasil.",
+                "recommendation": "Periksa validasi.",
+                "alternative": "Tunda audit.",
+                "risk": "Akar sebab belum terbukti.",
+                "evidence_refs": ["task:31"],
+                "confidence": 0.8,
+                "decision_required": True,
+            }
+        ],
+        "missing_information": [],
+        "next_action": "Tinjau bukti.",
+    }
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("recover", [False, True])
+async def test_schema_length_retry_identifies_exact_field_without_exposing_values(
+    db, monkeypatch, nested, recover
+):
+    data = compact_output()
+    if nested:
+        data["findings"][0]["evidence_refs"] = [f"private-reference-{i}" for i in range(5)]
+        expected = "findings[0].evidence_refs: too_long (max_length=4, actual_length=5)"
+    else:
+        data["findings"] *= 7
+        expected = "findings: too_long (max_length=6, actual_length=7)"
+    bad = json.dumps(data)
+    requests = mock_completions(
+        monkeypatch, [(bad, "stop"), (json.dumps(compact_output()) if recover else bad, "stop")]
+    )
+    task = await db.create("Audit length validation")
+    await db.claim("w")
+    token = llm.run_context.set((task.id, "w"))
+    try:
+        if recover:
+            result = await llm.json_completion(
+                model="test", system="Audit", user="Three findings", schema=CompactStaffOutput, max_attempts=2
+            )
+            assert len(result.findings) == 1
+        else:
+            with pytest.raises(RuntimeError, match="invalid structured output after 2 attempts"):
+                await llm.json_completion(
+                    model="test",
+                    system="Audit",
+                    user="Three findings",
+                    schema=CompactStaffOutput,
+                    max_attempts=2,
+                )
+    finally:
+        llm.run_context.reset(token)
+    retry = requests[1]["messages"][-1]["content"]
+    assert expected in retry and "private-reference" not in retry
+    assert (await db.get(task.id)).llm_calls == 2
+    for artifact in await db.artifacts(task.id):
+        assert "private-reference" not in artifact.content
+    details = [
+        json.loads(a.content)["detail"] for a in await db.artifacts(task.id) if a.kind == "llm_validation"
+    ]
+    assert all(expected in detail for detail in details)
 
 
 async def test_invalid_json_retry_charges_usage_and_returns_valid_plan(db, monkeypatch):
