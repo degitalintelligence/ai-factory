@@ -4,7 +4,7 @@ import logging
 from functools import wraps
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.config import settings
 from app.contracts import (
@@ -62,7 +62,7 @@ async def owned_task(update, context):
 async def start_handler(update, context):
     await reply(
         update,
-        "LioBot by AI Factory — operator interface\n\n/new <requirement>\n/new <project> | <requirement>\n/projects — registered repositories\n/tasks — queue\n/status <id>\n/plan <id>\n/logs <id>\n/report <id>\n/cancel <id>\n/retry <id>\n/answer <id> <clarification>\n/approve <id> <plan-hash>\n/feedback <id> <revision>\n/deploy <id> <full-merged-sha>\n/publish <id> <full-merged-sha> — acknowledge a merged non-deploy project\n/supersede <id> <reason> — close a stale merged PR before fresh review\n/deployment <id>\n/inbox [state] [project] — decision inbox\n/decide <id> <approve|reject|ask|defer>\n/improve problem:...; evidence:...; hypothesis:...; scope:...; baseline:...; rollback:...\n\nCode → isolated tests → independent review → PR. Merges are human-controlled.\nThis Telegram bot is a channel adapter; decisions are stored in the core inbox, not in chat.",
+        "LioBot by AI Factory — operator interface\n\n/new <requirement>\n/new <project> | <requirement>\n/projects — registered repositories\n/tasks — queue\n/status <id>\n/plan <id>\n/logs <id>\n/report <id>\n/cancel <id>\n/retry <id>\n/answer <id> <clarification>\n/approve <id> <plan-hash>\n/feedback <id> <revision>\n/deploy <id> <full-merged-sha>\n/publish <id> <full-merged-sha> — acknowledge a merged non-deploy project\n/supersede <id> <reason> — close a stale merged PR before fresh review\n/deployment <id>\n/inbox [state] [project] — decision inbox\n/decide <id> <approve|reject|ask|defer|request_changes|delegate>\n/improve problem:...; evidence:...; hypothesis:...; scope:...; baseline:...; rollback:...\n\nCode → isolated tests → independent review → PR. Merges are human-controlled.\nThis Telegram bot is a channel adapter; decisions are stored in the core inbox, not in chat.",
     )
 
 
@@ -183,7 +183,7 @@ def render_decision(decision):
     if decision.decided_by:
         lines.append(f"Decided by {decision.decided_by} at {decision.decided_at.isoformat()}")
     if decision.state == "open":
-        lines.append(f"Answer with /decide {decision.id} <approve|reject|ask|defer>")
+        lines.append(f"Answer with /decide {decision.id} <approve|reject|ask|defer|request_changes|delegate>")
     return redact("\n".join(lines))
 
 
@@ -192,6 +192,7 @@ async def inbox_handler(update, context):
     decisions = await decision_inbox(
         state=context.args[0] if context.args else "open",
         project=context.args[1] if len(context.args) > 1 else None,
+        owner=update.effective_user.id,
     )
     await reply(
         update,
@@ -202,8 +203,21 @@ async def inbox_handler(update, context):
 @protected
 async def decide_handler(update, context):
     if len(context.args) < 2 or not context.args[0].isdigit():
-        raise ValueError("Usage: /decide <decision-id> <approve|reject|ask|defer>")
-    decision = await resolve_decision(int(context.args[0]), context.args[1], user_id=update.effective_user.id)
+        raise ValueError("Usage: /decide <decision-id> <approve|reject|ask|defer|request_changes|delegate>")
+    delegate_to = None
+    reason = " ".join(context.args[2:])
+    if context.args[1] == "delegate":
+        if len(context.args) < 4 or not context.args[2].isdigit():
+            raise ValueError("Usage: /decide <id> delegate <operator-id> <reason>")
+        delegate_to = int(context.args[2])
+        reason = " ".join(context.args[3:])
+    decision = await resolve_decision(
+        int(context.args[0]),
+        context.args[1],
+        user_id=update.effective_user.id,
+        reason=reason,
+        delegate_to=delegate_to,
+    )
     await reply(update, f"Decision #{decision.id} → {decision.state}\n\n{render_decision(decision)}")
 
 
@@ -254,6 +268,19 @@ async def improve_handler(update, context):
     )
 
 
+@protected
+async def chat_handler(update, context):
+    from app.chat import converse
+    from app.staff_schemas import ChatRequest
+
+    result = await converse(
+        ChatRequest(message=update.effective_message.text, idempotency_key=f"telegram:{update.update_id}"),
+        update.effective_user.id,
+        update.effective_chat.id,
+    )
+    await reply(update, result.get("summary", str(result)))
+
+
 def build_telegram_app():
     app = Application.builder().token(settings.telegram_bot_token).build()
     for command, handler in {
@@ -283,4 +310,5 @@ def build_telegram_app():
         "deployment",
     ):
         app.add_handler(CommandHandler(command, action_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
     return app
