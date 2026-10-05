@@ -90,6 +90,7 @@ def covered_output(context):
                 topic=topic,
                 verification=kind,
                 observation=f"Pemeriksaan {topic} sesuai bukti.",
+                observed_values=audit_evidence.audit_facts(context).get(topic, {}),
                 evidence_refs=[workflow if topic == "workflow" else refs[source]],
                 limitation="Pengamatan terbatas pada sumber dan waktu yang dicatat.",
             )
@@ -398,3 +399,100 @@ async def test_scope_defect_gets_one_correction_and_fresh_review_before_completi
     assert "review_repair_evaluation" in artifacts
     assert len(drafts) == 3 and len(reviews) == 3
     assert len(StaffOutput.model_validate_json(artifacts["staff_result"]).audit_checks) == 5
+
+
+@pytest.mark.parametrize(
+    "defect", ["summary", "missing", "models", "budget", "workflow", "production", "wrong_value"]
+)
+async def test_task_48_consistency_defects_rejected_despite_approved_review(db, monkeypatch, defect):
+    task = await goal(db)
+    fake_github(monkeypatch)
+    context = await staff.assemble_context(task)
+    result = covered_output(context)
+    if defect == "summary":
+        result.summary = "Bukti runtime langsung untuk workflow dan readiness tidak tersedia."
+    elif defect == "missing":
+        result.missing_information = ["Bukti runtime readiness tidak tersedia."]
+    elif defect == "production":
+        result.next_action = "Pertimbangkan pengujian di lingkungan produksi untuk validasi tes."
+    else:
+        topic = "budget" if defect == "wrong_value" else defect
+        check = next(c for c in result.audit_checks if c.topic == topic)
+        if defect == "wrong_value":
+            check.observed_values["daily_limits_calls"] = "999999"
+        else:
+            check.observed_values = {}
+    assert any(issue.startswith("Audit consistency") for issue in staff.validate_output(result, context))
+    # Reviewer approval cannot remove local issues; repeated same answer fails closed.
+    await db.claim("worker")
+
+    async def complete(*, schema, **kwargs):
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective=REQUIREMENT, desired_outcome="Audit evidence")
+        if schema is StaffOutput:
+            return result
+        return OutputEvaluation(approved=True, summary="Model approved")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    saved = await db.get(task.id)
+    assert saved.status == "failed" and "Audit consistency" in saved.last_message
+
+
+async def test_task_48_exact_active_values_render_and_legitimate_gaps_remain(db, monkeypatch):
+    task = await goal(db)
+    reads = fake_github(monkeypatch)
+    for role in ("lead", "developer", "reviewer"):
+        monkeypatch.setattr(settings, role + "_model", "openai/gpt-4.1-mini")
+    monkeypatch.setattr(settings, "global_max_tokens_per_day", 20_000_000)
+    monkeypatch.setattr(settings, "global_max_cost_usd_per_day", 50.0)
+    context = await staff.assemble_context(task)
+    result = covered_output(context)
+    result.missing_information = [
+        "Bukti panggilan model aktual oleh semua peran belum tersedia.",
+        "Budget berkelanjutan belum tersedia, hanya snapshot.",
+        "Readiness ARM/business acceptance belum tersedia.",
+        "Attestation deployed runtime SHA tidak tersedia.",
+    ]
+    assert staff.validate_output(result, context) == []
+    result.next_action = "Jangan lakukan pengujian di produksi; gunakan staging bila diperlukan."
+    assert staff.validate_output(result, context) == []
+    rendered = staff.render_result(task.id, result)
+    assert "lead=openai/gpt-4.1-mini" in rendered
+    assert "daily_limits_reserved_tokens=20000000" in rendered
+    assert "daily_limits_reported_cost_usd=50.0" in rendered
+    assert "contract=evidence-audit-v1" in rendered
+    assert "status=ready" in rendered
+    assert not any("/contents/docs/" in path for path, _ in reads)
+    assert len(context) == 14  # five observations, eight unique code paths, README
+
+
+async def test_task_48_compact_prompts_preserve_authorized_evidence_and_full_artifact(db, monkeypatch):
+    task = await goal(db)
+    fake_github(monkeypatch)
+    await db.claim("worker")
+    prompts = []
+
+    async def complete(*, schema, user, **kwargs):
+        prompts.append(user)
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective=REQUIREMENT, desired_outcome="Audit evidence")
+        if schema is StaffOutput:
+            return covered_output(await staff.assemble_context(await db.get(task.id)))
+        return OutputEvaluation(approved=True, summary="Checked")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    assert (await db.get(task.id)).status == "completed"
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    archived = json.loads(artifacts["context"])
+    assert all("owner" in item and "created_at" in item for item in archived)
+    assert all('"created_at"' not in prompt and '"owner"' not in prompt for prompt in prompts)
+    assert all(all(item["ref"] in prompt for item in archived) for prompt in prompts)
+    full = json.dumps(archived, ensure_ascii=False)
+    compact = json.dumps(
+        [{k: item[k] for k in ("ref", "source", "content", "label")} for item in archived],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert len(compact) < len(full) * 0.95

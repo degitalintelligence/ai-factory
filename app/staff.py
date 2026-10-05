@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.audit_evidence import (
+    audit_facts,
     audit_observations,
     audit_validation,
     requested_checks,
@@ -89,7 +90,9 @@ Repository SHA is not attestation of deployed runtime SHA. Never call queue/reco
 merely because documentation says so. Cite exact authorized refs for every substantive check/finding.
 If evidence is absent, return unverified with a concrete limitation rather than inventing a diagnosis.
 Reviewer must reject missing requested checks, mismatched evidence kinds, unsupported claims, internal
-instruction leakage and irrelevant gap lists. A prior review's approval is not independent claim evidence.
+instruction leakage, summary/check contradictions and irrelevant gap lists. Preserve exact active model IDs,
+budget limits/usage and evidence-audit-v1 skills using observed_values supplied in the facts contract.
+Do not ask for readiness proof already supplied or propose test execution in production for this read-only audit. A prior review's approval is not independent claim evidence.
 Use findings only for observed defects; avoid filling a quota. All work remains L0/L1 and operator-owned budgets
 and permissions remain mandatory. Never include credentials or unrelated tenant/project/task context.
 """
@@ -447,14 +450,18 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                 )
                 if not revision:
                     continue
-                for path in (
-                    *audit_paths,
-                    "README.md",
-                    "docs/ARCHITECTURE.md",
-                    "docs/VERIFICATION.md",
-                    "docs/OPERATIONS.md",
-                    "AGENTS.md",
-                ):
+                documents = (
+                    ("README.md",)
+                    if scoped_audit and audit_paths
+                    else (
+                        "README.md",
+                        "docs/ARCHITECTURE.md",
+                        "docs/VERIFICATION.md",
+                        "docs/OPERATIONS.md",
+                        "AGENTS.md",
+                    )
+                )
+                for path in (*audit_paths, *documents):
                     try:
                         source = await github.request(
                             "GET", f"{policy.repo}/contents/{quote(path, safe='/')}", params={"ref": revision}
@@ -480,7 +487,7 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                                     source_excerpt(path, value, requested_checks(task.requirement))
                                     if path in audit_paths
                                     else (
-                                        "Documentation excerpt only; not execution proof: " + value[:1800]
+                                        "Documentation excerpt only; not execution proof: " + value[:900]
                                         if scoped_audit
                                         else "First 3000 characters, excerpt only: " + value[:3000]
                                     )
@@ -684,6 +691,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                     "Test pass claim requires",
                     "Readiness cannot be verified",
                     "Audit check",
+                    "Audit consistency",
                 )
             )
             and "unknown or unauthorized" not in issue
@@ -883,6 +891,17 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             )
         context_json = json.dumps([i.model_dump() for i in context], ensure_ascii=False)
         await store.artifact(task_id, "context", context_json, owner=owner)
+        if readonly_repository_audit(task.requirement):
+            output_rules += (
+                " REQUIRED OBSERVED_VALUES: "
+                + json.dumps(audit_facts(context))
+                + " Copy these exact string fields into each matching audit_check.observed_values, cite the direct observation, and retain runtime (or repository for workflow) verification. Do not replace settings evidence with actual-call evidence gaps. Summary must agree with checks. No production test execution recommendation. Use at most two evidence refs per check when sufficient."
+            )
+            context_json = json.dumps(
+                [{"ref": i.ref, "source": i.source, "content": i.content, "label": i.label} for i in context],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
         await store.artifact(task_id, "context_requirement_hash", requirement_hash, owner=owner)
         requirement_hash = hashlib.sha256(task.requirement.encode()).hexdigest()
         stage = "intent_resolution"
@@ -1226,7 +1245,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         schema=output_schema,
                         role="developer",
                         max_attempts=output_attempts,
-                        user=f"{output_rules}\nSKILL:{step.skill}; objective:{step.objective}\nCONTEXT:{context_json}\nDEPENDENCIES:{json.dumps({d: done[d].model_dump() for d in step.dependencies})}",
+                        user=f"{output_rules}\nSKILL:{step.skill}; objective:{task.requirement if readonly_repository_audit(task.requirement) else step.objective}\nCONTEXT:{context_json}\nDEPENDENCIES:{json.dumps({d: done[d].model_dump() for d in step.dependencies})}",
                     )
                     if evidence_audit and not readonly_repository_audit(task.requirement):
                         output.missing_information = list(
@@ -1291,7 +1310,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         max_attempts=review_attempts,
                         schema=OutputEvaluation,
                         role="reviewer",
-                        user=f"{output_rules}\nIndependently check claims against the supplied facts, goal and constraints. Reject unsupported inference, unsafe authority or missing required output.\nOBJECTIVE:{step.objective}\nCONTEXT:{context_json}\nOUTPUT:{output.model_dump_json()}",
+                        user=f"{output_rules}\nIndependently check claims against the supplied facts, goal and constraints. Reject unsupported inference, unsafe authority or missing required output.\nOBJECTIVE:{task.requirement if readonly_repository_audit(task.requirement) else step.objective}\nCONTEXT:{context_json}\nOUTPUT:{output.model_dump_json()}",
                     )
                     if factual and not issues:
                         await checkpoint("factual_draft_evaluation", evaluation.model_dump_json())
@@ -1564,6 +1583,11 @@ def render_result(task_id: int, result: StaffOutput | FactualOutput) -> str:
     }
     for check in result.audit_checks:
         lines.append(f"{names[check.topic]} [{labels[check.verification]}]\n{check.observation}")
+        if check.observed_values:
+            lines.append(
+                "Nilai teramati: "
+                + "; ".join(f"{key}={value}" for key, value in check.observed_values.items())
+            )
         if check.evidence_refs:
             lines.append("Evidence: " + ", ".join(check.evidence_refs))
         if check.limitation:

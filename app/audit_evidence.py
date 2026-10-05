@@ -156,6 +156,7 @@ async def audit_observations(task, github) -> list[ContextItem]:
             "repository_audit_scope",
             {
                 "required_checks": checks,
+                "requirement": task.requirement[:1000],
                 "repository": task.repo,
                 "base_sha": task.base_sha,
                 "rule": "Answer each requested check; unavailable proof is an explicit unverified check. "
@@ -284,13 +285,124 @@ async def audit_observations(task, github) -> list[ContextItem]:
     return items
 
 
+def audit_facts(context: list[ContextItem]) -> dict[str, dict[str, str]]:
+    """Exact bounded fields to report, separate from conclusions and source defaults."""
+    facts = {}
+    for item in context:
+        if item.source == "factory_runtime_configuration":
+            data = json.loads(item.content)
+            if "roles" in data:
+                facts["models"] = {
+                    role: data["roles"][role]["provider_model"] for role in ("lead", "developer", "reviewer")
+                }
+        elif item.source == "factory_runtime_budget":
+            data = json.loads(item.content)
+            if "daily_limits" in data and "daily_usage" in data:
+                facts["budget"] = {
+                    f"{group}_{key}": str(round(value, 6)) if isinstance(value, float) else str(value)
+                    for group in ("daily_limits", "daily_usage")
+                    for key, value in data[group].items()
+                }
+        elif item.source == "factory_runtime_readiness":
+            data = json.loads(item.content)
+            if data.get("status") == "ready":
+                facts["readiness"] = {"status": "ready", "method": data.get("method", "in-process handler")}
+    if any(
+        i.source == "registered_repository_source"
+        and i.ref.endswith("app/staff.py")
+        and all(term in i.content for term in ("evidence-audit-v1", "audit_evidence", "product_research"))
+        for i in context
+    ):
+        facts["workflow"] = {"contract": "evidence-audit-v1", "skills": "engineering, product_research"}
+    return facts
+
+
+def audit_consistency(output: StaffOutput, context: list[ContextItem]) -> list[str]:
+    """Reject Task #48 omissions and explicit contradictions before publication."""
+    issues = []
+    facts = audit_facts(context)
+    by_topic = {check.topic: check for check in output.audit_checks}
+    sources = {item.ref: item.source for item in context}
+    for check in output.audit_checks:
+        if check.topic not in facts and check.observed_values:
+            issues.append(f"Audit consistency {check.topic}: no supplied observed_values for this topic")
+    for topic, values in facts.items():
+        check = by_topic.get(topic)
+        if not check:
+            continue  # Existing coverage gate supplies the defect.
+        if check.observed_values != values:
+            issues.append(
+                f"Audit consistency {topic}: observed_values must equal supplied fields {json.dumps(values)}"
+            )
+        expected = {
+            "models": "factory_runtime_configuration",
+            "budget": "factory_runtime_budget",
+            "readiness": "factory_runtime_readiness",
+            "workflow": "registered_repository_source",
+        }[topic]
+        if not any(sources.get(ref) == expected for ref in check.evidence_refs):
+            issues.append(
+                f"Audit consistency {topic}: observed values require their direct evidence reference"
+            )
+        if check.verification != ("repository" if topic == "workflow" else "runtime"):
+            issues.append(f"Audit consistency {topic}: available observation must retain its evidence kind")
+    # Clauses that explicitly deny an observed topic are inconsistent even when
+    # a correct check exists below. Not a general semantic entailment engine.
+    denial = r"(?:tidak|belum|no)\b.{0,100}(?:tersedia|ada|available|evidence)|unavailable|not available"
+    texts = [
+        output.summary,
+        *output.missing_information,
+        output.next_action,
+        *(c.observation for c in output.audit_checks),
+        *(c.limitation for c in output.audit_checks),
+    ]
+    for topic in ("models", "budget", "readiness"):
+        if topic not in facts:
+            continue
+        name = {
+            "models": r"model|konfigurasi",
+            "budget": r"budget|anggaran",
+            "readiness": r"readiness|/ready",
+        }[topic]
+        for text in texts:
+            for sentence in re.split(r"[.;!?]", text):
+                if re.search(name, sentence, re.I) and re.search(denial, sentence, re.I):
+                    # Actual model calls, deployed SHA attestation, longitudinal budget
+                    # and ARM/business acceptance remain legitimate unavailable proof.
+                    if re.search(
+                        r"panggilan|actual calls|semua peran|all roles|berkelanjutan|continuous|ARM|bisnis|business|deployed|deployment SHA",
+                        sentence,
+                        re.I,
+                    ):
+                        continue
+                    issues.append(f"Audit consistency {topic}: prose denies an available observation")
+    if re.search(
+        r"(?:jalankan|lakukan|pertimbangkan|run|execute|consider).{0,100}(?:test|tes|pytest|pengujian).{0,60}(?:produksi|production)",
+        output.next_action,
+        re.I,
+    ) and not re.search(
+        r"jangan.{0,40}(?:test|tes|pengujian)|do not.{0,40}(?:test|execute|run)", output.next_action, re.I
+    ):
+        scope = next(item for item in context if item.source == "repository_audit_scope")
+        requirement = json.loads(scope.content).get("requirement", "")
+        if not re.search(
+            r"(?:jalankan|run|execute).{0,60}(?:test|tes|pytest).{0,40}(?:produksi|production)",
+            requirement,
+            re.I,
+        ):
+            issues.append(
+                "Audit consistency: do not recommend production test execution outside requested scope"
+            )
+    return list(dict.fromkeys(issues))
+
+
 def audit_validation(output: StaffOutput, context: list[ContextItem]) -> list[str]:
     scopes = [item for item in context if item.source == "repository_audit_scope"]
     if not scopes:
         return []  # Historic/generic staff outputs keep their existing contract.
     required = json.loads(scopes[0].content)["required_checks"]
     checks = output.audit_checks
-    issues = []
+    issues = audit_consistency(output, context)
     covered = [check.topic for check in checks]
     if len(covered) != len(set(covered)):
         issues.append("Repository audit contains duplicate check topics")

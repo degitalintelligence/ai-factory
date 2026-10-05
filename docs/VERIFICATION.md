@@ -50,3 +50,22 @@ observation and exact-commit CI evidence. If a source or probe is unavailable, t
 result must report that limitation rather than invent success or an unrelated
 manual ARM verification requirement. Inspect `/report` for the pinned code and
 observation refs. Merge and deployment remain separate operator actions.
+
+
+Task #48 audit consistency regression rejects missing/altered active model IDs,
+tenant daily budget limits and usage, a readiness-denying summary alongside a
+successful probe, and unsolicited production test execution advice. A model
+review approval cannot override these defects; the existing single bounded
+repair still requires a fresh independent review. Runtime fields are returned
+as exact `observed_values` strings (cost snapshots rounded to six decimal places)
+and rendered alongside the reviewed observations. Legacy saved outputs remain
+readable with an empty values map. Known contradiction patterns are checked
+deterministically; this is not proof of general natural-language entailment.
+
+Pinned source excerpts plus README replace redundant default document excerpts
+for scoped audits with selected code paths. Complete context metadata stays in
+the evidence artifact; prompts use only refs, source kind, content and freshness
+label after the existing authorization filters. Regression checks ensure all
+authorized refs survive this compaction. Real provider token savings and the
+new answer contract require one bounded post-deployment acceptance audit; local
+mock tests do not establish model quality.

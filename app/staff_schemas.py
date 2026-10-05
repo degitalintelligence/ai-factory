@@ -106,6 +106,9 @@ class AuditCheck(StrictModel):
     topic: Literal["models", "workflow", "budget", "readiness", "tests"]
     verification: Literal["repository", "runtime", "ci", "unverified"]
     observation: str = Field(min_length=1, max_length=400)
+    observed_values: dict[
+        Annotated[str, StringConstraints(max_length=80)], Annotated[str, StringConstraints(max_length=256)]
+    ] = Field(default_factory=dict, max_length=8)
     evidence_refs: list[str] = Field(default_factory=list, max_length=4)
     limitation: str = Field(default="", max_length=300)
 
