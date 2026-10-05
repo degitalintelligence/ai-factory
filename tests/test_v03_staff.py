@@ -759,7 +759,11 @@ async def test_named_chat_task_diagnostics_are_in_context_without_scope_leak(db)
     await db.update(source.id, status="failed")
     async with db.sessions() as session, session.begin():
         session.add(
-            Artifact(task_id=source.id, kind="staff_failure", content="7 calls used + 4 required; limit 10")
+            Artifact(
+                task_id=source.id,
+                kind="staff_failure",
+                content='{"category":"Budget exhausted","detail":"7 calls used + 4 required; limit 10"}',
+            )
         )
     private = await staff.create_intent(
         ChatRequest(message="Private chat evidence", idempotency_key="private"), 8
@@ -1451,3 +1455,133 @@ async def test_confidence_correction_is_bounded_and_requires_review(db, monkeypa
     async with db.sessions() as session:
         steps = list(await session.scalars(select(Subtask).where(Subtask.task_id == task.id)))
     assert all(step.calls <= (2 if mode == "no_room" else 3) for step in steps)
+
+
+async def test_completed_audit_and_rejected_audit_do_not_launder_generated_claims(db):
+    import json
+
+    task, completed = await setup_goal(db)
+    false_claim = "MODEL CLAIM: token truncation and recurring budget exhaustion"
+    await db.update(completed.id, kind="orchestration", status="completed", last_message=false_claim)
+    rejected = await staff.create_intent(
+        ChatRequest(message="Previous audit", idempotency_key="rejected-history"), 7
+    )
+    await db.update(rejected.id, status="failed", last_message=false_claim)
+    for row in (completed, rejected):
+        await db.event(row.id, "budget_warning", "Budget warning 60%: calls=7/11")
+        await db.event(row.id, row.status, false_claim)
+        for kind in ("staff_result", "staff_draft_evaluation", "staff_final_draft_evaluation"):
+            await db.artifact(row.id, kind, json.dumps({"approved": True, "summary": false_claim}))
+    await db.artifact(
+        rejected.id, "staff_failure", json.dumps({"category": "ValueError", "detail": false_claim})
+    )
+    await db.artifact(
+        rejected.id,
+        "staff_draft_evaluation",
+        json.dumps(
+            {
+                "evaluation": {"approved": True, "summary": false_claim},
+                "local_issues": ["Finding overstates stale/unverified evidence confidence"],
+            }
+        ),
+    )
+    async with db.sessions() as session, session.begin():
+        blocked = Decision(
+            task_id=rejected.id,
+            owner=7,
+            tenant=settings.tenant_id,
+            category="blocked",
+            title=false_claim,
+            situation=false_claim,
+        )
+        session.add(blocked)
+        await session.flush()
+        blocked_ref = f"decision:{blocked.id}"
+    context = await staff.assemble_context(task)
+    direct = [item for item in context if item.ref.startswith("task:")]
+    assert false_claim not in " ".join(item.content for item in direct)
+    by_ref = {item.ref: item for item in direct}
+    observed_completed = json.loads(by_ref[f"task:{completed.id}:evidence"].content)
+    observed_rejected = json.loads(by_ref[f"task:{rejected.id}:evidence"].content)
+    assert observed_completed["status"] == "completed"
+    assert "recorded_failure" not in observed_completed
+    assert observed_rejected["status"] == "failed"
+    assert observed_rejected["recorded_failure"]["category"] == "ValueError"
+    assert any(
+        item.get("local_issues") == ["Finding overstates stale/unverified evidence confidence"]
+        for item in observed_rejected["artifacts"]
+    )
+    assert "Budget warning 60%" in by_ref[f"task:{completed.id}:evidence"].content
+    assert "progress=" not in by_ref[f"task:{completed.id}"].content
+    decision_metadata = next(item for item in context if item.ref == blocked_ref)
+    assert "state=open" in decision_metadata.content
+    assert false_claim not in decision_metadata.content
+    # Projection changes retrieval only; the original evidence is retained.
+    assert false_claim in (await db.get(completed.id)).last_message
+    assert any(false_claim in a.content for a in await db.artifacts(rejected.id))
+
+
+@pytest.mark.parametrize("category", ["Budget exhausted", "RuntimeError"])
+async def test_observed_stops_remain_available_beyond_latest_generated_artifacts(db, category):
+    import json
+
+    task, source = await setup_goal(db)
+    await db.update(source.id, kind="orchestration")
+    await db.artifact(
+        source.id,
+        "staff_failure",
+        json.dumps(
+            {"category": category, "detail": "Revised plan cannot fit: 7 used + 4 required; limit 10"}
+        ),
+    )
+    for index in range(4):
+        await db.artifact(source.id, "staff_draft", f"Unsupported generated diagnosis {index}")
+    await db.event(source.id, "llm_validation", "StaffOutput: truncated: output token limit reached")
+    context = await staff.assemble_context(task)
+    data = json.loads(next(item.content for item in context if item.ref == f"task:{source.id}:evidence"))
+    assert data["recorded_failure"]["category"] == category
+    assert ("detail" in data["recorded_failure"]) == (category == "Budget exhausted")
+    assert "truncated: output token limit reached" in json.dumps(data)
+    assert "Unsupported generated diagnosis" not in json.dumps(data)
+
+
+async def test_review_receives_observations_and_rejects_warning_as_exhaustion(db, monkeypatch):
+    import json
+
+    task, source = await setup_goal(db)
+    await db.update(source.id, kind="orchestration", status="completed", last_message="Old false diagnosis")
+    await db.event(source.id, "budget_warning", "Budget warning 60%: calls=7/11")
+    calls = []
+
+    async def gateway(**kwargs):
+        schema = kwargs["schema"]
+        calls.append(schema.__name__)
+        await db.reserve_call(*run_context.get(), token_reserve=1, subtask=subtask_context.get())
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective="Audit", desired_outcome="Three supported findings")
+        if schema is StaffPlan:
+            return plan()
+        if schema is OutputEvaluation:
+            user = kwargs["user"]
+            observed = json.loads(user.split("CONTEXT:", 1)[1].split("\nOUTPUT:", 1)[0])
+            assert "Old false diagnosis" not in json.dumps(observed)
+            assert "Budget warning 60%" in json.dumps(observed)
+            assert "Check entailment for EACH material claim" in user
+            assert "Warnings are not exhaustion" in json.dumps(observed)
+            return OutputEvaluation(
+                approved=False,
+                issues=["Klaim budget habis mengutip task selesai dengan peringatan saja; hapus klaim itu."],
+                summary="Referensi tersedia tetapi isinya tidak mendukung klaim.",
+            )
+        data = output(f"task:{source.id}:evidence").model_dump()
+        data["findings"][0]["title"] = "Budget habis"
+        data["findings"][0]["situation"] = "Task berhenti karena budget habis."
+        return schema.model_validate(data)
+
+    monkeypatch.setattr(staff, "json_completion", gateway)
+    await staff.run_staff_task(task.id, "worker")
+    assert calls == ["ResolvedIntent", "StaffPlan", "CompactStaffOutput", "OutputEvaluation"]
+    assert (await db.get(task.id)).status == "failed"
+    artifacts = await db.artifacts(task.id)
+    assert any(a.kind == "staff_draft_evaluation" and '"approved": false' in a.content for a in artifacts)
+    assert not any(a.kind == "staff_result" for a in artifacts)
