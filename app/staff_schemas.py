@@ -102,9 +102,18 @@ class Finding(StrictModel):
     decision_required: bool = True
 
 
+class AuditCheck(StrictModel):
+    topic: Literal["models", "workflow", "budget", "readiness", "tests"]
+    verification: Literal["repository", "runtime", "ci", "unverified"]
+    observation: str = Field(min_length=1, max_length=400)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=4)
+    limitation: str = Field(default="", max_length=300)
+
+
 class StaffOutput(StrictModel):
     summary: str = Field(min_length=1, max_length=4000)
     findings: list[Finding] = Field(default_factory=list, max_length=6)
+    audit_checks: list[AuditCheck] = Field(default_factory=list, max_length=5)
     missing_information: list[str] = Field(default_factory=list, max_length=10)
     next_action: str = Field(min_length=1, max_length=2000)
 

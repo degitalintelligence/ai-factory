@@ -29,3 +29,24 @@ Local tests do not consume real provider tokens or contact Telegram, GitHub or C
 8. On a registered staging Coolify app, deploy the exact merged SHA. Check reported commit, actual app health, persistent data after recreation and the user-visible acceptance criteria before using production.
 
 A passing unit suite or generated Compose file does not establish live model quality, ARM image build compatibility, target application behavior or a successful production deployment. Record those results on the actual staging installation.
+
+## Task #47 audit quality regression
+
+`tests/test_repository_audit_evidence.py` exercises pinned source reads, active
+model settings overriding repository defaults, tenant-isolated daily budget
+snapshots, readiness availability, exact-SHA CI filtering, per-topic rendering
+and backwards-compatible historical output loading. It rejects the Task #47
+style documentation-only answer even when the model reviewer approves, and
+accepts a complete five-topic report with the exact reviewed checks preserved.
+It also rejects successful CI from a different SHA, failed test steps, irrelevant
+source references, missing topics, instruction leakage and claims of test success
+based only on source definitions. Readiness and GitHub are mocked; these tests do
+not establish production readiness or live model response quality.
+
+Live acceptance after release: repeat the Task #47 read-only chat audit. Expect
+one result for each requested topic with explicit verification kind and refs.
+Check active role/model settings, budget snapshot time/counters, direct readiness
+observation and exact-commit CI evidence. If a source or probe is unavailable, the
+result must report that limitation rather than invent success or an unrelated
+manual ARM verification requirement. Inspect `/report` for the pinned code and
+observation refs. Merge and deployment remain separate operator actions.
