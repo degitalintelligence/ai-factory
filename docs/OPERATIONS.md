@@ -162,3 +162,22 @@ Task #26 supplied a concrete regression: a model estimate of five calls omitted
 the already charged intent call, and its context had omitted chat task #24.
 Configured-provider output quality and live completion remain separate acceptance
 checks; passing deterministic tests does not establish those outcomes.
+
+
+### Output/review retry reservations
+
+Fresh model-generated plans may reserve one shared retry per output/review pair
+by admitting a three-call subtask estimate, when the existing operator ceiling
+allows it. Intake accounting now funds subtask allowances and final calls before
+saving a model estimate that is too small. Operator/user-specified/saved limits
+remain unchanged; no retry resets usage or increases those limits.
+Gateway attempts are capped by both the remaining subtask allowance and available
+task calls after reserving downstream work. Output generation preserves one
+independent review call; step review preserves later steps and finalization;
+final synthesis preserves one final review call. Invalid JSON is never used as
+approval. Exhausting the allowed validation attempts records the structured-output
+failure instead of initiating another attempt against a depleted subtask.
+Task #27 supplied the regression: a two-call subtask used one output call, then
+its reviewer returned invalid JSON and had no retry allowance. Tests exercise the
+actual JSON gateway with mocked HTTP responses, including valid and repeatedly
+invalid reviewer retries. They do not establish real-provider compatibility.

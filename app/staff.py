@@ -421,7 +421,7 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-5",
+        prompt_version="staff-v03-6",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -593,9 +593,20 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
         ):
             consumed = await store.get(task_id)
             minimum = consumed.llm_calls + await plan_call_requirement(consumed, plan, requirement_hash)
-            if plan.budget.max_llm_calls < minimum <= settings.max_llm_calls:
+            if minimum <= settings.max_llm_calls:
+                # Output and review share one retry allowance per step; final work gets
+                # one separate allowance. These are fresh estimates, never saved caps.
+                retry_slots = max(0, settings.max_llm_calls - minimum - 1)
+                for step in plan.steps:
+                    if step.max_llm_calls == 2 and retry_slots:
+                        step.max_llm_calls = 3
+                        retry_slots -= 1
+                funded = consumed.llm_calls + sum(step.max_llm_calls for step in plan.steps) + 2
+            else:
+                funded = minimum
+            if plan.budget.max_llm_calls < funded <= settings.max_llm_calls:
                 estimate = plan.budget.max_llm_calls
-                admitted = min(settings.max_llm_calls, minimum + 1)
+                admitted = min(settings.max_llm_calls, funded + 1)
                 plan.budget.max_llm_calls = admitted
                 await checkpoint(
                     "plan_budget_accounting",
@@ -604,10 +615,11 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                             "model_estimate_calls": estimate,
                             "used_calls": consumed.llm_calls,
                             "minimum_total_calls": minimum,
+                            "funded_total_calls": funded,
                             "admitted_calls": admitted,
                             "operator_limit_calls": settings.max_llm_calls,
                             "retry_headroom": admitted - minimum,
-                            "reason": "Fresh model estimate omitted charged workflow calls; operator ceiling unchanged",
+                            "reason": "Fresh model estimate omitted workflow/retry calls; operator ceiling unchanged",
                         }
                     ),
                 )
@@ -727,13 +739,44 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 else:
                     budget_token = subtask_context.set((row.id, step.max_llm_calls))
                     before = (await store.get(task_id)).llm_calls
+                    current = await store.get(task_id)
+                    # Preserve one review call, every other unfinished step, and final
+                    # synthesis/review before allowing the output gateway to retry.
+                    future_calls = 2 * (len(remaining) - 1) + 2
+                    output_attempts = min(
+                        3,
+                        step.max_llm_calls - row.calls - 1,
+                        store.budget_envelope(current)["max_llm_calls"]
+                        - current.llm_calls
+                        - future_calls
+                        - 1,
+                    )
+                    if output_attempts < 1:
+                        raise BudgetExceeded(
+                            "No output call available while reserving independent review and finalization"
+                        )
                     output = await complete(
                         schema=StaffOutput,
                         role="developer",
+                        max_attempts=output_attempts,
                         user=f"SKILL:{step.skill}; objective:{step.objective}\nCONTEXT:{context_json}\nDEPENDENCIES:{json.dumps({d: done[d].model_dump() for d in step.dependencies})}",
                     )
                     issues = validate_output(output, context)
+                    current = await store.get(task_id)
+                    async with store.sessions() as session:
+                        charged = await session.get(Subtask, row.id)
+                        remaining_step_calls = step.max_llm_calls - charged.calls
+                    review_attempts = min(
+                        3,
+                        remaining_step_calls,
+                        store.budget_envelope(current)["max_llm_calls"] - current.llm_calls - future_calls,
+                    )
+                    if review_attempts < 1:
+                        raise BudgetExceeded(
+                            "No independent review call available within reserved task/subtask limits"
+                        )
                     evaluation = await complete(
+                        max_attempts=review_attempts,
                         schema=OutputEvaluation,
                         role="reviewer",
                         user=f"Independently check claims against the supplied facts, goal and constraints. Reject unsupported inference, unsafe authority or missing required output.\nOBJECTIVE:{step.objective}\nCONTEXT:{context_json}\nOUTPUT:{output.model_dump_json()}",
@@ -772,18 +815,28 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 done[step.id] = output
                 remaining.remove(step)
         await transition("reviewing", "Menggabungkan hasil dan memeriksa evidence serta rekomendasi.")
+        final_task = await store.get(task_id)
+        final_attempts = min(3, store.budget_envelope(final_task)["max_llm_calls"] - final_task.llm_calls - 1)
+        if final_attempts < 1:
+            raise BudgetExceeded("No synthesis call available while reserving final independent review")
         result = await complete(
             schema=StaffOutput,
             role="lead",
+            max_attempts=final_attempts,
             user=f"Produce the final answer to the objective. If asked for top three, return at most three prioritized findings. Do not invent findings if data is insufficient.\nOBJECTIVE:{task.requirement}\nCONTEXT:{context_json}\nSKILL OUTPUTS:{json.dumps({k: v.model_dump() for k, v in done.items()})}",
         )
         result.missing_information = list(dict.fromkeys(result.missing_information + intent.evidence_gaps))[
             :10
         ]
         issues = validate_output(result, context)
+        final_task = await store.get(task_id)
+        final_attempts = min(3, store.budget_envelope(final_task)["max_llm_calls"] - final_task.llm_calls)
+        if final_attempts < 1:
+            raise BudgetExceeded("No final independent review call available within task limit")
         review = await complete(
             schema=OutputEvaluation,
             role="reviewer",
+            max_attempts=final_attempts,
             user=f"Check final result against success criteria; reject any unsupported claim.\nPLAN:{plan.model_dump_json()}\nCONTEXT:{context_json}\nRESULT:{result.model_dump_json()}",
         )
         if issues or not review.approved or review.issues:

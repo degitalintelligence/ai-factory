@@ -82,7 +82,7 @@ async def setup_goal(db):
 
 
 def provider(db, ref, calls):
-    async def complete(*, schema, role, user):
+    async def complete(*, schema, role, user, max_attempts=3):
         calls.append(schema.__name__)
         await db.reserve_call(*run_context.get(), token_reserve=1, subtask=subtask_context.get())
         if schema is ResolvedIntent:
@@ -361,7 +361,7 @@ async def test_task_evidence_and_action_do_not_leak_other_owner(db, monkeypatch)
 async def test_l3_goal_creates_blocked_card_and_no_execution(db, monkeypatch):
     task, _ = await setup_goal(db)
 
-    async def complete(*, schema, role, user):
+    async def complete(*, schema, role, user, max_attempts=3):
         if schema is ResolvedIntent:
             return ResolvedIntent(
                 objective="Deploy to production",
@@ -400,7 +400,7 @@ async def test_recovery_preserves_completed_subtasks_without_replay(db, monkeypa
     real = provider(db, f"task:{source.id}", calls)
     failures = 0
 
-    async def crash(*, schema, role, user):
+    async def crash(*, schema, role, user, max_attempts=3):
         nonlocal failures
         if schema is StaffOutput and role == "lead" and not failures:
             failures += 1
@@ -421,7 +421,7 @@ async def test_high_risk_draft_requires_exact_plan_approval(db, monkeypatch):
     task, source = await setup_goal(db)
     real = provider(db, f"task:{source.id}", [])
 
-    async def finance(*, schema, role, user):
+    async def finance(*, schema, role, user, max_attempts=3):
         if schema is StaffPlan:
             data = plan().model_dump()
             data["steps"][0]["skill"] = "finance"
@@ -496,7 +496,7 @@ async def test_withdrawn_memory_is_not_replayed_from_checkpoint(db, monkeypatch)
     )
     await db.claim("worker")
 
-    async def clarify(*, schema, role, user):
+    async def clarify(*, schema, role, user, max_attempts=3):
         return ResolvedIntent(
             objective="Review business knowledge",
             desired_outcome="Grounded review",
@@ -564,7 +564,7 @@ async def test_audit_evidence_gaps_do_not_block_and_survive_final_result(db, mon
     task, source = await setup_goal(db)
     real = provider(db, f"task:{source.id}", [])
 
-    async def incomplete(*, schema, role, user):
+    async def incomplete(*, schema, role, user, max_attempts=3):
         result = await real(schema=schema, role=role, user=user)
         if schema is ResolvedIntent:
             result.evidence_gaps = ["Live acceptance has no supplied evidence"]
@@ -741,7 +741,7 @@ async def test_single_step_model_budget_accounts_for_intake_and_honors_caps(
     await db.claim("worker")
     real = provider(db, f"task:{source.id}", [])
 
-    async def underestimated(*, schema, role, user):
+    async def underestimated(*, schema, role, user, max_attempts=3):
         result = await real(schema=schema, role=role, user=user)
         if schema is StaffPlan:
             data = result.model_dump()
@@ -756,8 +756,91 @@ async def test_single_step_model_budget_accounts_for_intake_and_honors_caps(
     assert saved.status == expected
     artifacts = await db.artifacts(goal.id)
     if expected == "completed":
-        assert saved.llm_calls == 6 and db.budget_envelope(saved)["max_llm_calls"] == 7
+        assert saved.llm_calls == 6 and db.budget_envelope(saved)["max_llm_calls"] == 8
         assert any(a.kind == "plan_budget_accounting" for a in artifacts)
     else:
         assert saved.llm_calls == 2 and db.budget_envelope(saved)["max_llm_calls"] == 5
         assert not any(a.kind == "plan_budget_accounting" for a in artifacts)
+
+
+@pytest.mark.parametrize("valid_retry", [True, False])
+async def test_real_gateway_review_retry_is_funded_and_invalid_review_never_completes(
+    db, monkeypatch, valid_retry
+):
+    import json
+
+    from openai import AsyncOpenAI
+
+    from app import llm
+
+    source = await db.create("Recorded failure evidence", user_id=7)
+    await db.update(source.id, status="failed")
+    goal = await staff.create_intent(
+        ChatRequest(
+            message=f"Analisis task #{source.id} saja. Jelaskan satu penyebab berhenti.",
+            idempotency_key="review-retry",
+        ),
+        7,
+    )
+    await db.claim("worker")
+    data = plan().model_dump()
+    data["steps"] = [data["steps"][0]]
+    data["steps"][0]["max_llm_calls"] = 2
+    data["budget"]["max_llm_calls"] = 7
+    approved = OutputEvaluation(approved=True, summary="Supported by recorded evidence").model_dump_json()
+    replies = [
+        ResolvedIntent(
+            objective="Explain one task failure", desired_outcome="One supported cause"
+        ).model_dump_json(),
+        json.dumps(data),
+        output(f"task:{source.id}").model_dump_json(),
+        '{"approved":true,"summary":"missing closing brace"',
+        approved if valid_retry else '{"approved":',
+        output(f"task:{source.id}").model_dump_json(),
+        approved,
+    ]
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": replies[len(requests) - 1]},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0},
+            },
+        )
+
+    monkeypatch.setattr(
+        llm,
+        "AsyncOpenAI",
+        lambda **kwargs: AsyncOpenAI(
+            api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        ),
+    )
+    monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")
+    await staff.run_staff_task(goal.id, "worker")
+    saved = await db.get(goal.id)
+    artifacts = await db.artifacts(goal.id)
+    async with db.sessions() as session:
+        step = await session.scalar(select(Subtask).where(Subtask.task_id == goal.id))
+    assert step.calls == 3
+    if valid_retry:
+        assert saved.status == "completed" and saved.llm_calls == 7 and len(requests) == 7
+        assert step.status == "completed" and any(a.kind == "staff_result" for a in artifacts)
+    else:
+        assert saved.status == "failed" and saved.llm_calls == 5 and len(requests) == 5
+        assert step.status != "completed" and not any(a.kind == "staff_result" for a in artifacts)
+        failure = next(a.content for a in artifacts if a.kind == "staff_failure")
+        assert "invalid structured output after 2 attempts" in failure
+        assert "Subtask lifetime model-call budget exhausted" not in failure
