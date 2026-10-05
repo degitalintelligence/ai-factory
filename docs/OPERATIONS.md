@@ -258,3 +258,29 @@ consecutive truncations that must fail without publishing a result.
 Deploy the reviewed SHA and rerun the audit as a new goal. Compact contracts do
 not establish natural-language quality, real-provider reliability, or general
 v0.3 live acceptance; the plan and reviewer may still need quality improvements.
+
+### Inspect staff review rejection (task #33)
+
+Task #33 stopped at skill review without a recorded structured-output validation
+failure. Its failure reason repeats audit findings, but the submitted draft and
+parsed evaluation were not retained. That is insufficient to distinguish a
+legitimate rejection of unsupported claims from reviewer contract confusion.
+
+Reviewer prompts and schema descriptions now distinguish defects in the answer
+from problems discovered by the audit. A rejection must identify the defective
+claim, its evidence or scope problem, and the correction needed. Review remains
+mandatory; rejection or any nonempty issues list still blocks publication.
+
+`/report` now retains locally valid `staff_draft` before review, with its step ID
+and execution plan hash, and parsed `staff_draft_evaluation` including local
+validation issues. Final synthesis uses `staff_final_draft` and
+`staff_final_draft_evaluation`. These are diagnostic artifacts, not completed or
+approved results. Drafts with credentials or invalid evidence references are not
+retained. A malformed reviewer response leaves the draft and existing validation
+diagnostics available; raw provider responses are not stored. Historical tasks
+are unchanged. No migration, model switch or budget increase is introduced.
+
+After deploying the reviewed SHA, repeat the audit as a new goal. Inspect its
+draft and evaluation on rejection before deciding whether model configuration,
+claims, or the workflow needs another change. Passing mock-provider tests does
+not establish live audit quality.

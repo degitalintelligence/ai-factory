@@ -123,6 +123,7 @@ async def test_unauthorized_or_invented_evidence_fails_closed(db, monkeypatch):
     await staff.run_staff_task(task.id, "worker")
     assert (await db.get(task.id)).status == "failed"
     assert not any(a.kind == "staff_result" for a in await db.artifacts(task.id))
+    assert not any(a.kind == "staff_draft" for a in await db.artifacts(task.id))
     assert any(d.category == "blocked" for d in await db.inbox())
 
 
@@ -844,6 +845,9 @@ async def test_real_gateway_review_retry_is_funded_and_invalid_review_never_comp
         failure = next(a.content for a in artifacts if a.kind == "staff_failure")
         assert "invalid structured output after 2 attempts" in failure
         assert "Subtask lifetime model-call budget exhausted" not in failure
+        draft = next(a.content for a in artifacts if a.kind == "staff_draft")
+        assert json.loads(draft)["output"] == output(f"task:{source.id}").model_dump()
+        assert not any(a.kind == "staff_draft_evaluation" for a in artifacts)
 
 
 def factual_message(task_id):
@@ -1245,6 +1249,11 @@ async def test_staff_audit_gateway_compact_output_and_truncation(db, monkeypatch
     assert "hard limit 7000" in requests[2]["messages"][1]["content"]
     assert "invalid_output" in artifacts or "llm_validation" in artifacts
     if recover:
+        reviewer_prompt = requests[4]["messages"][1]["content"]
+        assert "Audit findings are not review issues" in reviewer_prompt
+        assert "exact claim" in reviewer_prompt
+        assert "Do not rewrite the answer" in reviewer_prompt
+    if recover:
         assert saved.status == "completed" and saved.llm_calls == 9
         result = StaffOutput.model_validate_json(artifacts["staff_result"])
         assert len(result.findings) == 3
@@ -1257,3 +1266,65 @@ async def test_staff_audit_gateway_compact_output_and_truncation(db, monkeypatch
         assert "invalid structured output after 2 attempts" in saved.last_message
         assert "truncated" in saved.last_message
         assert "x" * 100 not in artifacts["staff_failure"]
+
+
+@pytest.mark.parametrize("final", [False, True])
+@pytest.mark.parametrize("approved", [False, True])
+async def test_rejected_staff_review_preserves_draft_and_never_publishes(db, monkeypatch, final, approved):
+    import json
+
+    task, source = await setup_goal(db)
+    base = provider(db, f"task:{source.id}", [])
+    reviews = 0
+
+    async def complete(**kwargs):
+        nonlocal reviews
+        result = await base(**kwargs)
+        if kwargs["schema"] is OutputEvaluation:
+            reviews += 1
+            if reviews == (3 if final else 1):
+                return OutputEvaluation(
+                    approved=approved,
+                    issues=["Klaim memperluas bukti dua audit ke semua eksekusi; batasi cakupan."],
+                    summary="Perlu koreksi cakupan.",
+                )
+        return result
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    assert (await db.get(task.id)).status == "failed"
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    if final:
+        draft = StaffOutput.model_validate_json(artifacts["staff_final_draft"])
+        evaluation = json.loads(artifacts["staff_final_draft_evaluation"])
+    else:
+        saved = json.loads(artifacts["staff_draft"])
+        assert saved["step_id"] == "audit" and saved["plan_hash"]
+        draft = StaffOutput.model_validate(saved["output"])
+        evaluation = json.loads(artifacts["staff_draft_evaluation"])
+        assert evaluation["step_id"] == "audit"
+    assert draft == output(f"task:{source.id}")
+    assert evaluation["evaluation"]["approved"] is approved
+    assert evaluation["evaluation"]["issues"] and evaluation["local_issues"] == []
+    assert "staff_result" not in artifacts
+    async with db.sessions() as session:
+        cards = list(await session.scalars(select(Decision).where(Decision.task_id == task.id)))
+    assert all("Reliability issue" not in card.title for card in cards)
+
+
+async def test_credential_draft_is_not_retained(db, monkeypatch):
+    task, source = await setup_goal(db)
+    base = provider(db, f"task:{source.id}", [])
+
+    async def complete(**kwargs):
+        result = await base(**kwargs)
+        if kwargs["schema"] is StaffOutput:
+            result.summary = "sk-" + "syntheticcredential" * 2
+        return result
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    assert (await db.get(task.id)).status == "failed"
+    artifacts = await db.artifacts(task.id)
+    assert not any(a.kind in {"staff_draft", "staff_final_draft", "staff_result"} for a in artifacts)
+    assert not any("syntheticcredential" in a.content for a in artifacts)

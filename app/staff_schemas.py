@@ -154,9 +154,19 @@ class FactualOutput(StrictModel):
 
 
 class OutputEvaluation(StrictModel):
-    approved: bool
-    issues: list[str] = Field(default_factory=list, max_length=10)
-    summary: str = Field(min_length=1, max_length=2000)
+    approved: bool = Field(
+        description="Whether the submitted answer satisfies its objective and evidence constraints."
+    )
+    issues: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Defects in the submitted answer requiring correction, not the problems discovered by an audit. Each issue identifies the defective claim, reason and needed correction. Empty when approved.",
+    )
+    summary: str = Field(
+        min_length=1,
+        max_length=2000,
+        description="Short verdict about answer quality, not a new audit or rewritten answer.",
+    )
 
 
 class DecisionAction(StrictModel):

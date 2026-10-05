@@ -465,11 +465,13 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         # broader reader. Enforce compact generation instead of raising token caps.
         schema = CompactStaffOutput
         user += "\nReturn compact JSON under 5000 characters (hard limit 7000). Use at most 3 findings unless the objective explicitly requires 4-6. Each prose field is one short Indonesian sentence; summary at most two sentences. Cite 1-4 exact refs per finding. Do not repeat context, quotations, or the report across fields. State unavailable proof in short missing_information items. Preserve requested decisions, uncertainty and evidence; no external authority."
+    elif schema is OutputEvaluation:
+        user += "\nReview the submitted answer, not the health of the system it audits. Audit findings are not review issues merely because they describe failures. issues contains only defects requiring correction in this answer: identify the exact claim, why it violates evidence or scope, and the correction needed. Distinguish supported observations, labelled hypotheses and evidence gaps. Reject unsupported generalizations; missing live acceptance proof is a limitation, not proof of production failure. Return approved=true with issues=[] when the answer satisfies the objective, otherwise approved=false with concrete issues. Keep JSON under 1800 characters, at most 3 issues and a one-sentence verdict. Do not rewrite the answer or repeat its findings."
     output = await json_completion(
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-9",
+        prompt_version="staff-v03-10",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -867,6 +869,20 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         if factual
                         else validate_output(output, context)
                     )
+                    if not issues:
+                        if factual:
+                            await checkpoint("factual_draft", output.model_dump_json())
+                        else:
+                            await checkpoint(
+                                "staff_draft",
+                                json.dumps(
+                                    {
+                                        "step_id": step.id,
+                                        "plan_hash": execution_hash,
+                                        "output": output.model_dump(),
+                                    }
+                                ),
+                            )
                     current = await store.get(task_id)
                     async with store.sessions() as session:
                         charged = await session.get(Subtask, row.id)
@@ -887,8 +903,19 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         user=f"{output_rules}\nIndependently check claims against the supplied facts, goal and constraints. Reject unsupported inference, unsafe authority or missing required output.\nOBJECTIVE:{step.objective}\nCONTEXT:{context_json}\nOUTPUT:{output.model_dump_json()}",
                     )
                     if factual and not issues:
-                        await checkpoint("factual_draft", output.model_dump_json())
                         await checkpoint("factual_draft_evaluation", evaluation.model_dump_json())
+                    elif not factual:
+                        await checkpoint(
+                            "staff_draft_evaluation",
+                            json.dumps(
+                                {
+                                    "step_id": step.id,
+                                    "plan_hash": execution_hash,
+                                    "evaluation": evaluation.model_dump(),
+                                    "local_issues": issues,
+                                }
+                            ),
+                        )
                     subtask_context.reset(budget_token)
                     calls = (await store.get(task_id)).llm_calls - before
                     if issues or not evaluation.approved or evaluation.issues or calls > step.max_llm_calls:
@@ -897,6 +924,11 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                             + "; ".join(
                                 issues
                                 + evaluation.issues
+                                + (
+                                    [evaluation.summary]
+                                    if not evaluation.approved and not evaluation.issues
+                                    else []
+                                )
                                 + (["Subtask budget exceeded"] if calls > step.max_llm_calls else [])
                             )
                         )
@@ -969,6 +1001,8 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             issues = (
                 validate_factual(result, context, factual[1]) if factual else validate_output(result, context)
             )
+            if not issues:
+                await checkpoint("staff_final_draft", result.model_dump_json())
             final_task = await store.get(task_id)
             final_attempts = min(3, store.budget_envelope(final_task)["max_llm_calls"] - final_task.llm_calls)
             if final_attempts < 1:
@@ -979,8 +1013,21 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 max_attempts=final_attempts,
                 user=f"{output_rules}\nCheck final result against success criteria; reject any unsupported claim.\nPLAN:{plan.model_dump_json()}\nCONTEXT:{context_json}\nRESULT:{result.model_dump_json()}",
             )
+            await checkpoint(
+                "staff_final_draft_evaluation",
+                json.dumps(
+                    {"plan_hash": execution_hash, "evaluation": review.model_dump(), "local_issues": issues}
+                ),
+            )
             if issues or not review.approved or review.issues:
-                raise ValueError("Final evaluation failed: " + "; ".join(issues + review.issues))
+                raise ValueError(
+                    "Final evaluation failed: "
+                    + "; ".join(
+                        issues
+                        + review.issues
+                        + ([review.summary] if not review.approved and not review.issues else [])
+                    )
+                )
         async with store.sessions() as s, s.begin():
             locked = await s.get(Task, task_id, with_for_update=True)
             if locked.lease_owner != owner or locked.lease_until <= utcnow() or locked.cancel_requested:
