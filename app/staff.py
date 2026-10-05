@@ -37,6 +37,7 @@ from app.security import redact, secret_present
 from app.skills import SKILLS, select_skills
 from app.staff_schemas import (
     ChatRequest,
+    CompactStaffOutput,
     ContextItem,
     FactualOutput,
     OutputEvaluation,
@@ -459,11 +460,16 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         user += "\nKeep the intent JSON under 1500 characters. Objective and outcome each one sentence; at most 3 short scope items. Do not write the audit findings or repeat supplied evidence in intent fields. Use evidence_gaps for absent proof."
     elif schema is StaffPlan:
         user += "\nKeep the plan JSON under 3500 characters: at most 3 steps, 3 short success criteria, 3 risks and 3 gates; each step objective under 220 characters. Keep evidence refs in context rather than repeating them in every field. Plan the work, do not write the final report inside the plan."
+    elif schema is StaffOutput:
+        # Same field names and decision semantics; historical outputs retain their
+        # broader reader. Enforce compact generation instead of raising token caps.
+        schema = CompactStaffOutput
+        user += "\nReturn compact JSON under 5000 characters (hard limit 7000). Use at most 3 findings unless the objective explicitly requires 4-6. Each prose field is one short Indonesian sentence; summary at most two sentences. Cite 1-4 exact refs per finding. Do not repeat context, quotations, or the report across fields. State unavailable proof in short missing_information items. Preserve requested decisions, uncertainty and evidence; no external authority."
     output = await json_completion(
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-8",
+        prompt_version="staff-v03-9",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -1020,7 +1026,9 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
         kind = "Budget exhausted" if isinstance(exc, BudgetExceeded) else type(exc).__name__
         detail = redact(str(exc))[:2000]
         message = f"Pekerjaan berhenti ({kind})."
-        if isinstance(exc, (BudgetExceeded, ValueError)):
+        if isinstance(exc, (BudgetExceeded, ValueError)) or (
+            isinstance(exc, RuntimeError) and "invalid structured output" in detail
+        ):
             message += " Alasan: " + excerpt(detail, 600)
         message += f" Evidence: /report {task_id} dan /logs {task_id}. Budget tidak direset."
         await transition("failed", message)

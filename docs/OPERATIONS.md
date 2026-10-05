@@ -231,3 +231,30 @@ failed when its unnecessary final rewrite was rejected for language corruption.
 That evidence supports removing this extra generation stage for one-step factual
 answers; it does not establish general configured-model language reliability.
 Other staff workflows keep final synthesis and independent review.
+
+### Compact staff audit generation (task #31)
+
+Task #31 reached staff execution, then its first skill output hit the unchanged
+8,192-token provider limit twice (`finish_reason=length`), once with no returned
+content and once with 19,153 characters. It stopped on structured-output
+validation exhaustion, not the task call ceiling. These diagnostics do not prove
+why the configured provider generated so much output or omitted the first body.
+
+New `StaffOutput` model calls use `CompactStaffOutput`: the same decision fields
+and enums, shorter prose fields, at most four evidence refs per finding and a
+7,000-character total JSON validation bound. Prompts target 5,000 characters and
+three findings unless the objective explicitly asks for four to six. Missing
+proof, alternatives, risks, confidence and decision-required flags remain part
+of the contract. Old persisted output remains readable through `StaffOutput`;
+there is no migration or rewriting of historical evidence. Factual-v2 is unchanged.
+
+The model, provider output-token limit, task/subtask budgets, retry reservations
+and independent review gates are unchanged. Truncated responses remain rejected;
+there is no JSON salvage or approval fallback. Structured-output exhaustion now
+shows its redacted reason in progress notifications. Gateway regression tests
+cover a truncated first response followed by a valid compact audit and two
+consecutive truncations that must fail without publishing a result.
+
+Deploy the reviewed SHA and rerun the audit as a new goal. Compact contracts do
+not establish natural-language quality, real-provider reliability, or general
+v0.3 live acceptance; the plan and reviewer may still need quality improvements.
