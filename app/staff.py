@@ -13,7 +13,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
@@ -59,6 +59,8 @@ Preserve the requested objective: an audit is not a production release decision 
 Missing proof is an evidence gap to report, not a reason to block a useful bounded audit.
 Ask only questions necessary to define the target, requested outcome, or safe authority.
 Never infer that an absent record proves success, failure, or a root cause.
+Decision cards, improvement proposals and prior audit outputs are derived records, not independent proof of their claims. Prefer direct task diagnostics when they conflict. Do not recycle a rejected audit's claims as verified facts or confuse schema/review failures with token truncation or exhausted task budgets.
+For unverified context, do not exceed its supplied confidence or present its counts as confirmed. Prefer findings with direct supporting evidence; label derived claims and proposed priorities as inference. Decisions requested by the user must describe a concrete choice, not merely repeat a recommendation.
 Authority is operator-owned; an approval for analysis grants no external execution authority.
 """
 
@@ -316,6 +318,7 @@ async def assemble_context(task: Task) -> list[ContextItem]:
             await s.commit()
             return items
         for row in decisions:
+            generated = row.category in {"learning_proposal", "recommendation"}
             items.append(
                 ContextItem(
                     ref=f"decision:{row.id}",
@@ -323,9 +326,15 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                     scope=row.project,
                     owner=row.owner,
                     created_at=row.created_at.isoformat(),
-                    confidence=1,
+                    confidence=0.5 if generated else 1,
+                    label="unverified" if generated else "current",
                     content=redact(
-                        f"{row.title}: {row.situation[:1400]}; state={row.state}; "
+                        (
+                            "Derived proposal, not independent evidence; verify counts and claims against task diagnostics. Legacy recurring-budget proposals may include non-budget failures. "
+                            if generated
+                            else ""
+                        )
+                        + f"{row.title}: {row.situation[:1400]}; state={row.state}; "
                         f"risk={row.risk_level}; recommendation={row.recommendation}"
                     ),
                 )
@@ -471,7 +480,7 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-11",
+        prompt_version="staff-v03-12",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -1153,17 +1162,46 @@ async def detect_improvements(actor: int, tenant: str | None = None) -> list[Imp
                 .limit(50)
             )
         )
+        latest_failures = await s.scalars(
+            select(Artifact).where(
+                Artifact.id.in_(
+                    select(func.max(Artifact.id))
+                    .where(Artifact.task_id.in_([r.id for r in rows]), Artifact.kind == "staff_failure")
+                    .group_by(Artifact.task_id)
+                )
+            )
+        )
+        failure_categories = {}
+        for artifact in latest_failures:
+            try:
+                category = json.loads(artifact.content)["category"]
+                if isinstance(category, str):
+                    failure_categories[artifact.task_id] = category
+            except (ValueError, KeyError, TypeError):
+                continue
         groups = {}
         for row in rows:
-            # Stable failure class; avoid grouping by user supplied task prose.
-            category = "budget" if "budget" in (row.last_message or "").casefold() else "execution"
+            # Structured failure category is authoritative. Legacy fallback uses
+            # engine-owned message prefixes, never mentions in a reason/suffix.
+            recorded = failure_categories.get(row.id)
+            if recorded is not None:
+                category = "budget" if recorded in {"Budget exhausted", "BudgetExceeded"} else "execution"
+            else:
+                budget_stop = re.match(
+                    r"^(?:BudgetExceeded:|Budget exhausted\b|Pekerjaan berhenti \(Budget exhausted\)|Task (?:LLM |lifetime model-call |wall-clock )?budget (?:exhausted|exceeded)\b)",
+                    row.last_message or "",
+                    re.I,
+                )
+                category = "budget" if budget_stop else "execution"
             groups.setdefault(category, []).append(row)
         proposals = []
         for category, group in groups.items():
             if len(group) < 3:
                 continue
-            refs = [f"task:{r.id}" for r in group[:3]]
-            fingerprint = hashlib.sha256(f"{tenant}:{actor}:{category}:{refs}".encode()).hexdigest()
+            refs = [f"task:{r.id}" for r in group]
+            fingerprint = hashlib.sha256(
+                f"failure-v2:{tenant}:{actor}:{category}:{refs}".encode()
+            ).hexdigest()
             existing = await s.scalar(
                 select(ImprovementProposal).where(ImprovementProposal.fingerprint == fingerprint)
             )
@@ -1175,7 +1213,7 @@ async def detect_improvements(actor: int, tenant: str | None = None) -> list[Imp
                 evidence=refs,
                 hypothesis="Narrow planning/context and improve deterministic failure diagnostics before retrying.",
                 scope="app/staff.py and corresponding regression tests",
-                baseline=f"{len(group)} recent failed tasks",
+                baseline=f"{len(group)} classified {category} failures among the latest {len(rows)} failed tasks (maximum 50), owner/tenant scoped; failure-v2. Not a success-rate estimate or proven root cause.",
                 rollback_plan="Revert the reviewed change; preserve database and evidence.",
                 test_plan=[
                     "Reproduce the recorded failure before editing",
