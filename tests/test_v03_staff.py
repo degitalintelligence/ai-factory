@@ -10,7 +10,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app import staff
 from app.config import settings
-from app.db import AuditLog, DailyBudget, Decision, Deployment, Subtask
+from app.db import Artifact, AuditLog, DailyBudget, Decision, Deployment, Event, ModelRun, Subtask
 from app.deployment import DeploymentService
 from app.llm import run_context, subtask_context
 from app.main import app
@@ -433,6 +433,10 @@ async def test_high_risk_draft_requires_exact_plan_approval(db, monkeypatch):
     assert (await db.get(task.id)).status == "awaiting_approval"
     decisions = await db.inbox(state="open")
     assert len(decisions) == 1 and decisions[0].kind == "APPROVAL_REQUIRED"
+    message = (await db.get(task.id)).last_message
+    assert f"setujui keputusan #{decisions[0].id}" in message
+    assert "finance: Audit reliability" in message
+    assert "Batas efektif:" in message and "Insufficient source data" in message
     # WorkerPool.supervise releases the lease after the approval checkpoint.
     await db.update(task.id, lease_owner=None, lease_until=None)
     await db.resolve_decision(decisions[0].id, "approve", 7, reason="Review bounded finance draft")
@@ -554,3 +558,55 @@ async def test_staff_delivery_failures_preserve_completed_result(db, monkeypatch
     assert any(a.kind == "staff_result" for a in await db.artifacts(task.id))
     assert any(e.kind == "notification_failed" for e in await db.events(task.id))
     assert len([d for d in await db.inbox() if d.task_id == task.id]) == 3
+
+
+async def test_audit_evidence_gaps_do_not_block_and_survive_final_result(db, monkeypatch):
+    task, source = await setup_goal(db)
+    real = provider(db, f"task:{source.id}", [])
+
+    async def incomplete(*, schema, role, user):
+        result = await real(schema=schema, role=role, user=user)
+        if schema is ResolvedIntent:
+            result.evidence_gaps = ["Live acceptance has no supplied evidence"]
+        return result
+
+    monkeypatch.setattr(staff, "complete", incomplete)
+    await staff.run_staff_task(task.id, "worker")
+    assert (await db.get(task.id)).status == "completed"
+    artifact = next(a for a in await db.artifacts(task.id) if a.kind == "staff_result")
+    result = StaffOutput.model_validate_json(artifact.content)
+    assert result.missing_information == ["Live acceptance has no supplied evidence"]
+
+
+async def test_task_diagnostics_are_bounded_and_owner_tenant_scoped(db):
+    task, source = await setup_goal(db)
+    other = await db.create("Private objective", user_id=8)
+    await db.update(other.id, status="failed")
+    foreign = await db.create("Foreign objective", user_id=7)
+    await db.update(foreign.id, tenant="foreign")
+    await db.update(source.id, plan_json='{"budget":{"max_llm_calls":2}}', cost_incomplete=True)
+    async with db.sessions() as session, session.begin():
+        for row, marker in ((source, "allowed"), (other, "private"), (foreign, "foreign")):
+            for index in range(6):
+                session.add(Event(task_id=row.id, kind="diagnostic", message=f"{marker}-event-{index}"))
+            session.add(Artifact(task_id=row.id, kind="test_result", content=f"{marker}-artifact"))
+            session.add(
+                ModelRun(
+                    task_id=row.id,
+                    role="developer",
+                    model_alias="configured-alias",
+                    model="configured-model",
+                    prompt_version="test-version",
+                    outcome="timeout",
+                    detail=f"{marker}-model",
+                )
+            )
+    context = await staff.assemble_context(task)
+    diagnostic = next(item.content for item in context if item.ref == f"task:{source.id}:evidence")
+    assert "allowed-event-5" in diagnostic and "allowed-event-0" not in diagnostic
+    assert "allowed-artifact" in diagnostic and "allowed-model" in diagnostic
+    assert '"max_llm_calls": 2' in diagnostic and '"cost_incomplete": true' in diagnostic
+    assert "configured-alias" in diagnostic and "test-version" in diagnostic
+    combined = " ".join(item.content for item in context)
+    assert "private-event" not in combined and "foreign-event" not in combined
+    assert "private-artifact" not in combined and "foreign-model" not in combined

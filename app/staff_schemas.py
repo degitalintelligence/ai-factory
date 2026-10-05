@@ -27,7 +27,16 @@ class ResolvedIntent(StrictModel):
     urgency: Literal["normal", "urgent"] = "normal"
     risk_level: Literal["low", "medium", "high"] = "low"
     requested_authority: Literal["L0", "L1", "L2", "L3"] = "L0"
-    missing_information: list[str] = Field(default_factory=list, max_length=3)
+    missing_information: list[str] = Field(
+        default_factory=list,
+        max_length=3,
+        description="Only questions without which the requested objective, target, or authority cannot be defined safely. Missing audit evidence alone is not a blocking question.",
+    )
+    evidence_gaps: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Unavailable proof or diagnostic data; proceed with bounded analysis and report these as unverified.",
+    )
     assumptions: list[str] = Field(default_factory=list, max_length=20)
 
 
