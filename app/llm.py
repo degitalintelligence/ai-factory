@@ -57,6 +57,7 @@ async def json_completion(
     schema: type[T],
     role: str = "",
     prompt_version: str = "",
+    max_attempts: int = 3,
 ) -> T:
     """One structured call, audited per attempt.
 
@@ -66,6 +67,8 @@ async def json_completion(
     how it ended. Only the hash of the prompt is kept; prompt and completion text are
     never persisted.
     """
+    if not 1 <= max_attempts <= 3:
+        raise ValueError("Structured completion attempts must be between 1 and 3")
     if not settings.openrouter_api_key or not model:
         raise RuntimeError("OpenRouter API key/model is not configured")
     if len(system) + len(user) > settings.max_prompt_chars:
@@ -107,7 +110,7 @@ async def json_completion(
         timeout=settings.llm_timeout_seconds,
         max_retries=0,
     ) as client:
-        for attempt in range(3):
+        for attempt in range(max_attempts):
             if sum(len(m["content"]) for m in messages) > settings.max_prompt_chars:
                 await audit(
                     attempt + 1,
@@ -145,7 +148,7 @@ async def json_completion(
                     latency_ms=latency_ms,
                     digest=digest,
                 )
-                if attempt == 2 or (
+                if attempt == max_attempts - 1 or (
                     isinstance(exc, APIStatusError) and exc.status_code not in {408, 429, 500, 502, 503, 504}
                 ):
                     raise RuntimeError(
@@ -192,6 +195,15 @@ async def json_completion(
                     "attempt": attempt + 1,
                     "max_output_tokens": settings.max_output_tokens,
                     "detail": detail,
+                    "finish_reason": response.choices[0].finish_reason if response.choices else None,
+                    "content_chars": len(response.choices[0].message.content or "")
+                    if response.choices
+                    else 0,
+                    "prompt_tokens": usage_data.get("prompt_tokens"),
+                    "completion_tokens": usage_data.get("completion_tokens"),
+                    "reasoning_tokens": (usage_data.get("completion_tokens_details") or {}).get(
+                        "reasoning_tokens"
+                    ),
                 }
                 await audit(
                     attempt + 1,
@@ -205,11 +217,13 @@ async def json_completion(
                 if context:
                     await store.artifact(context[0], "llm_validation", json.dumps(diagnostic))
                     await store.event(
-                        context[0], "llm_validation", f"{schema.__name__} attempt {attempt + 1}/3: {detail}"
+                        context[0],
+                        "llm_validation",
+                        f"{schema.__name__} attempt {attempt + 1}/{max_attempts}: {detail}",
                     )
-                if attempt == 2:
+                if attempt == max_attempts - 1:
                     raise RuntimeError(
-                        f"{schema.__name__}: invalid structured output after 3 attempts ({detail}); see /report"
+                        f"{schema.__name__}: invalid structured output after {max_attempts} attempts ({detail}); see /report"
                     ) from exc
                 messages.append(
                     {
