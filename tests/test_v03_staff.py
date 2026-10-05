@@ -395,6 +395,61 @@ async def test_repeated_failures_create_gated_evidence_backed_proposal(db):
     assert not await staff.detect_improvements(8)
 
 
+async def test_failure_proposals_use_categories_not_budget_disclaimer(db):
+    import json
+
+    execution_ids, budget_ids = [], []
+    for index in range(4):
+        task = await db.create("Historical validation failure", user_id=7)
+        await db.update(
+            task.id, status="failed", last_message="Pekerjaan berhenti (RuntimeError). Budget tidak direset."
+        )
+        execution_ids.append(task.id)
+        if index < 3:
+            await db.artifact(
+                task.id,
+                "staff_failure",
+                json.dumps(
+                    {"category": "RuntimeError", "detail": "Budget exhausted mentioned in rejected audit"}
+                ),
+            )
+    for index in range(3):
+        task = await db.create("Actual budget stop", user_id=7)
+        await db.update(
+            task.id, status="failed", last_message="BudgetExceeded: Task lifetime model-call budget exhausted"
+        )
+        budget_ids.append(task.id)
+        if index < 2:
+            # Most recent structured failure wins, not stale artifacts or prose.
+            await db.artifact(task.id, "staff_failure", json.dumps({"category": "ValueError"}))
+            await db.artifact(task.id, "staff_failure", json.dumps({"category": "Budget exhausted"}))
+    proposals = await staff.detect_improvements(7)
+    briefs = [SelfImprovementBrief.model_validate_json(p.brief_json) for p in proposals]
+    budget = next(b for b in briefs if "budget failure" in b.problem)
+    execution = next(b for b in briefs if "execution failure" in b.problem)
+    assert set(budget.evidence) == {f"task:{i}" for i in budget_ids}
+    assert set(execution.evidence) == {f"task:{i}" for i in execution_ids}
+    assert "3 tasks" in budget.problem and "4 tasks" in execution.problem
+    assert "failure-v2" in budget.baseline and "latest 7" in budget.baseline
+    assert {p.id for p in await staff.detect_improvements(7)} == {p.id for p in proposals}
+    assert not await staff.detect_improvements(8)
+
+
+async def test_generated_proposal_context_is_not_independent_proof(db):
+    for index in range(3):
+        task = await db.create(f"Failure {index}", user_id=7)
+        await db.update(task.id, status="failed", last_message="Task budget exhausted")
+    await staff.detect_improvements(7)
+    goal = await staff.create_intent(
+        ChatRequest(message="Audit evidence", idempotency_key="derived-context"), 7
+    )
+    context = await staff.assemble_context(goal)
+    derived = [c for c in context if c.source == "decisions"]
+    assert derived and all(c.label == "unverified" and c.confidence == 0.5 for c in derived)
+    assert all("not independent evidence" in c.content for c in derived)
+    assert all(c.label == "current" for c in context if c.source == "task_diagnostics")
+
+
 async def test_recovery_preserves_completed_subtasks_without_replay(db, monkeypatch):
     task, source = await setup_goal(db)
     calls = []
