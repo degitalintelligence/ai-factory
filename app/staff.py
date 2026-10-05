@@ -70,7 +70,9 @@ def excerpt(text: str, limit: int) -> str:
     return (prefix or text[:limit]) + "…"
 
 
-async def plan_call_requirement(task: Task, plan: StaffPlan, requirement_hash: str) -> int:
+async def plan_call_requirement(
+    task: Task, plan: StaffPlan, requirement_hash: str, *, final_calls: int = 2
+) -> int:
     """Two calls per unfinished step and two final calls; checkpoints do not repeat work."""
     digest = hashlib.sha256((requirement_hash + plan.model_dump_json()).encode()).hexdigest()
     async with store.sessions() as session:
@@ -85,7 +87,7 @@ async def plan_call_requirement(task: Task, plan: StaffPlan, requirement_hash: s
         raise BudgetExceeded(
             "Every unfinished skill needs at least 2 calls for output and independent review"
         )
-    return 2 * sum(step.id not in completed for step in plan.steps) + 2
+    return 2 * sum(step.id not in completed for step in plan.steps) + final_calls
 
 
 def audit(
@@ -461,7 +463,7 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-7",
+        prompt_version="staff-v03-8",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
@@ -546,12 +548,17 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             context = await assemble_context(task)
         factual = factual_request(task.requirement)
         # Never reinterpret a previously saved plan or output contract on recovery.
-        if task.plan_json and artifacts.get("output_contract") != "factual-v1":
+        if task.plan_json and artifacts.get("output_contract") not in {"factual-v1", "factual-v2"}:
             factual = None
         if factual and not context:
             raise ValueError("Evidence task tidak tersedia dalam scope akses tujuan ini")
         output_schema = FactualOutput if factual else StaffOutput
-        await checkpoint("output_contract", "factual-v1" if factual else "staff-v1")
+        exact_factual = bool(
+            factual and (not task.plan_json or artifacts.get("output_contract") == "factual-v2")
+        )
+        contract = "factual-v2" if exact_factual else "factual-v1" if factual else "staff-v1"
+        await checkpoint("output_contract", contract)
+        final_calls = 0 if exact_factual else 2
         output_rules = (
             f"Jelaskan tepat satu penyebab, maksimal {factual[1]} kata bahasa Indonesia "
             "termasuk keterbatasan, judul, dan rujukan. Gunakan evidence_refs yang tersedia. "
@@ -623,7 +630,11 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 risks=["Cuplikan bukti belum tentu membuktikan akar masalah"],
                 approval_gates=["L0 hanya membaca; wajib review independen"],
                 rollback_plan="Buang jawaban yang ditolak; tidak ada perubahan sistem",
-                budget={"max_llm_calls": min(settings.max_llm_calls, planning_task.llm_calls + 7)},
+                budget={
+                    "max_llm_calls": min(
+                        settings.max_llm_calls, planning_task.llm_calls + (5 if exact_factual else 7)
+                    )
+                },
             )
             if factual
             else await complete(
@@ -709,7 +720,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
         await checkpoint("plan", plan.model_dump_json())
         current = await store.get(task_id)
         limits = store.budget_envelope(current)
-        required_calls = await plan_call_requirement(current, plan, requirement_hash)
+        required_calls = await plan_call_requirement(current, plan, requirement_hash, final_calls=final_calls)
         if current.llm_calls + required_calls > limits["max_llm_calls"]:
             # One bounded repair for a fresh, unapproved plan; never mutate an approved plan.
             minimum_skills = 2 if len(selected) > 1 else 1
@@ -743,7 +754,9 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             await checkpoint("plan", plan.model_dump_json())
             current = await store.get(task_id)
             limits = store.budget_envelope(current)
-            required_calls = await plan_call_requirement(current, plan, requirement_hash)
+            required_calls = await plan_call_requirement(
+                current, plan, requirement_hash, final_calls=final_calls
+            )
             if current.llm_calls + required_calls > limits["max_llm_calls"]:
                 raise BudgetExceeded(
                     f"Revised plan cannot fit: {current.llm_calls} calls used + {required_calls} required; "
@@ -824,7 +837,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                     current = await store.get(task_id)
                     # Preserve one review call, every other unfinished step, and final
                     # synthesis/review before allowing the output gateway to retry.
-                    future_calls = 2 * (len(remaining) - 1) + 2
+                    future_calls = 2 * (len(remaining) - 1) + final_calls
                     output_attempts = min(
                         3,
                         step.max_llm_calls - row.calls - 1,
@@ -903,36 +916,65 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         )
                 done[step.id] = output
                 remaining.remove(step)
-        await transition("reviewing", "Menggabungkan hasil dan memeriksa evidence serta rekomendasi.")
-        final_task = await store.get(task_id)
-        final_attempts = min(3, store.budget_envelope(final_task)["max_llm_calls"] - final_task.llm_calls - 1)
-        if final_attempts < 1:
-            raise BudgetExceeded("No synthesis call available while reserving final independent review")
-        result = await complete(
-            schema=output_schema,
-            role="lead",
-            max_attempts=final_attempts,
-            user=f"{output_rules}\nProduce the final answer to the objective. If asked for top three, return at most three prioritized findings. Do not invent findings if data is insufficient.\nOBJECTIVE:{task.requirement}\nCONTEXT:{context_json}\nSKILL OUTPUTS:{json.dumps({k: v.model_dump() for k, v in done.items()})}",
-        )
-        if not factual:
-            result.missing_information = list(
-                dict.fromkeys(result.missing_information + intent.evidence_gaps)
-            )[:10]
-        issues = (
-            validate_factual(result, context, factual[1]) if factual else validate_output(result, context)
-        )
-        final_task = await store.get(task_id)
-        final_attempts = min(3, store.budget_envelope(final_task)["max_llm_calls"] - final_task.llm_calls)
-        if final_attempts < 1:
-            raise BudgetExceeded("No final independent review call available within task limit")
-        review = await complete(
-            schema=OutputEvaluation,
-            role="reviewer",
-            max_attempts=final_attempts,
-            user=f"{output_rules}\nCheck final result against success criteria; reject any unsupported claim.\nPLAN:{plan.model_dump_json()}\nCONTEXT:{context_json}\nRESULT:{result.model_dump_json()}",
-        )
-        if issues or not review.approved or review.issues:
-            raise ValueError("Final evaluation failed: " + "; ".join(issues + review.issues))
+        if exact_factual:
+            # Publish the exact single reviewed answer, never another model rewrite.
+            if len(plan.steps) != 1 or len(done) != 1:
+                raise ValueError("Factual publication requires exactly one reviewed step")
+            result = done[plan.steps[0].id]
+            async with store.sessions() as session:
+                completed = await session.scalar(
+                    select(Subtask).where(
+                        Subtask.task_id == task_id,
+                        Subtask.plan_hash == execution_hash,
+                        Subtask.key == plan.steps[0].id,
+                        Subtask.status == "completed",
+                    )
+                )
+            if completed is None:
+                raise ValueError("Reviewed factual checkpoint unavailable")
+            review = OutputEvaluation.model_validate_json(completed.evaluation_json)
+            issues = validate_factual(result, context, factual[1])
+            if issues or not review.approved or review.issues:
+                raise ValueError(
+                    "Factual publication evaluation failed: " + "; ".join(issues + review.issues)
+                )
+            await transition(
+                "reviewing",
+                "Jawaban sudah lolos review independen; menyimpan hasil yang sama tanpa penulisan ulang.",
+            )
+        else:
+            await transition("reviewing", "Menggabungkan hasil dan memeriksa evidence serta rekomendasi.")
+            final_task = await store.get(task_id)
+            final_attempts = min(
+                3, store.budget_envelope(final_task)["max_llm_calls"] - final_task.llm_calls - 1
+            )
+            if final_attempts < 1:
+                raise BudgetExceeded("No synthesis call available while reserving final independent review")
+            result = await complete(
+                schema=output_schema,
+                role="lead",
+                max_attempts=final_attempts,
+                user=f"{output_rules}\nProduce the final answer to the objective. If asked for top three, return at most three prioritized findings. Do not invent findings if data is insufficient.\nOBJECTIVE:{task.requirement}\nCONTEXT:{context_json}\nSKILL OUTPUTS:{json.dumps({k: v.model_dump() for k, v in done.items()})}",
+            )
+            if not factual:
+                result.missing_information = list(
+                    dict.fromkeys(result.missing_information + intent.evidence_gaps)
+                )[:10]
+            issues = (
+                validate_factual(result, context, factual[1]) if factual else validate_output(result, context)
+            )
+            final_task = await store.get(task_id)
+            final_attempts = min(3, store.budget_envelope(final_task)["max_llm_calls"] - final_task.llm_calls)
+            if final_attempts < 1:
+                raise BudgetExceeded("No final independent review call available within task limit")
+            review = await complete(
+                schema=OutputEvaluation,
+                role="reviewer",
+                max_attempts=final_attempts,
+                user=f"{output_rules}\nCheck final result against success criteria; reject any unsupported claim.\nPLAN:{plan.model_dump_json()}\nCONTEXT:{context_json}\nRESULT:{result.model_dump_json()}",
+            )
+            if issues or not review.approved or review.issues:
+                raise ValueError("Final evaluation failed: " + "; ".join(issues + review.issues))
         async with store.sessions() as s, s.begin():
             locked = await s.get(Task, task_id, with_for_update=True)
             if locked.lease_owner != owner or locked.lease_until <= utcnow() or locked.cancel_requested:
