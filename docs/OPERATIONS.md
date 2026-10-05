@@ -83,3 +83,19 @@ Back up Postgres daily and before upgrades using Coolify's database backup facil
 To roll back the factory release, stop task intake, let/cancel active work, retain a backup, and redeploy the previous image/commit against the existing volume. Added DB columns/tables are compatible with V0.1 reads; V0.1 does not understand new statuses, ownership or recovery. Avoid downgrading while V0.2 tasks are active. A backup restore is a separate deliberate data decision; never delete volumes as a troubleshooting shortcut.
 
 For a target application rollback, use a previously validated immutable image/commit in Coolify and assess migration/data compatibility first. The factory never automatically restores a database or rolls back a stateful release.
+
+
+### Chief-of-Staff audit evidence and approval notifications
+
+Audit context includes recent owner/tenant-scoped task summaries, up to four event
+excerpts, three artifact excerpts, and three model-call metadata records per task.
+These are bounded excerpts, not complete `/report` or `/logs` output. Effective
+budget limits reflect the current operator configuration and the task plan; they
+are not proof of historical configuration. Missing provider cost remains explicit.
+Unavailable acceptance proof or root-cause evidence is reported as an evidence gap;
+only questions needed to define the objective, target, or safe authority pause intake.
+A high-risk analysis still pauses for approval of the exact saved plan. Its message
+includes the decision ID, planned steps, risks, and effective budget. Review the
+card before replying `setujui keputusan #ID`; approval grants L0/L1 analysis only.
+Previously paused tasks retain their saved intent until the owner supplies an answer
+and the normal workflow replans. Production acceptance requires live evidence.
