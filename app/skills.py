@@ -27,7 +27,7 @@ class SkillDefinition(BaseModel):
     model_policy: str = "operator-configured bunny-alpha alias; no silent fallback"
     budget_policy: str = "subtask, task and daily operator ceilings; retry never resets usage"
     input_schema: str = "ContextItem[] and WorkItem"
-    output_schema: str = "StaffOutput; engineering also uses DeveloperAction/TestReport/ReviewResult"
+    output_schema: str = "StaffOutput or bounded L0 FactualOutput; engineering also uses DeveloperAction/TestReport/ReviewResult"
     execution_state: str = Field(pattern=r"^(verified|draft_only|disabled)$")
 
 

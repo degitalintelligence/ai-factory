@@ -109,6 +109,19 @@ class StaffOutput(StrictModel):
     next_action: str = Field(min_length=1, max_length=2000)
 
 
+class FactualOutput(StrictModel):
+    """A read-only explanation, without invented operator decisions."""
+
+    summary: str = Field(min_length=1, max_length=2000)
+    evidence_refs: list[str] = Field(min_length=1, max_length=4)
+    confidence: float = Field(ge=0, le=1)
+    missing_information: list[str] = Field(default_factory=list, max_length=3)
+
+    @property
+    def findings(self):
+        return []
+
+
 class OutputEvaluation(StrictModel):
     approved: bool
     issues: list[str] = Field(default_factory=list, max_length=10)
