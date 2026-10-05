@@ -1383,3 +1383,71 @@ async def test_credential_draft_is_not_retained(db, monkeypatch):
     artifacts = await db.artifacts(task.id)
     assert not any(a.kind in {"staff_draft", "staff_final_draft", "staff_result"} for a in artifacts)
     assert not any("syntheticcredential" in a.content for a in artifacts)
+
+
+@pytest.mark.parametrize("mode", ["repair", "invalid", "no_room", "review_reject", "final"])
+async def test_confidence_correction_is_bounded_and_requires_review(db, monkeypatch, mode):
+    import json
+
+    task, source = await setup_goal(db)
+    async with db.sessions() as session, session.begin():
+        card = Decision(
+            owner=7,
+            tenant=settings.tenant_id,
+            category="recommendation",
+            title="Derived finding",
+            situation="Unverified prior audit",
+        )
+        session.add(card)
+        await session.flush()
+        ref = f"decision:{card.id}"
+    if mode == "no_room":
+        await db.update(task.id, requirement=task.requirement + " budget 8 calls")
+    calls = []
+    base = provider(db, f"task:{source.id}", calls)
+    outputs = 0
+    repair_requests = []
+
+    async def complete(**kwargs):
+        nonlocal outputs
+        result = await base(**kwargs)
+        if kwargs["schema"] is StaffPlan and mode == "no_room":
+            result.budget.max_llm_calls = 8
+            for step in result.steps:
+                step.max_llm_calls = 2
+        if kwargs["schema"] is StaffOutput:
+            outputs += 1
+            if "DEFECTS:" in kwargs["user"]:
+                repair_requests.append(kwargs)
+                assert kwargs["max_attempts"] == 1
+                assert "maximum=0.5" in kwargs["user"] and "findings[0]" in kwargs["user"]
+                result = output(ref)
+                if mode != "invalid":
+                    result.summary = "Hipotesis audit belum diverifikasi; perlu bukti langsung."
+                    for finding in result.findings:
+                        finding.confidence = 0.5
+            elif outputs == (3 if mode == "final" else 1):
+                result = output(ref)
+        if kwargs["schema"] is OutputEvaluation and mode == "review_reject":
+            return OutputEvaluation(
+                approved=False, issues=["Hipotesis masih tidak didukung."], summary="Ditolak."
+            )
+        return result
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    saved = await db.get(task.id)
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    original = json.loads(artifacts["confidence_draft"])
+    assert original["output"]["findings"][0]["confidence"] == 0.7
+    assert "maximum=0.5" in original["local_issues"][0]
+    if mode in {"repair", "final"}:
+        assert saved.status == "completed" and saved.llm_calls == 9
+        assert len(repair_requests) == 1 and calls.count("OutputEvaluation") == 3
+    else:
+        assert saved.status == "failed" and "staff_result" not in artifacts
+        assert len(repair_requests) == (0 if mode == "no_room" else 1)
+        assert saved.llm_calls == {"invalid": 4, "no_room": 3, "review_reject": 5}[mode]
+    async with db.sessions() as session:
+        steps = list(await session.scalars(select(Subtask).where(Subtask.task_id == task.id)))
+    assert all(step.calls <= (2 if mode == "no_room" else 3) for step in steps)
