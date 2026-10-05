@@ -212,3 +212,22 @@ Mocked gateway and regression tests do not prove configured-provider output
 quality. Deploy the exact merged SHA, then send the request above as a new goal
 and inspect its response/report before claiming live acceptance. Existing failed
 tasks retain their lifetime budget and saved contracts on retry.
+
+### Preserve the approved factual answer (task #29)
+
+New bounded factual goals use `factual-v2`: one intent call, one answer call,
+and one independent review call before retries. The exact approved answer is
+published without final synthesis or another model rewrite. The local evidence,
+word-limit and credential checks run again before atomic publication, and a saved
+completed subtask must carry an approved, issue-free review. Restart between
+review and publication reuses that exact output/review; it does not regenerate
+the text. This changes the earlier five-call description for new goals only.
+Fresh call allowance is at most charged intake calls plus five, capped by the
+operator. All token/cost/daily/subtask limits remain binding.
+
+Existing saved `factual-v1` plans keep their original workflow and ceilings;
+start a new goal to use v2. Task #29 retained a readable, approved draft, then
+failed when its unnecessary final rewrite was rejected for language corruption.
+That evidence supports removing this extra generation stage for one-step factual
+answers; it does not establish general configured-model language reliability.
+Other staff workflows keep final synthesis and independent review.

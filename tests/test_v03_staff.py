@@ -901,7 +901,7 @@ async def test_factual_contract_focus_review_and_recovery(db, monkeypatch, rejec
     context = json.loads(artifacts["context"])
     assert {i["ref"] for i in context} == {f"task:{source.id}", f"task:{source.id}:evidence"}
     assert "factual_draft" in artifacts and "factual_draft_evaluation" in artifacts
-    assert saved.llm_calls == (3 if rejected else 5)
+    assert saved.llm_calls == 3
     assert "StaffPlan" not in calls
     async with db.sessions() as session:
         cards = list(await session.scalars(select(Decision).where(Decision.task_id == goal.id)))
@@ -916,7 +916,7 @@ async def test_factual_contract_focus_review_and_recovery(db, monkeypatch, rejec
         assert "prioritas" not in staff.render_result(goal.id, result)
         assert "next_action" not in json.loads(artifacts["staff_result"])
         await staff.run_staff_task(goal.id, "worker")
-        assert len(calls) == 5
+        assert len(calls) == 3
 
 
 @pytest.mark.parametrize("scope,owner", [("", 8), ("self", 7)])
@@ -1026,7 +1026,7 @@ async def test_factual_gateway_retries_invalid_json_without_planner(db, monkeypa
     monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")
     await staff.run_staff_task(goal.id, "worker")
     saved = await db.get(goal.id)
-    assert saved.status == "completed" and saved.llm_calls == 6
+    assert saved.status == "completed" and saved.llm_calls == 4
     async with db.sessions() as session:
         step = await session.scalar(select(Subtask).where(Subtask.task_id == goal.id))
         assert step.calls == 3
@@ -1040,7 +1040,7 @@ async def test_factual_operator_ceiling_is_not_raised(db, monkeypatch):
         ChatRequest(message=factual_message(source.id), idempotency_key="low-cap"), 7
     )
     await db.claim("worker")
-    monkeypatch.setattr(settings, "max_llm_calls", 4)
+    monkeypatch.setattr(settings, "max_llm_calls", 2)
     calls = []
 
     async def complete(**kwargs):
@@ -1053,5 +1053,98 @@ async def test_factual_operator_ceiling_is_not_raised(db, monkeypatch):
     saved = await db.get(goal.id)
     assert saved.status == "failed" and saved.llm_calls == 1
     assert calls == [ResolvedIntent]
-    assert StaffPlan.model_validate_json(saved.plan_json).budget.max_llm_calls == 4
+    assert StaffPlan.model_validate_json(saved.plan_json).budget.max_llm_calls == 2
     assert "Plan cannot fit" in saved.last_message
+
+
+@pytest.mark.parametrize("tampered_review", [False, True])
+async def test_factual_reviewed_checkpoint_survives_restart_without_rewrite(db, monkeypatch, tampered_review):
+    from app.staff_schemas import FactualOutput
+    from app.store import TaskStopped
+
+    source = await db.create("Recorded failure", user_id=7)
+    await db.update(source.id, status="failed")
+    goal = await staff.create_intent(
+        ChatRequest(message=factual_message(source.id), idempotency_key="restart-exact"), 7
+    )
+    await db.claim("worker")
+    answer = FactualOutput(
+        summary="Rencana memerlukan 11 panggilan dan melampaui batas 10.",
+        evidence_refs=[f"task:{source.id}"],
+        confidence=1,
+    )
+    calls = []
+
+    async def complete(*, schema, **kwargs):
+        calls.append(schema)
+        await db.reserve_call(*run_context.get(), token_reserve=1, subtask=subtask_context.get())
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective="Satu penyebab", desired_outcome="Penjelasan ringkas")
+        if schema is FactualOutput:
+            return answer
+        return OutputEvaluation(approved=True, summary="Bukti sesuai")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    original_update = db.update
+
+    async def interrupt_update(task_id, *args, **kwargs):
+        if kwargs.get("status") == "reviewing":
+            raise TaskStopped("Simulated interruption after independent review")
+        return await original_update(task_id, *args, **kwargs)
+
+    monkeypatch.setattr(db, "update", interrupt_update)
+    with pytest.raises(TaskStopped):
+        await staff.run_staff_task(goal.id, "worker")
+    assert calls == [ResolvedIntent, FactualOutput, OutputEvaluation]
+    if tampered_review:
+        async with db.sessions() as session, session.begin():
+            row = await session.scalar(select(Subtask).where(Subtask.task_id == goal.id))
+            row.evaluation_json = OutputEvaluation(
+                approved=False, issues=["Unsupported claim"], summary="Rejected"
+            ).model_dump_json()
+    monkeypatch.setattr(db, "update", original_update)
+    await staff.run_staff_task(goal.id, "worker")
+    assert len(calls) == 3
+    artifacts = {a.kind: a.content for a in await db.artifacts(goal.id)}
+    if tampered_review:
+        assert (await db.get(goal.id)).status == "failed" and "staff_result" not in artifacts
+    else:
+        assert (await db.get(goal.id)).status == "completed"
+        assert FactualOutput.model_validate_json(artifacts["staff_result"]) == answer
+        assert artifacts["staff_result"] == artifacts["factual_draft"]
+
+
+async def test_saved_factual_v1_plan_is_not_converted(db, monkeypatch):
+    from app.staff_schemas import FactualOutput
+
+    source = await db.create("Saved evidence", user_id=7)
+    await db.update(source.id, status="failed")
+    goal = await staff.create_intent(
+        ChatRequest(message=factual_message(source.id), idempotency_key="old-v1"), 7
+    )
+    old_plan = plan()
+    old_plan.steps = [old_plan.steps[0]]
+    await db.update(goal.id, plan_json=old_plan.model_dump_json())
+    await db.artifact(goal.id, "output_contract", "factual-v1")
+    await db.claim("worker")
+    calls = []
+
+    async def complete(*, schema, **kwargs):
+        calls.append(schema)
+        await db.reserve_call(*run_context.get(), token_reserve=1, subtask=subtask_context.get())
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective="Satu penyebab", desired_outcome="Penjelasan ringkas")
+        if schema is FactualOutput:
+            return FactualOutput(
+                summary="Tugas gagal berdasarkan bukti yang tersedia.",
+                evidence_refs=[f"task:{source.id}"],
+                confidence=1,
+            )
+        return OutputEvaluation(approved=True, summary="Bukti sesuai")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(goal.id, "worker")
+    saved = await db.get(goal.id)
+    assert saved.status == "completed" and saved.plan_json == old_plan.model_dump_json()
+    assert calls == [ResolvedIntent, FactualOutput, OutputEvaluation, FactualOutput, OutputEvaluation]
+    assert next(a.content for a in await db.artifacts(goal.id) if a.kind == "output_contract") == "factual-v1"
