@@ -99,3 +99,22 @@ includes the decision ID, planned steps, risks, and effective budget. Review the
 card before replying `setujui keputusan #ID`; approval grants L0/L1 analysis only.
 Previously paused tasks retain their saved intent until the owner supplies an answer
 and the normal workflow replans. Production acceptance requires live evidence.
+
+
+### Plan call feasibility
+
+Before approval or staff execution, LioBot counts already consumed task calls,
+two calls per unfinished step (output and independent review), and two final
+calls (synthesis and review). Completed checkpoints with the same execution hash
+are excluded. This is a minimum, not a guarantee of token/cost availability or
+provider retries; runtime task/subtask/daily ceilings remain binding.
+The planner receives call usage and operator limits. A fresh infeasible plan may
+be revised once, only when that extra call and the minimum required skill coverage
+fit. The original requested budget and high-risk approval requirement cannot be
+raised or removed by that revision. An infeasible saved or revised plan stops
+before asking for execution approval. Saved plans are never silently rewritten.
+Approval messages include calls used, minimum remaining calls, and retry headroom.
+Shortened descriptions end with an ellipsis at a word boundary; full plans remain
+available through the existing plan endpoint/Telegram command. All human-facing
+model fields are instructed to use Indonesian; real-provider quality still needs
+live validation.
