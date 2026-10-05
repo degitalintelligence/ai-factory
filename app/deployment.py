@@ -317,3 +317,73 @@ class DeploymentService:
                 )
                 await s.commit()
             return record
+
+    async def reconcile(self, task_id, request, actor):
+        """An explicit operator recovery after inspecting Coolify; never submits a second deploy."""
+        from app.db import AuditLog
+
+        if actor is None:
+            raise ValueError("An authenticated operator is required")
+        from app.security import secret_present
+
+        if secret_present(request.evidence):
+            raise ValueError("Remove credentials from reconciliation evidence")
+        task = await store.get(task_id)
+        if not task or task.user_id != actor or task.tenant != settings.tenant_id:
+            raise ValueError("Task not found")
+        async with self.sessions() as session:
+            previous = await session.scalar(
+                select(AuditLog)
+                .where(
+                    AuditLog.task_id == task_id,
+                    AuditLog.action == "deployment_reconciled",
+                    AuditLog.actor == actor,
+                )
+                .order_by(AuditLog.id.desc())
+            )
+            if previous and previous.detail == request.model_dump_json():
+                return await session.scalar(select(Deployment).where(Deployment.task_id == task_id))
+        policy = settings.projects().get(task.project)
+        if not policy or policy.repo != task.repo:
+            raise ValueError("Project policy does not match the task repository")
+        result = None
+        if request.deployment_uuid:
+            result = await self.coolify("GET", f"deployments/{request.deployment_uuid}")
+            app = await self.coolify("GET", f"applications/{policy.coolify_uuid}")
+            identity = result.get("application_uuid") == policy.coolify_uuid or (
+                app.get("id") is not None and str(result.get("application_id")) == str(app["id"])
+            )
+            if not identity or result.get("commit") != request.approved_sha:
+                raise ValueError(
+                    "Remote deployment does not prove the registered application and approved commit"
+                )
+        async with self.sessions() as s, s.begin():
+            row = await s.get(Task, task_id, with_for_update=True)
+            record = await s.scalar(select(Deployment).where(Deployment.task_id == task_id).with_for_update())
+            if not record or record.commit_sha != request.approved_sha:
+                raise ValueError("Reconciliation must match the durable approved commit")
+            if row.status not in {"deployment_unknown", "deployment_pending", "deploying"}:
+                raise ValueError("Only an unresolved deployment may be reconciled")
+            if record.deployment_uuid and record.deployment_uuid != request.deployment_uuid:
+                raise ValueError("Cannot replace a known deployment UUID or deny its submission")
+            if result is not None:
+                record.deployment_uuid = request.deployment_uuid
+                record.status = str(result.get("status", "unknown"))[:40]
+                new_status = _COOLIFY_TASK_STATUS.get(record.status, "deploying")
+            else:
+                record.status = "not_submitted"
+                new_status = "deployment_failed"
+            record.message = "Operator reconciliation: " + request.evidence
+            await self._advance_task(s, task_id, new_status, record.message)
+            s.add(
+                AuditLog(
+                    tenant=row.tenant,
+                    actor=actor,
+                    task_id=task_id,
+                    scope=row.project,
+                    action="deployment_reconciled",
+                    correlation_id=f"intent-{task_id}",
+                    detail=request.model_dump_json(),
+                )
+            )
+            return record

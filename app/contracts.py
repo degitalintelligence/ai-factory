@@ -30,6 +30,13 @@ async def perform_action(task_id, action, message="", user_id=None):
     action is unknown or not permitted in the task's current state. The acting
     principal is recorded on approval events and decision cards when given.
     """
+    task = await store.get(task_id)
+    if (
+        not task
+        or task.tenant != settings.tenant_id
+        or (user_id is not None and task.user_id is not None and task.user_id != user_id)
+    ):
+        raise ValueError("Task not found or not owned by you")
     if action in DEPLOY_ACTIONS:
         service = DeploymentService()
         if action == "deploy":
@@ -76,6 +83,8 @@ async def create_self_improvement(brief, project, chat_id=None, user_id=None, id
     sensitive areas, so needs_approval is always True and every caller must surface
     the decision card instead of reporting the task as running.
     """
+    if not settings.self_improvement_enabled:
+        raise ValueError("Self-improvement kill switch is active")
     task = await store.create(
         f"Self-improvement: {brief.problem}",
         project,
@@ -98,20 +107,22 @@ async def read_task(task_id, user_id=None):
     return task
 
 
-async def raise_decision(card):
+async def raise_decision(card, owner=None):
     """Record a decision card so every channel reads the same row."""
-    return await store.create_decision(card)
+    return await store.create_decision(card, owner=owner)
 
 
-async def decision_inbox(state=None, project=None, limit=50):
+async def decision_inbox(state=None, project=None, limit=50, owner=None):
     """List pending decisions. Telegram and any dashboard read this same list."""
     await store.expire_stale_decisions()
-    return await store.inbox(state=state, project=project, limit=limit)
+    return await store.inbox(state=state, project=project, limit=limit, owner=owner)
 
 
-async def resolve_decision(decision_id, phrase, user_id=None):
+async def resolve_decision(decision_id, phrase, user_id=None, reason="", delegate_to=None):
     """Answer a decision card. Unknown answers never mutate state."""
-    return await store.resolve_decision(decision_id, phrase, user_id=user_id)
+    return await store.resolve_decision(
+        decision_id, phrase, user_id=user_id, reason=reason, delegate_to=delegate_to
+    )
 
 
 async def context_slice(

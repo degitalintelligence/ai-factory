@@ -170,6 +170,10 @@ class SelfImprovementBrief(BaseModel):
     baseline: str = Field(min_length=1, max_length=4000)
     touched_areas: list[str] = Field(default_factory=list)
     rollback_plan: str = Field(min_length=1, max_length=2000)
+    test_plan: list[str] = Field(default_factory=list, max_length=10)
+    expected_benefit: str = Field(default="", max_length=2000)
+    risk: str = Field(default="", max_length=2000)
+    budget: PlanBudget = Field(default_factory=PlanBudget)
     blast_radius: str = Field(default="", max_length=1000)
     review_date: datetime | None = None
 
@@ -252,6 +256,7 @@ class MemoryView(BaseModel):
     """What an agent is allowed to see. Carries provenance so it can be judged."""
 
     id: int
+    owner: int | None = None
     key: str
     value: str
     scope: str
@@ -279,7 +284,8 @@ class IntentRequest(BaseModel):
     """Channel-neutral natural-language intake for the v0.3 orchestration API."""
 
     objective: str = Field(min_length=5, max_length=20000)
-    project: str = "lab"
+    project: str = ""
+    mode: Literal["analysis", "engineering"] = "analysis"
     idempotency_key: str | None = Field(default=None, max_length=160)
 
 
@@ -332,6 +338,8 @@ class DecisionState(StrEnum):
     REJECTED = "rejected"
     NEEDS_INFO = "needs_info"
     DEFERRED = "deferred"
+    CHANGES_REQUESTED = "changes_requested"
+    DELEGATED = "delegated"
     EXPIRED = "expired"
 
 
@@ -340,6 +348,8 @@ class DecisionOutcome(StrEnum):
     REJECT = "reject"
     ASK = "ask"
     DEFER = "defer"
+    REQUEST_CHANGES = "request_changes"
+    DELEGATE = "delegate"
 
 
 # Natural language answers map to these exact outcomes; anything else is rejected.
@@ -355,6 +365,9 @@ DECISION_PHRASES = {
     "tanya": DecisionOutcome.ASK,
     "defer": DecisionOutcome.DEFER,
     "later": DecisionOutcome.DEFER,
+    "request_changes": DecisionOutcome.REQUEST_CHANGES,
+    "revisi": DecisionOutcome.REQUEST_CHANGES,
+    "delegate": DecisionOutcome.DELEGATE,
     "nanti": DecisionOutcome.DEFER,
 }
 
@@ -363,6 +376,8 @@ OUTCOME_STATE = {
     DecisionOutcome.REJECT: DecisionState.REJECTED,
     DecisionOutcome.ASK: DecisionState.NEEDS_INFO,
     DecisionOutcome.DEFER: DecisionState.DEFERRED,
+    DecisionOutcome.REQUEST_CHANGES: DecisionState.CHANGES_REQUESTED,
+    DecisionOutcome.DELEGATE: DecisionState.DELEGATED,
 }
 
 
@@ -379,6 +394,15 @@ class DecisionRequest(BaseModel):
     task_id: int | None = None
     project: str = Field(default="", max_length=40)
     kind: DecisionMessageType = DecisionMessageType.DECISION_REQUIRED
+    category: Literal[
+        "approval_required",
+        "risk_escalation",
+        "clarification_needed",
+        "blocked",
+        "recommendation",
+        "learning_proposal",
+        "incident",
+    ] = "recommendation"
     title: str = Field(min_length=1, max_length=300)
     situation: str = Field(min_length=1, max_length=4000)
     why_now: str = Field(min_length=1, max_length=2000)

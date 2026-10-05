@@ -127,3 +127,10 @@ V0.2 is a bounded software engine, not an unlimited autonomous team. Source snap
 Deployment validation covers file structure and review, not an actual Docker build of every target. Target CI and post-deployment smoke tests remain necessary. Reported dollar limits are checked between model calls and can overshoot by one call; if a provider omits cost, `/status` marks the total partial and token/call/time limits still apply. Set an OpenRouter key credit limit for a hard spend ceiling.
 
 See [architecture](docs/ARCHITECTURE.md), [operations and upgrade](docs/OPERATIONS.md), and [acceptance/verification](docs/VERIFICATION.md).
+
+## v0.3 Chief-of-Staff candidate
+
+Natural private-chat goals and `POST /v1/chat` now use a bounded, durable skill DAG in the
+existing queue. `/dashboard` provides the shared Decision Inbox, task/evidence views and
+knowledge actions. See [implementation, operating choices and release acceptance](docs/V03_IMPLEMENTATION_AND_ACCEPTANCE.md)
+for deployment recovery, rollback confirmation, budget semantics and the remaining live gates.
