@@ -170,6 +170,10 @@ SKILLS = SkillRegistry(
 
 def select_skills(objective: str) -> list[str]:
     """Choose a conservative proposal set; execution still obeys each skill policy."""
+    from app.audit_scope import readonly_repository_audit
+
+    if readonly_repository_audit(objective):
+        return ["engineering", "product_research"]
     text = objective.lower()
     selected: list[str] = []
     keyword_groups = (

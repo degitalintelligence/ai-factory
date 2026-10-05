@@ -152,7 +152,12 @@ class Settings(BaseSettings):
             or not all(re.fullmatch(r"[a-z0-9_-]{1,40}", k) for k in data)
         ):
             raise ValueError("PROJECTS_JSON must map project aliases to policies")
-        return {k: Project.model_validate(v) for k, v in data.items()}
+        from app.audit_scope import SELF_REPOSITORY
+
+        projects = {k: Project.model_validate(v) for k, v in data.items()}
+        if "self" in projects and projects["self"].repo != SELF_REPOSITORY:
+            raise ValueError(f"Alias self must be explicitly registered as {SELF_REPOSITORY}")
+        return projects
 
     def role_clearance(self) -> dict[str, str]:
         """Which sensitivity each agent role may read.

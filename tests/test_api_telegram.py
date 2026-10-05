@@ -260,7 +260,7 @@ async def test_improve_requires_the_registered_self_target_alias(db, monkeypatch
     assert await db.list() == []
 
     await improve_handler(update_new(104), SimpleNamespace(args=[base + "; project:self"]))
-    assert [(t.project, t.repo) for t in await db.list()] == [("self", "owner/self")]
+    assert [(t.project, t.repo) for t in await db.list()] == [("self", "degitalintelligence/ai-factory")]
 
 
 def update_new(update_id):

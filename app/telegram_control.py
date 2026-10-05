@@ -6,6 +6,7 @@ from functools import wraps
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+from app.audit_scope import repository_audit, target_project
 from app.config import settings
 from app.contracts import (
     create_self_improvement,
@@ -79,7 +80,17 @@ async def projects_handler(update, context):
 @protected
 async def new_handler(update, context):
     raw = " ".join(context.args).strip()
-    project, requirement = (part.strip() for part in raw.split("|", 1)) if "|" in raw else ("lab", raw)
+    if "|" in raw:
+        project, requirement = (part.strip() for part in raw.split("|", 1))
+    else:
+        first, _, remainder = raw.partition(" ")
+        if first in settings.projects() or first == "self":
+            project, requirement = first, remainder.strip()
+        else:
+            project, requirement = "", raw
+    project = target_project(requirement, project, settings.projects())
+    if not project:
+        project = "lab"
     task = await create_task(
         requirement,
         project,
@@ -103,13 +114,39 @@ async def tasks_handler(update, context):
     )
 
 
+async def task_diagnostics(task):
+    artifacts = {a.kind: a.content for a in await store.artifacts(task.id)}
+    skills = json.loads(artifacts.get("resolved_skills", "{}"))
+    if not skills and task.kind != "orchestration":
+        skills = {
+            "selected": ["engineering"],
+            "workflow": "lead/audit" if repository_audit(task.requirement) else "engineering",
+        }
+    context = json.loads(artifacts.get("context", "[]"))
+    refs = [item["ref"] for item in context]
+    if not refs and "baseline" in artifacts:
+        baseline = json.loads(artifacts["baseline"])
+        refs = [
+            f"repo:{task.project}:{task.base_sha}:{item['path']}" for item in baseline.get("inspected", [])
+        ]
+    failure = json.loads(artifacts.get("staff_failure", artifacts.get("failure", "{}")))
+    return (
+        f"Base SHA: {task.base_sha or 'unresolved'}\n"
+        f"Resolved skills: {', '.join(skills.get('steps', skills.get('selected', []))) or 'pending'}\n"
+        f"Workflow: {skills.get('workflow', 'pending')}\n"
+        f"Context references: {', '.join(refs) or 'none'}\n"
+        f"Failure stage: {failure.get('stage', 'not recorded' if task.status == 'failed' else 'none')}"
+    )
+
+
 @protected
 async def status_handler(update, context):
     t = await owned_task(update, context)
+    diagnostics = await task_diagnostics(t)
     cost = f"${t.cost_usd:.4f}" + (" (partial; provider omitted some costs)" if t.cost_incomplete else "")
     await reply(
         update,
-        f"Task #{t.id} [{t.project}]\nRepository: {t.repo}\nStatus: {t.status}\nIteration: {t.iteration}/{settings.max_iterations}\nLLM calls: {t.llm_calls}; tokens: {t.tokens}; reported cost: {cost}\nBranch: {t.branch}\nPR: {t.pr_url or '-'}\nLast: {t.last_message or '-'}",
+        f"Task #{t.id} [{t.project}]\nRepository: {t.repo}\n{diagnostics}\nStatus: {t.status}\nIteration: {t.iteration}/{settings.max_iterations}\nLLM calls: {t.llm_calls}; tokens: {t.tokens}; reported cost: {cost}\nBranch: {t.branch}\nPR: {t.pr_url or '-'}\nLast: {t.last_message or '-'}",
     )
 
 
@@ -132,7 +169,8 @@ async def logs_handler(update, context):
     entries = await store.events(t.id, 12)
     await reply(
         update,
-        "\n\n".join(f"{e.created_at.isoformat()} {e.kind}\n{e.message[:600]}" for e in reversed(entries))
+        f"Repository: {t.repo}\n{await task_diagnostics(t)}\n\n"
+        + "\n\n".join(f"{e.created_at.isoformat()} {e.kind}\n{e.message[:600]}" for e in reversed(entries))
         or "No events",
     )
 
@@ -141,7 +179,7 @@ async def logs_handler(update, context):
 async def report_handler(update, context):
     t = await owned_task(update, context)
     artifacts = await store.artifacts(t.id)
-    report = f"# Task {t.id}\n\nRepository: {t.repo}\nStatus: {t.status}\n\n{t.requirement}\n"
+    report = f"# Task {t.id}\n\nRepository: {t.repo}\n{await task_diagnostics(t)}\nStatus: {t.status}\n\n{t.requirement}\n"
     report += "\n".join(
         f"\n## {a.kind} — {a.created_at.isoformat()}\n\n```\n{a.content}\n```" for a in artifacts
     )

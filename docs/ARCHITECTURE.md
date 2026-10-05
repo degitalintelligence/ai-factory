@@ -62,3 +62,35 @@ A lost deployment response becomes `unknown` and is not blindly retried. This pr
 - Coolify application configuration: https://coolify.io/docs/api/endpoints/applications/get-application-by-uuid
 
 - Ubuntu namespace policy: https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007
+
+## Repository audit target and context
+
+`self` is a reserved alias for `degitalintelligence/ai-factory`. It must be
+explicitly registered in `PROJECTS_JSON`; a conflicting mapping fails closed.
+No default registration or lab fallback grants access to the engine repository.
+Repository audit chat intake resolves one registered project and stores its real
+repository and base branch rather than an unscoped `liobot/<id>` placeholder.
+Conflicting or ambiguous targets require a corrected request.
+
+Before repository audit context gathering, the leased worker verifies and persists
+an exact base commit SHA and an `audit_target` artifact. An explicit commit is
+verified in the target repository; otherwise the current registered base branch
+is resolved once. Retry keeps the locked SHA. Source reads use this SHA, never a
+fresh branch lookup. Missing baseline evidence stops at `baseline_lock` before
+context or model calls. Existing engineering review tasks retain their isolated
+workspace, Lead, mandatory sandbox tests and independent review gates.
+
+Repository audit context includes only the selected repository and project memory.
+Prior tasks and decisions require explicit task references and still obey project,
+owner and tenant filters. Unscoped/global memory and other repositories are excluded.
+Read-only repository audits use the existing `evidence-audit-v1` composite workflow:
+Engineering checks evidence, then Product/Research prepares the decision/report,
+with independent review of both steps. Technical budget diagnostics do not select
+Finance and the Lead model name does not select Sales/CS. This workflow only audits
+available excerpts; it does not establish live runtime readiness or test execution.
+
+`/status`, `/logs` and `/report` expose the target repository, locked base SHA,
+resolved skills/workflow, context references and persisted failure stage. Historical
+records without these artifacts report unresolved/pending/not recorded explicitly.
+Rollback: revert the reviewed change; no schema migration, evidence deletion,
+model-policy change or deployment is part of this fix.

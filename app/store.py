@@ -106,6 +106,9 @@ class Store:
             raise ValueError("Requirement must contain 5–20000 characters")
         if redact(requirement) != requirement:
             raise ValueError("Remove credentials from the requirement; configure them outside the task")
+        from app.audit_scope import target_project
+
+        project = target_project(requirement, project, settings.projects())
         policy = settings.projects().get(project)
         if policy is None:
             raise ValueError("Unknown project alias; use /projects")
