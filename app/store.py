@@ -11,11 +11,16 @@ from app.db import (
     ACTIVE,
     REPOSITORY_RESERVED,
     Artifact,
+    AuditLog,
+    DailyBudget,
     Decision,
     Event,
+    ImprovementProposal,
+    MemoryConflict,
     MemoryItem,
     ModelRun,
     SessionLocal,
+    Subtask,
     Task,
     utcnow,
 )
@@ -152,6 +157,7 @@ class Store:
                         f"{running.status} on {policy.repo}"
                     )
                 task = Task(
+                    tenant=settings.tenant_id,
                     requirement=requirement,
                     kind=kind,
                     project=project,
@@ -195,7 +201,9 @@ class Store:
 
     async def list(self, limit=20, user_id=None):
         async with self.sessions() as s:
-            query = select(Task).order_by(Task.id.desc()).limit(limit)
+            query = (
+                select(Task).where(Task.tenant == settings.tenant_id).order_by(Task.id.desc()).limit(limit)
+            )
             if user_id is not None:
                 query = query.where(Task.user_id == user_id)
             return list(await s.scalars(query))
@@ -214,8 +222,17 @@ class Store:
                 await s.scalars(select(Artifact).where(Artifact.task_id == task_id).order_by(Artifact.id))
             )
 
-    async def artifact(self, task_id, kind, content):
+    async def artifact(self, task_id, kind, content, owner=None):
         async with self.sessions() as s:
+            if owner:
+                task = await s.get(Task, task_id, with_for_update=True)
+                if (
+                    not task
+                    or task.lease_owner != owner
+                    or task.lease_until <= utcnow()
+                    or task.cancel_requested
+                ):
+                    raise TaskStopped("Worker lease lost")
             s.add(Artifact(task_id=task_id, kind=kind, content=redact(content)))
             await s.commit()
 
@@ -247,6 +264,8 @@ class Store:
             or task.lease_until <= utcnow()
         ):
             raise TaskStopped("Task cancelled or worker lease lost")
+        if task.kind == "self_improvement" and not settings.self_improvement_enabled:
+            raise TaskStopped("Self-improvement kill switch is active")
         return task
 
     async def claim(self, owner):
@@ -303,6 +322,7 @@ class Store:
                 select(candidate)
                 .where(
                     candidate.status == "received",
+                    or_(candidate.kind != "self_improvement", settings.self_improvement_enabled),
                     candidate.cancel_requested.is_(False),
                     # A task without a branch is a half-written intake; refuse to execute it.
                     candidate.branch.is_not(None),
@@ -432,7 +452,7 @@ class Store:
             "degradation": self._degradation_plan(task, envelope),
         }
 
-    async def reserve_call(self, task_id, owner, token_reserve=None):
+    async def reserve_call(self, task_id, owner, token_reserve=None, subtask=None):
         task = await self.check(task_id, owner)
         envelope = self.budget_envelope(task)
         if (
@@ -445,7 +465,61 @@ class Store:
                 "or obtain an approved policy change. /retry does not reset lifetime usage."
             )
         before = self._budget_ratio(task, envelope)
-        await self.update(task_id, owner, llm_calls=task.llm_calls + 1)
+        async with self.sessions() as session, session.begin():
+            # The tenant lock serializes daily accounting across different tasks/workers.
+            if session.bind.dialect.name == "postgresql":
+                lock = int.from_bytes(hashlib.sha256(task.tenant.encode()).digest()[:8], "big", signed=True)
+                await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock})
+            current = await session.get(Task, task_id, with_for_update=True)
+            if current.lease_owner != owner or current.lease_until <= utcnow() or current.cancel_requested:
+                raise TaskStopped("Worker lease lost")
+            if current.llm_calls >= envelope["max_llm_calls"]:
+                raise BudgetExceeded("Task lifetime model-call budget exhausted")
+            key = f"{task.tenant}:{utcnow().date().isoformat()}"
+            daily = await session.get(DailyBudget, key, with_for_update=True)
+            if not daily:
+                daily = DailyBudget(id=key, calls=0, reserved_tokens=0, cost_usd=0.0)
+                session.add(daily)
+            reserve = token_reserve or settings.max_output_tokens
+            if (
+                daily.calls >= settings.global_max_llm_calls_per_day
+                or daily.reserved_tokens + reserve > settings.global_max_tokens_per_day
+                or daily.cost_usd >= settings.global_max_cost_usd_per_day
+            ):
+                raise BudgetExceeded("Tenant daily model budget exhausted")
+            if subtask:
+                row = await session.get(Subtask, subtask[0], with_for_update=True)
+                if not row or row.task_id != task_id or row.calls >= subtask[1]:
+                    raise BudgetExceeded("Subtask lifetime model-call budget exhausted")
+                row.calls += 1
+            global_before = max(
+                daily.calls / settings.global_max_llm_calls_per_day,
+                daily.reserved_tokens / settings.global_max_tokens_per_day,
+                daily.cost_usd / settings.global_max_cost_usd_per_day,
+            )
+            daily.calls += 1
+            daily.reserved_tokens += reserve
+            current.llm_calls += 1
+            global_after = max(
+                daily.calls / settings.global_max_llm_calls_per_day,
+                daily.reserved_tokens / settings.global_max_tokens_per_day,
+                daily.cost_usd / settings.global_max_cost_usd_per_day,
+            )
+            for threshold in BUDGET_WARNING_THRESHOLDS:
+                if global_before < threshold <= global_after:
+                    message = f"Tenant daily budget warning {int(threshold * 100)}%: narrow new goals; every attempt consumes conservative token reservation. No budget reset."
+                    session.add(Event(task_id=task_id, kind="budget_warning", message=message))
+                    session.add(
+                        AuditLog(
+                            tenant=task.tenant,
+                            actor=task.user_id,
+                            task_id=task_id,
+                            scope=task.project,
+                            action="global_budget_warning",
+                            correlation_id=key,
+                            detail=message,
+                        )
+                    )
         await self._emit_budget_warnings(task_id, owner, before, await self.get(task_id))
 
     async def record_usage(self, task_id, owner, tokens, cost):
@@ -459,6 +533,12 @@ class Store:
             cost_usd=task.cost_usd + (cost or 0),
             cost_incomplete=task.cost_incomplete or cost is None,
         )
+        async with self.sessions() as session, session.begin():
+            daily = await session.get(
+                DailyBudget, f"{task.tenant}:{utcnow().date().isoformat()}", with_for_update=True
+            )
+            if daily:
+                daily.cost_usd += cost or 0
         await self._emit_budget_warnings(task_id, owner, before, await self.get(task_id))
 
     async def record_model_run(
@@ -504,6 +584,28 @@ class Store:
                     latency_ms=latency_ms,
                 )
             )
+            task = await s.get(Task, task_id)
+            if task:
+                s.add(
+                    AuditLog(
+                        tenant=task.tenant,
+                        actor=task.user_id,
+                        task_id=task_id,
+                        scope=task.project,
+                        action="model_call",
+                        correlation_id=f"intent-{task_id}",
+                        detail=json.dumps(
+                            {
+                                "role": role,
+                                "model": model,
+                                "alias": model_alias,
+                                "prompt_sha256": prompt_sha256,
+                                "attempt": attempt,
+                                "outcome": outcome,
+                            }
+                        ),
+                    )
+                )
             await s.commit()
 
     async def model_runs(self, task_id, limit=200):
@@ -619,6 +721,8 @@ class Store:
             task.requirement += "\n\nUser clarification:\n" + message[:10000]
             task.plan_json = None
             task.approved_plan_hash = None
+            if task.kind == "orchestration" and message.strip() in settings.projects():
+                task.project = message.strip()
         elif action == "feedback":
             if task.status != "pr_created" or not message.strip():
                 raise ValueError("Feedback requires a published PR and a message")
@@ -653,11 +757,14 @@ class Store:
         async with self.sessions() as s, s.begin():
             await self._apply_resume(s, task_id, action, message, user_id=user_id)
 
-    async def create_decision(self, card):
+    async def create_decision(self, card, owner=None):
         """Persist a decision card. It never lives only in a channel message."""
         async with self.sessions() as s, s.begin():
             decision = Decision(
                 task_id=card.task_id,
+                tenant=settings.tenant_id,
+                owner=owner,
+                category=card.category,
                 project=card.project,
                 kind=card.kind,
                 title=card.title,
@@ -733,6 +840,9 @@ class Store:
                 task_id=task.id,
                 project=task.project,
                 kind=DecisionMessageType.APPROVAL_REQUIRED,
+                category="approval_required",
+                tenant=task.tenant,
+                owner=task.user_id,
                 title=f"Approve task #{task.id}: {reason}",
                 situation=redact(task.requirement),
                 why_now="The task is gated before code execution because its plan requires Dedi approval.",
@@ -781,10 +891,26 @@ class Store:
             await s.refresh(decision)
             return decision
 
-    async def inbox(self, state=None, project=None, limit=50):
+    async def inbox(self, state=None, project=None, limit=50, owner=None):
         """List decisions newest first, filtered by state/project for the operator inbox."""
         async with self.sessions() as s:
-            query = select(Decision).order_by(Decision.id.desc()).limit(limit)
+            query = (
+                select(Decision)
+                .where(Decision.tenant == settings.tenant_id)
+                .order_by(Decision.id.desc())
+                .limit(limit)
+            )
+            if owner is not None:
+                query = query.where(
+                    or_(
+                        Decision.owner == owner,
+                        (
+                            Decision.owner.is_(None)
+                            & Decision.task_id.in_(select(Task.id).where(Task.user_id == owner))
+                        ),
+                        (Decision.owner.is_(None) & Decision.task_id.is_(None)),
+                    )
+                )
             if state:
                 query = query.where(Decision.state == str(state))
             if project:
@@ -812,7 +938,7 @@ class Store:
                 await s.flush()
             return len(rows)
 
-    async def resolve_decision(self, decision_id, phrase, user_id=None):
+    async def resolve_decision(self, decision_id, phrase, user_id=None, reason="", delegate_to=None):
         """Apply one decision outcome. Idempotent and auditable.
 
         A repeated identical answer returns the stored decision without changing
@@ -826,10 +952,28 @@ class Store:
         if not outcome:
             raise ValueError("Answer with one of: approve, reject, ask, defer")
         target = OUTCOME_STATE[outcome]
+        if outcome.value in {"request_changes", "delegate"} and not reason.strip():
+            raise ValueError("Request changes and delegation require a reason")
+        if outcome.value == "delegate" and delegate_to not in settings.allowed_users():
+            raise ValueError("Delegation target must be an authorized operator")
+        if secret_present(reason):
+            raise ValueError("Remove credentials from the decision reason")
         async with self.sessions() as s:
             decision = await s.get(Decision, decision_id, with_for_update=True)
             if not decision:
                 raise ValueError("Decision not found")
+            if user_id is not None and decision.owner is not None and decision.owner != user_id:
+                raise ValueError("Decision not found or not owned by you")
+            if decision.tenant != settings.tenant_id:
+                raise ValueError("Decision not found")
+            if decision.task_id and user_id is not None:
+                linked = await s.get(Task, decision.task_id)
+                if (
+                    not linked
+                    or linked.tenant != settings.tenant_id
+                    or (linked.user_id is not None and linked.user_id != user_id)
+                ):
+                    raise ValueError("Decision not found or not owned by you")
             if decision.state != DecisionState.OPEN:
                 if decision.state == target:
                     return decision
@@ -841,7 +985,30 @@ class Store:
                 await self._close_decision(s, decision, DecisionState.EXPIRED, user_id)
                 await s.commit()
                 raise ValueError("Decision expired; request a new one")
+            if target == DecisionState.DELEGATED and decision.kind == "APPROVAL_REQUIRED":
+                raise ValueError("Execution approvals cannot be delegated")
+            decision.decision_note = reason or None
             await self._close_decision(s, decision, target, user_id)
+            if target == DecisionState.DELEGATED:
+                # Hand the question to another operator, never widen execution authority.
+                clone = Decision(
+                    tenant=decision.tenant,
+                    owner=delegate_to,
+                    project=decision.project,
+                    category=decision.category,
+                    title=decision.title,
+                    situation=decision.situation,
+                    why_now=decision.why_now,
+                    options_json=decision.options_json,
+                    evidence_json=decision.evidence_json,
+                    recommendation=decision.recommendation,
+                    required_action=decision.required_action,
+                    rollback=decision.rollback,
+                    risk_level=decision.risk_level,
+                    priority=decision.priority,
+                    decision_note=f"Delegated from decision:{decision.id}: {reason}",
+                )
+                s.add(clone)
             await s.commit()
             await s.refresh(decision)
             return decision
@@ -853,6 +1020,21 @@ class Store:
         Shared by resolve_decision, expiry, and direct plan-hash approvals so every
         closer records the same decided_by/decided_at fields and the same event.
         """
+        session.add(
+            AuditLog(
+                tenant=decision.tenant,
+                actor=user_id,
+                task_id=decision.task_id,
+                scope=decision.project,
+                action="decision_action",
+                correlation_id=f"decision-{decision.id}",
+                detail=redact(
+                    json.dumps(
+                        {"decision_id": decision.id, "outcome": str(target), "reason": decision.decision_note}
+                    )
+                ),
+            )
+        )
         decision.state = target
         decision.decided_by = user_id
         decision.decided_at = utcnow()
@@ -902,7 +1084,7 @@ class Store:
             )
         # close_card=False: this card is the one being resolved; re-running the
         # card close here would duplicate the decision event.
-        await self._apply_resume(session, task_id, "approve", digest[:12], close_card=False)
+        await self._apply_resume(session, task_id, "approve", digest[:12], user_id=user_id, close_card=False)
 
     @staticmethod
     def _card_plan_digest(decision):
@@ -918,7 +1100,14 @@ class Store:
 
     # --- Context and Memory Plane ---
 
-    async def record_outcome(self, task_id, outcome: ImprovementOutcome, tenant=DEFAULT_TENANT):
+    async def record_outcome(
+        self,
+        task_id,
+        outcome: ImprovementOutcome,
+        tenant=DEFAULT_TENANT,
+        rollback_confirmation=None,
+        actor=None,
+    ):
         """Measure a completed self-improvement and retain the lesson (requirement v0.3 §9).
 
         The improvement cycle ends with Observe outcome → Rollback atau retain, not at the
@@ -954,9 +1143,13 @@ class Store:
             task = await s.get(Task, task_id, with_for_update=True)
             if not task:
                 raise ValueError("Task not found")
+            if task.tenant != tenant or (
+                actor is not None and task.user_id is not None and task.user_id != actor
+            ):
+                raise ValueError("Task not found")
             if task.kind != "self_improvement":
                 raise ValueError("Outcomes are recorded on self_improvement tasks only")
-            if task.status != "completed":
+            if task.status not in {"completed", "deployed"}:
                 raise ValueError(f"Task #{task_id} is {task.status}; measure the outcome after completion")
             existing = await s.scalar(
                 select(Artifact).where(Artifact.task_id == task_id, Artifact.kind == "improvement_outcome")
@@ -965,6 +1158,27 @@ class Store:
                 raise ValueError(
                     "An outcome is already recorded for this task; a revised measurement "
                     "belongs in a new self-improvement task"
+                )
+            if outcome.conclusion == "rollback" and rollback_confirmation is None:
+                raise ValueError("Rollback confirmation required before recording final outcome")
+            if outcome.conclusion == "rollback" and existing is None:
+                s.add(
+                    Artifact(
+                        task_id=task_id,
+                        kind="rollback_confirmation",
+                        content=redact(json.dumps(rollback_confirmation)),
+                    )
+                )
+                s.add(
+                    AuditLog(
+                        tenant=tenant,
+                        actor=actor,
+                        task_id=task_id,
+                        scope=task.project,
+                        action="rollback_confirmed",
+                        correlation_id=f"intent-{task_id}",
+                        detail=redact(json.dumps(rollback_confirmation)),
+                    )
                 )
             if existing is not None:
                 # A repeated identical measurement is the same one action: return the
@@ -981,7 +1195,7 @@ class Store:
                 if retained is not None and retained.value == value:
                     return retained
             try:
-                row = await self._remember(s, lesson, task_id=task_id, tenant=tenant)
+                row = await self._remember(s, lesson, owner=task.user_id, task_id=task_id, tenant=tenant)
             except IntegrityError as exc:
                 raise ValueError(f"Memory '{key}' was stored concurrently; retry") from exc
             if existing is None:
@@ -995,6 +1209,24 @@ class Store:
                         ),
                     )
                 )
+            proposals = await s.scalars(
+                select(ImprovementProposal).where(
+                    ImprovementProposal.task_id == task_id, ImprovementProposal.tenant == tenant
+                )
+            )
+            for proposal in proposals:
+                proposal.status = "retained" if outcome.conclusion == "retain" else "rolled_back"
+            s.add(
+                AuditLog(
+                    tenant=tenant,
+                    actor=actor,
+                    task_id=task_id,
+                    scope=task.project,
+                    action="improvement_outcome",
+                    correlation_id=f"intent-{task_id}",
+                    detail=payload,
+                )
+            )
             # Falling through with an existing artifact means the lesson was left
             # missing by an older partial write; _remember repairs it in this same
             # transaction without adding a duplicate artifact or event.
@@ -1041,7 +1273,13 @@ class Store:
         )
         # A contradictory value for the same key is a conflict, not a silent overwrite.
         if any(p.value != item.value for p in previous):
-            raise ValueError(f"Memory '{item.key}' already holds a different value; correct it explicitly")
+            raise ValueError(
+                f"Memory '{item.key}' Memory conflict: already holds a different value; correct it explicitly"
+            )
+        if any(p.owner is not None and p.owner != owner for p in previous):
+            raise ValueError("Memory not owned by you")
+        if any(p.locked for p in previous):
+            raise ValueError("Memory is locked; use explicit correction")
         if previous:
             for row in previous:
                 row.state = MemoryState.SUPERSEDED
@@ -1068,6 +1306,17 @@ class Store:
             expires_at=item.expires_at,
         )
         session.add(row)
+        session.add(
+            AuditLog(
+                tenant=tenant,
+                actor=owner,
+                task_id=task_id,
+                scope=item.scope,
+                action="memory_written",
+                correlation_id=f"memory:{item.key}:v{version}",
+                detail=redact(item.source),
+            )
+        )
         if task_id:
             session.add(
                 Event(
@@ -1109,6 +1358,21 @@ class Store:
         allowed = [r for r in rows if CLEARANCE.get(r.sensitivity, 0) <= clearance]
         now = utcnow()
         views = [self._view(r, now) for r in allowed[:limit]]
+        async with self.sessions() as session:
+            conflicts = set(
+                await session.scalars(
+                    select(MemoryConflict.memory_id).where(
+                        MemoryConflict.tenant == tenant,
+                        MemoryConflict.state == "open",
+                        MemoryConflict.memory_id.in_([v.id for v in views]),
+                        or_(MemoryConflict.owner == owner, MemoryConflict.owner.is_(None)),
+                    )
+                )
+            )
+        for view in views:
+            if view.id in conflicts:
+                view.label = "conflict"
+                view.confidence = min(view.confidence, 0.49)
         return views, len(allowed) > limit
 
     @staticmethod
@@ -1117,6 +1381,7 @@ class Store:
         label = "stale" if stale else ("unverified" if row.confidence < 0.5 else "current")
         return MemoryView(
             id=row.id,
+            owner=row.owner,
             key=row.key,
             value=row.value,
             scope=row.scope,
@@ -1170,6 +1435,27 @@ class Store:
             # message below must not touch it again.
             key = row.key
             s.add(replacement)
+            conflicts = await s.scalars(
+                select(MemoryConflict).where(
+                    MemoryConflict.memory_id == memory_id,
+                    MemoryConflict.tenant == tenant,
+                    MemoryConflict.owner == owner,
+                    MemoryConflict.state == "open",
+                )
+            )
+            for conflict in conflicts:
+                conflict.state = "resolved"
+            s.add(
+                AuditLog(
+                    tenant=tenant,
+                    actor=owner,
+                    task_id=task_id,
+                    scope=row.scope,
+                    action="memory_corrected",
+                    correlation_id=f"memory:{memory_id}",
+                    detail=redact(source),
+                )
+            )
             if task_id:
                 s.add(
                     Event(
@@ -1197,6 +1483,17 @@ class Store:
             if row.owner is not None and owner != row.owner:
                 raise ValueError("Only the memory owner can retract this memory")
             row.state = MemoryState.RETRACTED
+            s.add(
+                AuditLog(
+                    tenant=tenant,
+                    actor=owner,
+                    task_id=task_id,
+                    scope=row.scope,
+                    action="memory_retracted",
+                    correlation_id=f"memory:{memory_id}",
+                    detail=redact(reason),
+                )
+            )
             if task_id:
                 s.add(
                     Event(
@@ -1232,6 +1529,17 @@ class Store:
             if row.locked:
                 return row  # A repeated lock request is one action, not an error.
             row.locked = True
+            s.add(
+                AuditLog(
+                    tenant=tenant,
+                    actor=owner,
+                    task_id=task_id,
+                    scope=row.scope,
+                    action="memory_locked",
+                    correlation_id=f"memory:{memory_id}",
+                    detail=redact(reason),
+                )
+            )
             if row.owner is None:
                 row.owner = owner
             if task_id:
