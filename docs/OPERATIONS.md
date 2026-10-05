@@ -302,3 +302,26 @@ Limits, model configuration, budgets and mandatory review are unchanged. Invalid
 responses are still rejected, not trimmed or published. Mock gateway tests cover
 both top-level finding overflow and nested reference overflow, recovery within
 two charged calls and repeated-invalid failure. Live success remains unverified.
+
+### Audit completion versus evidence quality (task #35)
+
+Task #35 completed the live read-only audit in eight calls, but its accepted
+findings reused schema/review failures as token-limit evidence and cited
+automatically generated recurring-budget counts as facts. Completion is evidence
+of workflow execution, not proof that every diagnosis is correct.
+
+The recurring-failure detector previously matched any `budget` mention in a
+failure message, including the standard `Budget tidak direset` suffix. New
+`failure-v2` proposals classify by the latest structured `staff_failure` category;
+legacy tasks without this artifact use explicit engine failure prefixes. Other
+mentions in failure details or suffixes do not establish budget exhaustion.
+Proposals retain every counted task ref, state the latest-50-failed-task window,
+and do not claim a success rate or proven root cause. Fingerprints include the
+classifier version; repeated detection of the same classified set is idempotent.
+
+Old proposals and decisions remain historical records. Generated learning and
+recommendation cards enter audit context as unverified derived claims with a
+confidence ceiling, including a warning about legacy budget counts. Direct task
+diagnostics remain current evidence. Prompts require checking those diagnostics
+and distinguishing schema/review rejection, token truncation and budget stops.
+No migration, model change, budget increase or review bypass is introduced.
