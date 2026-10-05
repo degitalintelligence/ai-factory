@@ -11,6 +11,21 @@ from app.db import Deployment, Event, SessionLocal, Task
 from app.github_api import GitHubAPI
 from app.store import store
 
+# Coolify's own deployment outcome mapped onto the durable task lifecycle. In-flight
+# statuses (queued, in_progress, ...) keep the task deploying; a Coolify report that
+# cannot prove the right commit keeps the task in deployment_unknown.
+_COOLIFY_TASK_STATUS = {
+    "finished": "deployed",
+    "failed": "deployment_failed",
+    "cancelled": "deployment_failed",
+    "error": "deployment_failed",
+    "unverified_commit": "deployment_unknown",
+    "commit_mismatch": "deployment_unknown",
+}
+# Task states an explicit /deployment reconciliation may still move. Deployed and
+# deployment_failed are terminal; no reconciliation reopens them.
+_RECONCILABLE = {"pr_created", "deployment_pending", "deploying", "deployment_unknown"}
+
 
 class DeploymentService:
     def __init__(self, github=None, client=None, sessions=SessionLocal):
@@ -81,6 +96,24 @@ class DeploymentService:
     async def _existing_record(self, task_id):
         async with self.sessions() as s:
             return await s.scalar(select(Deployment).where(Deployment.task_id == task_id))
+
+    @staticmethod
+    async def _advance_task(session, task_id, new_status, message):
+        """Move the parent task to a deployment lifecycle state in the caller's transaction.
+
+        Terminal deployment outcomes are never reopened: once deployed or
+        deployment_failed, a reconciliation updates only the deployment record and
+        events, never the task status.
+        """
+        row = await session.get(Task, task_id, with_for_update=True)
+        if not row or row.status == new_status or row.status not in _RECONCILABLE:
+            return
+        row.status = new_status
+        row.last_message = message
+        row.cancel_requested = False
+        row.lease_owner = None
+        row.lease_until = None
+        session.add(Event(task_id=task_id, kind="deployment_status", message=message))
 
     async def _record_publication(self, task, approved_sha):
         """Acknowledge a merged PR for a project with no deployment target."""
@@ -181,6 +214,13 @@ class DeploymentService:
         return await store.supersede(task_id, note)
 
     async def deploy(self, task_id, approved_sha):
+        task = await store.get(task_id)
+        existing = await self._existing_record(task_id)
+        # A durable deployment record always means a submission already happened or is
+        # in flight: no later validation path may create a second one. (For a completed
+        # publication the record is the acknowledgement itself, not a submission.)
+        if existing and task and task.status != "completed":
+            raise ValueError("Deployment already requested; use /deployment to reconcile")
         task, policy = await self._validated_release(task_id, approved_sha)
         # Backward-compatible alias: /deploy can acknowledge a merged PR when the
         # project policy explicitly says it has no deployment target.
@@ -198,7 +238,17 @@ class DeploymentService:
         async with self.sessions() as s:
             record = Deployment(task_id=task_id, commit_sha=approved_sha)
             s.add(record)
+            task_row = await s.get(Task, task_id, with_for_update=True)
+            if not task_row or task_row.status != "pr_created":
+                await s.rollback()
+                raise ValueError("Release requires a reviewed, published PR task")
             try:
+                await self._advance_task(
+                    s,
+                    task_id,
+                    "deployment_pending",
+                    f"Deployment requested for approved commit {approved_sha}; submission pending.",
+                )
                 await s.commit()
             except IntegrityError:
                 await s.rollback()
@@ -219,9 +269,16 @@ class DeploymentService:
                 record.deployment_uuid = deployments[0]["deployment_uuid"]
                 record.status = "queued"
                 record.message = "Submitted to Coolify; deployment success is not yet verified"
+                await self._advance_task(
+                    s,
+                    task_id,
+                    "deploying",
+                    f"Deployment submitted to Coolify ({record.deployment_uuid}); success not yet verified.",
+                )
             except Exception:
                 record.status = "unknown"
                 record.message = "Submission outcome uncertain. Inspect Coolify before any manual retry."
+                await self._advance_task(s, task_id, "deployment_unknown", record.message)
                 await s.commit()
                 raise
             await s.commit()
@@ -252,5 +309,11 @@ class DeploymentService:
                     record.message = (
                         "Coolify-reported status; validate application health and acceptance smoke tests"
                     )
+                await self._advance_task(
+                    s,
+                    task_id,
+                    _COOLIFY_TASK_STATUS.get(record.status, "deploying"),
+                    f"Deployment reconciliation: {record.status}. {record.message}",
+                )
                 await s.commit()
             return record

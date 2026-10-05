@@ -40,8 +40,9 @@ that carries this document.
 ## 0. Remediation status — 2026-10-04
 
 Python 3.12.10 was installed, `.venv` created from `requirements-dev.txt`, and the suite was
-executed. **All five blockers, H1, H3 through H7, and M1 through M7 are fixed, committed, and
-covered by regression tests.** The findings below are retained unchanged as the original
+executed. **All five blockers, H1, H3 through H9, and M1 through M7 are fixed and committed.
+Every behavioural fix carries regression tests; H9 is a wording-only change with no behaviour
+to test.** The findings below are retained unchanged as the original
 record; this section is the current state.
 
 | ID | Status | Commit | Regression coverage |
@@ -65,14 +66,15 @@ record; this section is the current state.
 | M5 | FIXED | `cefd723` | `tests/test_context_assembly.py`: memory reaches the lead prompt with id/version/source/evidence/confidence and a trust-boundary header, tenant and owner isolation, character budget truncation, baseline `memory_slice_sha256`/`context_sha256` |
 | M6 | FIXED | `cefd723` | `tests/test_budget.py`: plan budget can only lower the operator ceiling, warnings at 60/80/95 fire exactly once, degradation plan names the remedy, `budget_status()` reports the binding envelope, retry retains lifetime usage, token reserve alone can exhaust |
 | M7 | FIXED | `cefd723` | `tests/test_migration_ledger.py`: ordered ledger with per-step SQL checksums, a second startup neither re-applies nor duplicates, checksum drift is reported and left untouched, a v0.1 database gains the ledger without losing rows |
-| H8, H9 | OPEN | — | Not started (deployment lifecycle states on the task; static-check wording vs. real deployment evidence) |
+| H8 | FIXED | this branch | `test_deploy_transitions_task_to_deployment_pending_then_deploying`, `test_ambiguous_submission_leaves_task_deployment_unknown`, `test_reconciliation_maps_coolify_outcomes_to_task_states`, `test_deployed_task_is_terminal_against_later_reconciliation`, `test_unprovable_commits_stay_deployment_unknown`, `test_cancel_rejects_deployment_states` (5 states), `test_in_flight_deployment_reserves_the_repository` |
+| H9 | FIXED | this branch | Wording-only (see note below); full suite re-run green |
 
 Verification at the tip of this branch:
 
 ```text
 ruff check app sandbox tests scripts          -> All checks passed
 ruff format --check app sandbox tests scripts -> 45 files already formatted
-python -m pytest -q                           -> 286 passed, 3 skipped
+python -m pytest -q                           -> 317 passed, 3 skipped
 ```
 
 The 3 skips are deliberate, not failures: the two PostgreSQL integration tests
@@ -120,6 +122,32 @@ deliberately does **not** compare `policy_json`: the policy snapshot is server-s
 that may legitimately change between two identical retries, and a stale task is stopped by
 the existing policy-revocation check rather than by refusing the retry. This is a deliberate
 narrowing of finding H2 and is recorded here rather than silently dropped.
+
+**H8 wires the deployment lifecycle onto the task.** `TaskStatus` now defines
+`deployment_pending`, `deploying`, `deployed`, `deployment_unknown`, `deployment_failed`,
+plus the publication outcomes `completed`, `superseded`, and `reviewed`. Because status is a
+`String(32)` column, adding enum values is additive and needs no DDL. `DeploymentService`
+advances the parent task in the same transaction as the deployment record:
+`deployment_pending` on a validated submission, `deploying` after Coolify accepts it, and
+`deployment_unknown` when the outcome is ambiguous. Reconciliation maps Coolify statuses
+through an explicit table (`finished → deployed`, `failed/cancelled/error →
+deployment_failed`, `unverified_commit/commit_mismatch → deployment_unknown`), and
+`_advance_task()` only moves a task that is still in a reconcilable state, so terminal
+`deployed`/`deployment_failed` are never reopened and `deployment_unknown` still cannot
+auto-retry — only an explicit `/deployment` reconciliation moves it (`AGENTS.md` §10).
+The at-most-once guarantee no longer depends on task status plus an `IntegrityError`:
+`deploy()` checks the durable deployment record first and refuses a second submission with
+"already requested". In-flight deployment states join the shared reserved set, so they block
+a second task on the same repository, while `deployed`/`deployment_failed` release the
+reservation. `cancel()` refuses deployment states with direction to `/deployment` and
+refuses to undo a terminal deployment.
+
+**H9 aligns the wording with the evidence.** The `deployment_issues` gate docstring now
+states it is a static structure-and-policy gate that proves nothing about a real image
+build, boot, or health check, and the published PR body says the same: deployment files are
+only statically checked, nothing was built or booted, and a live deployment is a separate
+explicit operator action reconciled with `/deployment`. `README.md` and the operator
+contract messages already described this honestly and were left unchanged.
 
 **Not verified locally.** Docker is unavailable on the review machine, so the real sandbox
 smoke test, AppArmor profile checks, namespace probes, Compose validation, and both image
@@ -614,10 +642,10 @@ than a silent rename.
 ## 8. Recommended remediation order
 
 > **Status 2026-10-04:** steps 1–5 (all blockers plus H2's deliberate `policy_json`
-> exclusion) and the hardening batch (H3–H7) are complete and committed. The M1–M7 medium
-> batch is also complete (`cefd723`, hotfix `64248a9`). The remaining open items are H8
-> (deployment lifecycle states on the task) and H9 (static-check wording), plus the open
-> decisions in section 9.
+> exclusion), the hardening batch (H3–H7), and the M1–M7 medium batch (`cefd723`, hotfix
+> `64248a9`) are complete and committed. H8 and H9 are also fixed on this branch: the task
+> now carries the full deployment lifecycle, and deployment wording matches the static
+> evidence. The remaining open items are the open decisions in section 9.
 
 Each step is independently reviewable and reversible. Steps 1–5 are the blockers.
 

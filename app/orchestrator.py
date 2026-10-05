@@ -174,7 +174,9 @@ async def run_task(task_id, notify=None, owner=None):
                 f"## Independent review\n```json\n{review}\n```\n\n## Test evidence\n```json\n{tests}\n```\n\n"
                 f"Reviewed source digest: `{digest}`\n\nCommit: `{sha}`\n\n"
                 "Deterministic tests, acceptance mapping, source integrity and hygiene gates passed. "
-                "Deployment files are statically checked when required. A live deployment is a separate explicit action."
+                "Deployment files, when required, were only statically checked for structure and "
+                "policy; nothing was built, booted, or verified against a live deployment. "
+                "A live deployment is a separate explicit operator action, reconciled with /deployment."
             )
             if task.plan_json:
                 # Read the durable plan; publication reconciliation runs before plan is parsed below.

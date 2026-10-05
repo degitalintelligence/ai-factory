@@ -517,6 +517,17 @@ class Store:
                 raise ValueError("Superseded task is terminal; create a fresh task")
             if task.status in {"pr_created", "completed"}:
                 raise ValueError("Published task is terminal; cancellation cannot undo publication")
+            if task.status in {"deployment_pending", "deploying", "deployment_unknown"}:
+                raise ValueError(
+                    "Deployment was already submitted; cancellation cannot stop Coolify. "
+                    "Use /deployment to reconcile it."
+                )
+            if task.status == "deployed":
+                raise ValueError("Deployed task is terminal; cancellation cannot undo a deployment")
+            if task.status == "deployment_failed":
+                raise ValueError(
+                    "Deployment-failed task is terminal; inspect Coolify and create a fresh task"
+                )
             if task.cancel_requested:
                 # Already requested: keep the original flag and event, refresh nothing.
                 return
