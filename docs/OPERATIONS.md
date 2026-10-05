@@ -118,3 +118,23 @@ Shortened descriptions end with an ellipsis at a word boundary; full plans remai
 available through the existing plan endpoint/Telegram command. All human-facing
 model fields are instructed to use Indonesian; real-provider quality still needs
 live validation.
+
+
+### Structured-output failures during staff planning
+
+A staff plan repair permits exactly one provider attempt (`max_attempts=1`),
+matching the call reserved by the feasibility calculation. General structured
+calls retain at most three attempts; all attempts remain charged and audited.
+Staff intent and plan prompts request compact JSON instead of repeating audit
+findings and long evidence references inside control fields. These are output
+instructions, not proof of real-provider compatibility or language quality.
+Validation artifacts include finish reason, text character count, prompt/output
+token counts, and reasoning tokens when reported; raw completion text is not saved.
+Budget failure notifications include the specific redacted cause and task-specific
+`/report ID` and `/logs ID` commands. The blocked card also records that cause.
+Task #24 demonstrated seven planning/repair calls used with four calls still
+required under a ten-call limit, following invalid/truncated JSON. It did not
+run audit subtasks or establish successful live v0.3 acceptance. Increasing calls
+alone cannot establish structured-output compatibility. Inspect the recorded
+validation metadata and validate a bounded configured-provider run before claiming
+that provider quality or truncation is resolved.
