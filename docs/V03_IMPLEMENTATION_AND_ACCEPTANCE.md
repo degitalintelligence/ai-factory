@@ -127,8 +127,10 @@ is started, and verify DB/data compatibility. A safe code rollback is not a data
 ## Acceptance evidence and remaining release gates
 
 Local verification: Ruff check/format and JavaScript syntax check pass; full pytest passes
-342 tests with three PostgreSQL integration tests skipped because no local PostgreSQL
-runtime is available. GitHub CI must run those tests and the real Docker sandbox.
+343 tests with three PostgreSQL integration tests skipped because no local PostgreSQL
+runtime is available. GitHub CI run 37297969466 on candidate 3e745e8160c41725638edbe4b1718659db0a4ecc
+passed 345 tests including real PostgreSQL concurrency; Docker sandbox isolation/smoke
+and Compose/control-image build jobs also passed. Later changes must retain green CI.
 
 Automated coverage lives in `tests/test_v03_staff.py`, existing engineering/security suites,
 and the PostgreSQL concurrent-budget test. It exercises the actual leased SQL workflow
