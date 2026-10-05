@@ -69,3 +69,42 @@ async def test_postgres_concurrent_approval_requests_produce_one_card(monkeypatc
     assert {card.id for card in cards} == {cards[0].id}
     assert len(await store.inbox(state="open")) == 1
     await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"), reason="TEST_POSTGRES_URL required for real PostgreSQL integration"
+)
+async def test_postgres_tenant_budget_reservations_across_workers(monkeypatch):
+    from sqlalchemy import select
+
+    from app.config import settings
+    from app.db import DailyBudget, Task
+    from app.store import BudgetExceeded
+
+    engine = create_async_engine(os.environ["TEST_POSTGRES_URL"])
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+    await init_db(engine)
+    store = Store(async_sessionmaker(engine, expire_on_commit=False))
+    monkeypatch.setattr(settings, "global_max_llm_calls_per_day", 2)
+    async with store.sessions() as session, session.begin():
+        for index in range(8):
+            session.add(
+                Task(
+                    requirement="Concurrent bounded analysis",
+                    repo=f"liobot/task-{index}",
+                    branch=f"liobot/{index}",
+                    kind="orchestration",
+                )
+            )
+    claimed = await asyncio.gather(*(store.claim(f"budget-worker-{index}") for index in range(8)))
+    assert all(claimed)
+    outcomes = await asyncio.gather(
+        *(store.reserve_call(task.id, task.lease_owner, token_reserve=1) for task in claimed),
+        return_exceptions=True,
+    )
+    assert sum(not isinstance(result, BaseException) for result in outcomes) == 2
+    assert sum(isinstance(result, BudgetExceeded) for result in outcomes) == 6
+    async with store.sessions() as session:
+        assert (await session.scalar(select(DailyBudget))).calls == 2
+    await engine.dispose()
