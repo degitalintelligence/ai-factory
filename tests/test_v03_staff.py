@@ -1148,3 +1148,112 @@ async def test_saved_factual_v1_plan_is_not_converted(db, monkeypatch):
     assert saved.status == "completed" and saved.plan_json == old_plan.model_dump_json()
     assert calls == [ResolvedIntent, FactualOutput, OutputEvaluation, FactualOutput, OutputEvaluation]
     assert next(a.content for a in await db.artifacts(goal.id) if a.kind == "output_contract") == "factual-v1"
+
+
+def test_compact_staff_contract_preserves_decision_fields_and_legacy_reader():
+    from app.staff_schemas import CompactStaffOutput
+
+    data = output("task:24").model_dump()
+    compact = CompactStaffOutput.model_validate(data)
+    assert compact.model_dump() == data
+    assert len(compact.findings) == 3 and all(f.decision_required for f in compact.findings)
+    assert set(CompactStaffOutput.model_fields) == set(StaffOutput.model_fields)
+    data["summary"] = "x" * 701
+    assert StaffOutput.model_validate(data).summary == data["summary"]
+    with pytest.raises(ValidationError):
+        CompactStaffOutput.model_validate(data)
+    data = output("task:24").model_dump()
+    finding = data["findings"][0]
+    for field, limit in {
+        "title": 120,
+        "situation": 400,
+        "why_now": 180,
+        "recommendation": 350,
+        "alternative": 250,
+        "risk": 200,
+    }.items():
+        finding[field] = "x" * limit
+    data["findings"] = [finding.copy() for _ in range(6)]
+    with pytest.raises(ValidationError, match="7000 characters"):
+        CompactStaffOutput.model_validate(data)
+
+
+@pytest.mark.parametrize("recover", [True, False])
+async def test_staff_audit_gateway_compact_output_and_truncation(db, monkeypatch, recover):
+    import json
+
+    from openai import AsyncOpenAI
+
+    from app import llm
+
+    goal, source = await setup_goal(db)
+    good = output(f"task:{source.id}").model_dump_json()
+    approved = OutputEvaluation(approved=True, summary="Claims supported").model_dump_json()
+    replies = [
+        ResolvedIntent(objective="Audit", desired_outcome="Three decisions").model_dump_json(),
+        plan().model_dump_json(),
+        "",
+        good if recover else "x" * 19153,
+        approved,
+        good,
+        approved,
+        good,
+        approved,
+    ]
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        index = len(requests) - 1
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "length" if index == 2 or (index == 3 and not recover) else "stop",
+                        "message": {"role": "assistant", "content": replies[index]},
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 7300,
+                    "completion_tokens": 8192 if index == 2 or (index == 3 and not recover) else 100,
+                    "total_tokens": 15492 if index == 2 or (index == 3 and not recover) else 7400,
+                    "cost": 0,
+                },
+            },
+        )
+
+    monkeypatch.setattr(
+        llm,
+        "AsyncOpenAI",
+        lambda **kwargs: AsyncOpenAI(
+            api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        ),
+    )
+    monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")
+    monkeypatch.setattr(settings, "max_total_tokens", 600000)
+    await staff.run_staff_task(goal.id, "worker")
+    saved = await db.get(goal.id)
+    artifacts = {a.kind: a.content for a in await db.artifacts(goal.id)}
+    assert requests[2]["max_tokens"] == settings.max_output_tokens
+    assert "CompactStaffOutput" in requests[2]["messages"][0]["content"]
+    assert "hard limit 7000" in requests[2]["messages"][1]["content"]
+    assert "invalid_output" in artifacts or "llm_validation" in artifacts
+    if recover:
+        assert saved.status == "completed" and saved.llm_calls == 9
+        result = StaffOutput.model_validate_json(artifacts["staff_result"])
+        assert len(result.findings) == 3
+        async with db.sessions() as session:
+            cards = list(await session.scalars(select(Decision).where(Decision.task_id == goal.id)))
+        assert len(cards) == 3
+    else:
+        assert saved.status == "failed" and saved.llm_calls == 4
+        assert "staff_result" not in artifacts
+        assert "invalid structured output after 2 attempts" in saved.last_message
+        assert "truncated" in saved.last_message
+        assert "x" * 100 not in artifacts["staff_failure"]
