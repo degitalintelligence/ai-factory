@@ -610,3 +610,81 @@ async def test_task_diagnostics_are_bounded_and_owner_tenant_scoped(db):
     combined = " ".join(item.content for item in context)
     assert "private-event" not in combined and "foreign-event" not in combined
     assert "private-artifact" not in combined and "foreign-model" not in combined
+
+
+async def test_oversized_fresh_plan_is_repaired_once_within_original_budget(db, monkeypatch):
+    task, source = await setup_goal(db)
+    real = provider(db, f"task:{source.id}", [])
+    plans = []
+
+    async def oversized(*, schema, role, user):
+        result = await real(schema=schema, role=role, user=user)
+        if schema is StaffPlan:
+            plans.append(user)
+            data = result.model_dump()
+            data["budget"]["max_llm_calls"] = 10 if len(plans) == 1 else 100
+            if len(plans) == 1:
+                data["steps"] += [
+                    {"id": f"extra{i}", "skill": "engineering", "objective": "Overlapping audit"}
+                    for i in range(3)
+                ]
+                data["risk"] = "high"
+            return StaffPlan.model_validate(data)
+        return result
+
+    monkeypatch.setattr(staff, "complete", oversized)
+    await staff.run_staff_task(task.id, "worker")
+    saved = await db.get(task.id)
+    assert len(plans) == 2 and saved.status == "awaiting_approval"
+    revised = StaffPlan.model_validate_json(saved.plan_json)
+    assert len(revised.steps) == 2 and revised.budget.max_llm_calls == 10
+    assert revised.risk == "high" and saved.llm_calls == 3
+    assert "minimal 6 tambahan" in saved.last_message and "cadangan retry 1" in saved.last_message
+    assert any(a.kind == "infeasible_plan" for a in await db.artifacts(task.id))
+    card = next(d for d in await db.inbox(state="open") if d.kind == "APPROVAL_REQUIRED")
+    await db.update(task.id, lease_owner=None, lease_until=None)
+    await db.resolve_decision(card.id, "approve", 7)
+    await db.claim("approved-worker")
+    await staff.run_staff_task(task.id, "approved-worker")
+    assert (await db.get(task.id)).status == "completed"
+    assert (await db.get(task.id)).llm_calls == 9 and len(plans) == 2
+
+
+async def test_still_infeasible_plan_never_requests_execution_approval(db, monkeypatch):
+    task, source = await setup_goal(db)
+    real = provider(db, f"task:{source.id}", [])
+    planning_calls = []
+
+    async def oversized(*, schema, role, user):
+        result = await real(schema=schema, role=role, user=user)
+        if schema is StaffPlan:
+            planning_calls.append(user)
+            data = result.model_dump()
+            data["budget"]["max_llm_calls"] = 10
+            data["risk"] = "high"
+            data["steps"] += [
+                {"id": f"extra{i}", "skill": "engineering", "objective": "Overlapping audit"}
+                for i in range(3)
+            ]
+            return StaffPlan.model_validate(data)
+        return result
+
+    monkeypatch.setattr(staff, "complete", oversized)
+    await staff.run_staff_task(task.id, "worker")
+    assert len(planning_calls) == 2 and (await db.get(task.id)).status == "failed"
+    assert not any(d.kind == "APPROVAL_REQUIRED" for d in await db.inbox(state="open"))
+    async with db.sessions() as session:
+        assert not list(await session.scalars(select(Subtask).where(Subtask.task_id == task.id)))
+
+
+async def test_saved_infeasible_plan_is_not_silently_rewritten(db, monkeypatch):
+    task, source = await setup_goal(db)
+    data = plan().model_dump()
+    data["budget"]["max_llm_calls"] = 5
+    await db.update(task.id, plan_json=StaffPlan.model_validate(data).model_dump_json())
+    calls = []
+    monkeypatch.setattr(staff, "complete", provider(db, f"task:{source.id}", calls))
+    await staff.run_staff_task(task.id, "worker")
+    assert (await db.get(task.id)).status == "failed"
+    assert calls == ["ResolvedIntent"]
+    assert not any(d.kind == "APPROVAL_REQUIRED" for d in await db.inbox(state="open"))
