@@ -278,7 +278,10 @@ async def chat_handler(update, context):
         update.effective_user.id,
         update.effective_chat.id,
     )
-    await reply(update, result.get("summary", str(result)))
+    summary = result.get("summary", str(result))
+    if result.get("intent_id") is not None:
+        summary = f"LioBot — tujuan #{result['intent_id']} [{result['status']}]\n{summary}"
+    await reply(update, summary)
 
 
 def build_telegram_app():
