@@ -22,8 +22,13 @@ async def db(monkeypatch):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(store, "sessions", sessions)
     monkeypatch.setattr(
-        settings, "projects_json", '{"lab":{"repo":"owner/repo"},"other":{"repo":"owner/other"}}'
+        settings,
+        "projects_json",
+        '{"lab":{"repo":"owner/repo"},"other":{"repo":"owner/other"},"self":{"repo":"owner/self"}}',
     )
+    # Self-improvement intake is gated on the registered self-target alias, so tests
+    # exercise it with "self" instead of the default lab harness.
+    monkeypatch.setattr(settings, "self_project", "self")
     yield store
     await engine.dispose()
 

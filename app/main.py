@@ -235,9 +235,9 @@ class ActionRequest(BaseModel):
 
 @app.post("/tasks/{task_id}/{action}", dependencies=[Depends(authorize)])
 @app.post("/v1/tasks/{task_id}/{action}", dependencies=[Depends(authorize)])
-async def action(task_id: int, action: str, request: ActionRequest):
+async def action(task_id: int, action: str, request: ActionRequest, operator_id=Depends(authorize)):
     try:
-        return {"message": await perform_action(task_id, action, request.message)}
+        return {"message": await perform_action(task_id, action, request.message, user_id=operator_id)}
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -322,9 +322,9 @@ async def clarify_intent(intent_id: int, request: ClarificationRequest):
 
 
 @app.post("/v1/plans/{plan_id}/approve", dependencies=[Depends(authorize)])
-async def approve_plan(plan_id: int, request: PlanApprovalRequest):
+async def approve_plan(plan_id: int, request: PlanApprovalRequest, operator_id=Depends(authorize)):
     try:
-        await perform_action(plan_id, "approve", request.plan_hash[:12])
+        await perform_action(plan_id, "approve", request.plan_hash[:12], user_id=operator_id)
         task = await store.get(plan_id)
         if not task:
             raise HTTPException(404, "Plan not found")
@@ -343,15 +343,13 @@ async def create_improvement(request: ImprovementRequest, operator_id=Depends(au
             idempotency_key=request.idempotency_key,
         )
         result = task_view(task)
+        # Self-improvement is always gated: the worker stops every self_improvement
+        # task at approval, so the response must never claim it can run directly.
         result.update(
             {
                 "approval_required": needs_approval,
                 "sensitive_areas": sensitive_areas,
-                "next_action": (
-                    "Review the self-improvement plan and decision card before execution."
-                    if needs_approval
-                    else "LioBot will prepare the bounded self-improvement plan."
-                ),
+                "next_action": "Review the self-improvement plan and decision card before execution.",
             }
         )
         return result

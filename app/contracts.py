@@ -23,11 +23,12 @@ def _reject_unknown(task_id, action):
     raise ValueError(f"Unknown action: {action}")
 
 
-async def perform_action(task_id, action, message=""):
+async def perform_action(task_id, action, message="", user_id=None):
     """Apply one operator action to a task.
 
     Returns a short operator-facing confirmation. Raises ValueError when the
-    action is unknown or not permitted in the task's current state.
+    action is unknown or not permitted in the task's current state. The acting
+    principal is recorded on approval events and decision cards when given.
     """
     if action in DEPLOY_ACTIONS:
         service = DeploymentService()
@@ -47,7 +48,7 @@ async def perform_action(task_id, action, message=""):
     if action == "cancel":
         await store.cancel(task_id)
         return f"Cancellation requested for #{task_id}; inspect status for completion"
-    await store.resume(task_id, action, message)
+    await store.resume(task_id, action, message, user_id=user_id)
     return f"Task #{task_id} requeued ({action})"
 
 
@@ -70,8 +71,10 @@ async def create_task(requirement, project, chat_id, user_id, idempotency_key=No
 async def create_self_improvement(brief, project, chat_id=None, user_id=None, idempotency_key=None):
     """Create a gated self-improvement task.
 
-    A brief that touches policy, credentials, budget, deployment, or gate logic is
-    reported as requiring explicit approval so the caller can raise a decision card.
+    Self-improvement always requires explicit approval before execution: the worker
+    gates every self_improvement task regardless of whether the brief touches
+    sensitive areas, so needs_approval is always True and every caller must surface
+    the decision card instead of reporting the task as running.
     """
     task = await store.create(
         f"Self-improvement: {brief.problem}",
@@ -82,7 +85,7 @@ async def create_self_improvement(brief, project, chat_id=None, user_id=None, id
         kind=TaskKind.SELF_IMPROVEMENT,
         brief=brief,
     )
-    return task, brief.requires_explicit_approval, brief.sensitive_areas
+    return task, True, brief.sensitive_areas
 
 
 async def read_task(task_id, user_id=None):
