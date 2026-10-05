@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
+from app.api_v03 import build_router
 from app.config import settings
 from app.contracts import (
     create_self_improvement,
@@ -180,7 +181,11 @@ def task_view(t):
         "intent_id": t.id,
         "kind": t.kind,
         "summary": t.last_message or "Intent accepted; waiting for the next durable state transition.",
-        "next_action": next_actions.get(t.status, "Inspect the current evidence and task state."),
+        "next_action": (
+            "Review the findings and decision cards."
+            if t.kind == "orchestration" and t.status == "completed"
+            else next_actions.get(t.status, "Inspect the current evidence and task state.")
+        ),
         "decision_required": decision_required,
         "evidence_refs": [f"/v1/tasks/{t.id}/evidence"],
         "risk": (plan or {}).get("risk", "unknown"),
@@ -189,23 +194,30 @@ def task_view(t):
 
 
 @app.post("/tasks", dependencies=[Depends(authorize)], status_code=202)
-async def create(request: TaskRequest):
+async def create(request: TaskRequest, operator_id=Depends(authorize)):
     try:
-        return task_view(await store.create(**request.model_dump()))
+        return task_view(await store.create(**request.model_dump(), user_id=operator_id))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
 
 
+async def accessible_task(task_id, actor):
+    task = await store.get(task_id)
+    if not task or task.tenant != settings.tenant_id or (task.user_id is not None and task.user_id != actor):
+        raise HTTPException(404, "Task not found")
+    return task
+
+
 @app.get("/tasks", dependencies=[Depends(authorize)])
-async def tasks():
-    return [task_view(t) for t in await store.list()]
+async def tasks(operator_id=Depends(authorize)):
+    return [task_view(t) for t in await store.list() if t.user_id in {None, operator_id}]
 
 
 @app.get("/tasks/{task_id}", dependencies=[Depends(authorize)])
 @app.get("/v1/tasks/{task_id}", dependencies=[Depends(authorize)])
 @app.get("/v1/intents/{task_id}", dependencies=[Depends(authorize)])
-async def task(task_id: int):
-    t = await store.get(task_id)
+async def task(task_id: int, operator_id=Depends(authorize)):
+    t = await accessible_task(task_id, operator_id)
     if not t:
         raise HTTPException(404, "Task not found")
     return task_view(t)
@@ -214,7 +226,8 @@ async def task(task_id: int):
 @app.get("/tasks/{task_id}/artifacts", dependencies=[Depends(authorize)])
 @app.get("/v1/tasks/{task_id}/evidence", dependencies=[Depends(authorize)])
 @app.get("/v1/tasks/{task_id}/artifacts", dependencies=[Depends(authorize)])
-async def artifacts(task_id: int):
+async def artifacts(task_id: int, operator_id=Depends(authorize)):
+    await accessible_task(task_id, operator_id)
     return [
         {"kind": a.kind, "content": a.content, "created_at": a.created_at}
         for a in await store.artifacts(task_id)
@@ -222,7 +235,8 @@ async def artifacts(task_id: int):
 
 
 @app.get("/tasks/{task_id}/events", dependencies=[Depends(authorize)])
-async def events(task_id: int):
+async def events(task_id: int, operator_id=Depends(authorize)):
+    await accessible_task(task_id, operator_id)
     return [
         {"kind": e.kind, "message": e.message, "created_at": e.created_at}
         for e in await store.events(task_id)
@@ -266,31 +280,46 @@ def decision_view(d):
         "decided_by": d.decided_by,
         "decided_at": d.decided_at,
         "created_at": d.created_at,
+        "category": d.category,
+        "reason": d.decision_note,
+        "actions": ["approve", "reject", "request_changes", "ask", "defer", "delegate"],
     }
 
 
 @app.post("/decisions", dependencies=[Depends(authorize)], status_code=201)
 @app.post("/v1/decisions", dependencies=[Depends(authorize)], status_code=201)
-async def new_decision(card: DecisionRequest):
-    return decision_view(await raise_decision(card))
+async def new_decision(card: DecisionRequest, operator_id=Depends(authorize)):
+    if card.task_id:
+        await accessible_task(card.task_id, operator_id)
+    return decision_view(await raise_decision(card, owner=operator_id))
 
 
 @app.get("/decisions", dependencies=[Depends(authorize)])
 @app.get("/v1/decisions", dependencies=[Depends(authorize)])
-async def decisions(state: str | None = None, project: str | None = None):
-    return [decision_view(d) for d in await decision_inbox(state=state, project=project)]
+async def decisions(state: str | None = None, project: str | None = None, operator_id=Depends(authorize)):
+    return [decision_view(d) for d in await decision_inbox(state=state, project=project, owner=operator_id)]
 
 
 class DecisionAnswer(BaseModel):
     model_config = {"extra": "forbid"}
     answer: str = Field(min_length=1, max_length=200)
+    reason: str = Field(default="", max_length=2000)
+    delegate_to: int | None = None
 
 
 @app.post("/decisions/{decision_id}", dependencies=[Depends(authorize)])
 @app.post("/v1/decisions/{decision_id}/action", dependencies=[Depends(authorize)])
 async def answer_decision(decision_id: int, request: DecisionAnswer, operator_id=Depends(authorize)):
     try:
-        return decision_view(await resolve_decision(decision_id, request.answer, operator_id))
+        return decision_view(
+            await resolve_decision(
+                decision_id,
+                request.answer,
+                operator_id,
+                reason=request.reason,
+                delegate_to=request.delegate_to,
+            )
+        )
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -298,6 +327,22 @@ async def answer_decision(decision_id: int, request: DecisionAnswer, operator_id
 @app.post("/v1/intents", dependencies=[Depends(authorize)], status_code=202)
 async def create_intent(request: IntentRequest, operator_id=Depends(authorize)):
     try:
+        if request.mode == "analysis":
+            from uuid import uuid4
+
+            from app.staff import create_intent as staff_intake
+            from app.staff_schemas import ChatRequest
+
+            return task_view(
+                await staff_intake(
+                    ChatRequest(
+                        message=request.objective,
+                        project=request.project,
+                        idempotency_key=request.idempotency_key or str(uuid4()),
+                    ),
+                    operator_id,
+                )
+            )
         task = await store.create(
             request.objective,
             project=request.project,
@@ -310,9 +355,9 @@ async def create_intent(request: IntentRequest, operator_id=Depends(authorize)):
 
 
 @app.post("/v1/intents/{intent_id}/clarification", dependencies=[Depends(authorize)])
-async def clarify_intent(intent_id: int, request: ClarificationRequest):
+async def clarify_intent(intent_id: int, request: ClarificationRequest, operator_id=Depends(authorize)):
     try:
-        await perform_action(intent_id, "answer", request.answer)
+        await perform_action(intent_id, "answer", request.answer, user_id=operator_id)
         task = await store.get(intent_id)
         if not task:
             raise HTTPException(404, "Intent not found")
@@ -358,10 +403,16 @@ async def create_improvement(request: ImprovementRequest, operator_id=Depends(au
 
 
 @app.post("/v1/improvements/{task_id}/outcome", dependencies=[Depends(authorize)])
-async def record_improvement_outcome(task_id: int, outcome: ImprovementOutcome):
+async def record_improvement_outcome(
+    task_id: int, outcome: ImprovementOutcome, operator_id=Depends(authorize)
+):
     """Close the improvement loop: measure the change, retain the lesson, retain or roll back."""
     try:
-        lesson = await store.record_outcome(task_id, outcome)
+        if outcome.conclusion == "rollback":
+            from app.api_v03 import request_rollback
+
+            return await request_rollback(task_id, outcome, operator_id)
+        lesson = await store.record_outcome(task_id, outcome, tenant=settings.tenant_id, actor=operator_id)
     except ValueError as exc:
         message = str(exc)
         if message == "Task not found":
@@ -392,7 +443,9 @@ class MemoryLockRequest(BaseModel):
 async def lock_memory(memory_id: int, request: MemoryLockRequest, operator_id=Depends(authorize)):
     """Dedi's freeze action: the memory can no longer be corrected or retracted by agents."""
     try:
-        row = await store.lock_memory(memory_id, request.reason or "Operator lock", owner=operator_id)
+        row = await store.lock_memory(
+            memory_id, request.reason or "Operator lock", owner=operator_id, tenant=settings.tenant_id
+        )
     except ValueError as exc:
         if "Memory not found" in str(exc):
             raise HTTPException(404, str(exc)) from exc
@@ -419,6 +472,9 @@ async def search_memory(
         raise HTTPException(422, "limit must be between 1 and 100")
     selected = [key.strip() for key in keys.split(",") if key.strip()] or None
     items, truncated = await store.recall(
-        selected, role=role or None, scope=scope, limit=limit, owner=operator_id
+        selected, role=role or None, scope=scope, limit=limit, owner=operator_id, tenant=settings.tenant_id
     )
     return {"items": [item.model_dump() for item in items], "truncated": truncated}
+
+
+app.include_router(build_router(authorize, task_view, decision_view))
