@@ -279,15 +279,24 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                 content=row.value[:4000],
             )
         )
-    # Deterministic limit: preserve whole provenance records rather than truncate JSON.
+    # Balance source types so task history cannot crowd strategy/knowledge out.
+    buckets = {
+        prefix: [item for item in items if item.ref.startswith(prefix)]
+        for prefix in ("memory:", "repo:", "task:", "decision:")
+    }
     bounded = []
     size = 0
-    for item in items:
-        encoded = item.model_dump_json()
-        if size + len(encoded) > min(24000, settings.max_prompt_chars // 3):
-            break
-        bounded.append(item)
-        size += len(encoded)
+    ceiling = min(24000, settings.max_prompt_chars // 3)
+    while any(buckets.values()):
+        for bucket in buckets.values():
+            if not bucket:
+                continue
+            item = bucket.pop(0)
+            encoded = item.model_dump_json()
+            if size + len(encoded) > ceiling:
+                continue
+            bounded.append(item)
+            size += len(encoded)
     async with store.sessions() as s, s.begin():
         audit(s, "context_read", task.user_id, task, json.dumps([item.ref for item in bounded]))
     return bounded
