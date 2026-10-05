@@ -455,13 +455,21 @@ class Store:
     async def reserve_call(self, task_id, owner, token_reserve=None, subtask=None):
         task = await self.check(task_id, owner)
         envelope = self.budget_envelope(task)
-        if (
-            task.llm_calls >= envelope["max_llm_calls"]
-            or task.tokens + (token_reserve or settings.max_output_tokens) > envelope["max_total_tokens"]
-            or task.cost_usd >= envelope["max_cost_usd"]
-        ):
+        reserve = token_reserve or settings.max_output_tokens
+        blockers = []
+        if task.llm_calls >= envelope["max_llm_calls"]:
+            blockers.append(f"calls={task.llm_calls}/{envelope['max_llm_calls']}")
+        if task.tokens + reserve > envelope["max_total_tokens"]:
+            blockers.append(
+                f"token_reservation: used={task.tokens}, next_reserve={reserve}, "
+                f"limit={envelope['max_total_tokens']}"
+            )
+        if task.cost_usd >= envelope["max_cost_usd"]:
+            blockers.append(f"reported_cost={task.cost_usd:.4f}/{envelope['max_cost_usd']}")
+        if blockers:
             raise BudgetExceeded(
-                "Task LLM budget exhausted; use /report and /logs, then create a new bounded task "
+                "Task LLM budget exhausted (" + "; ".join(blockers) + "); "
+                "use /report and /logs, then create a new bounded task "
                 "or obtain an approved policy change. /retry does not reset lifetime usage."
             )
         before = self._budget_ratio(task, envelope)

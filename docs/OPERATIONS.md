@@ -427,3 +427,33 @@ configured mini routing for all roles. They do not establish mini's live audit o
 coding quality. Deploy the reviewed SHA with the three role environment values,
 run one new read-only audit and inspect evidence support, correction outcome,
 resolved model IDs, calls and reported cost before expanding engineering use.
+
+### Available-evidence audit profile (task #39)
+
+The exact Indonesian read-only audit request used in #39 now selects
+`evidence-audit-v1` for a new task. It has a deterministic two-skill chain:
+engineering evidence analysis, then product/research operator decisions. Each
+output receives independent review; the exact reviewed second output is published
+without a third review/synthesis skill or another final rewrite. The normal path
+uses five model calls (intent plus two output/review pairs), with bounded optional
+corrections still charged to task/subtask lifetime budgets. Other requests, added
+clarifications and historical saved plans retain their original workflow.
+
+For this precisely scoped L0 analysis, questions about extra reports become
+explicit evidence gaps rather than a waiting-input prerequisite. Changed scope or
+authority does not match the profile. Derived inbox cards are excluded from the
+audit's source context; historical records remain intact. Review prompts explicitly
+distinguish a recorded ValueError from an unproven cause and warnings from stops.
+Missing evidence is included before review, never appended to an approved answer.
+
+Task budget rejection now reports the violated limit and, for token reservations,
+actual tokens used, the conservative next-call reserve and the token limit.
+The reserve still uses prompt UTF-8 byte count plus the configured output allowance
+and overhead; it is not a tokenizer estimate. No hard limit, reservation policy,
+model, credentials, deployment policy or database schema changes. GPT-4.1 mini
+remains operator configuration, with no fallback. Mock tests do not certify its
+semantic review quality or live completion.
+
+Deploy the reviewed SHA and create a new audit. Do not retry #39 expecting its
+saved plan or lifetime consumption to reset. Roll back to the previous reviewed
+image/commit if the new profile regresses; preserve database/workspace volumes.

@@ -1728,3 +1728,64 @@ async def test_lower_cost_candidate_routes_all_roles_without_silent_fallback(db,
     assert (await db.get(task.id)).status == "completed"
     assert {role for role, _ in observed} == {"lead", "developer", "reviewer"}
     assert {model for _, model in observed} == {"openai/gpt-4.1-mini"}
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+async def test_available_evidence_audit_uses_two_reviewed_steps_without_final_rewrite(
+    db, monkeypatch, rejected
+):
+    import json
+
+    task, source = await setup_goal(db)
+    requirement = (
+        "Audit AI Factory berdasarkan evidence yang tersedia. Tunjukkan tiga masalah paling penting, "
+        "rekomendasi perbaikan, dan keputusan yang harus saya ambil minggu ini. "
+        "Nyatakan bukti yang belum tersedia sebagai keterbatasan. Jangan melakukan perubahan."
+    )
+    await db.update(task.id, "worker", requirement=requirement)
+    calls = []
+    base = provider(db, f"task:{source.id}", calls)
+    draft = output(f"task:{source.id}")
+    draft.findings = draft.findings[:1]
+    draft.summary = "Satu temuan yang didukung; akar masalah belum terbukti."
+
+    async def complete(**kwargs):
+        assert "decision:" not in kwargs["user"]
+        result = await base(**kwargs)
+        if kwargs["schema"] is ResolvedIntent:
+            result.missing_information = ["Ada laporan insiden tambahan?"]
+        elif kwargs["schema"] is StaffOutput:
+            result = draft.model_copy(deep=True)
+        elif kwargs["schema"] is OutputEvaluation:
+            checked = json.loads(kwargs["user"].split("OUTPUT:", 1)[1])
+            assert "Ada laporan insiden tambahan?" in checked["missing_information"]
+            if rejected:
+                result = OutputEvaluation(approved=False, issues=["Klaim tidak terbukti"], summary="Tolak")
+        return result
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    saved = await db.get(task.id)
+    artifacts = {a.kind: a.content for a in await db.artifacts(task.id)}
+    assert artifacts["output_contract"] == "evidence-audit-v1"
+    assert saved.llm_calls == 5
+    assert "StaffPlan" not in calls
+    assert "staff_final_draft" not in artifacts
+    if rejected:
+        assert saved.status == "failed" and "staff_result" not in artifacts
+        assert "review_repair_evaluation" in artifacts
+    else:
+        assert saved.status == "completed"
+        final = StaffOutput.model_validate_json(artifacts["staff_result"])
+        assert final.summary == draft.summary and len(final.findings) == 1
+        assert "Ada laporan insiden tambahan?" in final.missing_information
+
+
+def test_available_evidence_audit_never_matches_added_authority():
+    requirement = (
+        "Audit AI Factory berdasarkan evidence yang tersedia. Tunjukkan tiga masalah paling penting, "
+        "rekomendasi perbaikan, dan keputusan yang harus saya ambil minggu ini. "
+        "Nyatakan bukti yang belum tersedia sebagai keterbatasan. Jangan melakukan perubahan."
+    )
+    assert staff.evidence_audit_request(requirement)
+    assert not staff.evidence_audit_request(requirement + "\nUser clarification:\nDeploy production.")
