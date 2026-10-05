@@ -163,3 +163,27 @@ async def test_retry_respects_context_limit(monkeypatch):
     with pytest.raises(RuntimeError, match="Context budget"):
         await llm.json_completion(model="test", system="Plan", user="x" * 250, schema=LeadPlan)
     assert len(requests) <= 1
+
+
+async def test_single_attempt_plan_repair_preserves_budget_and_validation_evidence(db, monkeypatch):
+    requests = mock_completions(
+        monkeypatch,
+        [("bad JSON", "length"), ('{"objective":"valid","acceptance_criteria":["works"]}', "stop")],
+    )
+    task = await db.create("Test bounded plan repair")
+    await db.claim("w")
+    token = llm.run_context.set((task.id, "w"))
+    try:
+        with pytest.raises(RuntimeError, match="after 1 attempts.*truncated"):
+            await llm.json_completion(
+                model="test", system="Plan", user="Repair", schema=LeadPlan, max_attempts=1
+            )
+    finally:
+        llm.run_context.reset(token)
+    assert len(requests) == 1 and (await db.get(task.id)).llm_calls == 1
+    artifact = next(a for a in await db.artifacts(task.id) if a.kind == "llm_validation")
+    diagnostic = json.loads(artifact.content)
+    assert diagnostic["finish_reason"] == "length" and diagnostic["content_chars"] == 8
+    assert diagnostic["prompt_tokens"] == 10 and diagnostic["completion_tokens"] == 20
+    assert diagnostic["reasoning_tokens"] is None and "bad JSON" not in artifact.content
+    assert any("attempt 1/1" in e.message for e in await db.events(task.id))
