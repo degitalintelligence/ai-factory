@@ -60,6 +60,7 @@ Missing proof is an evidence gap to report, not a reason to block a useful bound
 Ask only questions necessary to define the target, requested outcome, or safe authority.
 Never infer that an absent record proves success, failure, or a root cause.
 Decision cards, improvement proposals and prior audit outputs are derived records, not independent proof of their claims. Prefer direct task diagnostics when they conflict. Do not recycle a rejected audit's claims as verified facts or confuse schema/review failures with token truncation or exhausted task budgets.
+Task refs support recorded status and usage only. For orchestration history, generated summaries, drafts and review verdicts are deliberately omitted from direct diagnostics. Artifact/event existence does not prove the claims it once contained. A budget_warning proves a warning, not exhaustion; completed is not failed. Token truncation requires a recorded length/truncation diagnostic; a ValueError or schema rejection is not that diagnostic. Repository verification instructions prove a documented procedure, not a failed deployment or absence of tests everywhere.
 For unverified context, do not exceed its supplied confidence or present its counts as confirmed. Prefer findings with direct supporting evidence; label derived claims and proposed priorities as inference. Decisions requested by the user must describe a concrete choice, not merely repeat a recommendation.
 Authority is operator-owned; an approval for analysis grants no external execution authority.
 """
@@ -71,6 +72,46 @@ def excerpt(text: str, limit: int) -> str:
         return text
     prefix = text[:limit].rsplit(" ", 1)[0]
     return (prefix or text[:limit]) + "…"
+
+
+def diagnostic_record(record: Event | Artifact | ModelRun, *, orchestration: bool) -> dict:
+    """Project history without turning generated narratives into observed facts."""
+    result = {"id": record.id, "at": record.created_at.isoformat()}
+    if isinstance(record, ModelRun):
+        return result | {
+            "role": record.role,
+            "alias": record.model_alias,
+            "model": record.model,
+            "prompt_version": record.prompt_version,
+            "outcome": record.outcome,
+            "detail": record.detail[:150],
+            "tokens": record.tokens,
+            "cost_reported": record.cost_reported,
+        }
+    result["kind"] = record.kind
+    if (
+        not orchestration
+        or (isinstance(record, Event) and record.kind in {"budget_warning", "llm_validation"})
+        or (isinstance(record, Artifact) and record.kind in {"llm_validation", "plan_budget_accounting"})
+    ):
+        result["excerpt"] = (record.message if isinstance(record, Event) else record.content)[:300]
+    else:
+        result["content_scope"] = "Existence only; generated narrative omitted, not independent proof"
+        if isinstance(record, Artifact) and record.kind in {
+            "staff_draft_evaluation",
+            "staff_final_draft_evaluation",
+            "confidence_repair_validation",
+        }:
+            try:
+                data = json.loads(record.content)
+            except (ValueError, TypeError):
+                data = None
+            if isinstance(data, dict) and isinstance(data.get("local_issues"), list):
+                result["local_issues"] = [
+                    issue[:250] for issue in data["local_issues"][:3] if isinstance(issue, str)
+                ]
+                result["content_scope"] = "Engine local validation only; model evaluation omitted"
+    return result
 
 
 async def plan_call_requirement(
@@ -245,11 +286,35 @@ async def assemble_context(task: Task) -> list[ContextItem]:
             )
         )
         for row in tasks:
+            orchestration = row.kind == "orchestration"
             evidence = {
+                "status": row.status,
                 "effective_budget_now": store.budget_envelope(row),
                 "cost_incomplete": row.cost_incomplete,
-                "note": "Latest bounded excerpts only; absence is not proof. Budget reflects current operator policy.",
+                "note": "Latest bounded excerpts only; absence is not proof. Budget reflects current operator policy. Warnings are not exhaustion. Generated audit/review narratives are not independent proof.",
             }
+            if orchestration:
+                failure = await s.scalar(
+                    select(Artifact)
+                    .where(Artifact.task_id == row.id, Artifact.kind == "staff_failure")
+                    .order_by(Artifact.id.desc())
+                    .limit(1)
+                )
+                if failure:
+                    try:
+                        data = json.loads(failure.content)
+                    except (ValueError, TypeError):
+                        data = None
+                    if isinstance(data, dict) and isinstance(data.get("category"), str):
+                        evidence["recorded_failure"] = {
+                            "artifact_id": failure.id,
+                            "at": failure.created_at.isoformat(),
+                            "category": data["category"][:100],
+                            "note": "Latest historical stop; current status is separate. Not proof of assertions in rejected model prose",
+                        }
+                        # BudgetExceeded is generated by the engine, not a model verdict.
+                        if data["category"] in {"Budget exhausted", "BudgetExceeded"}:
+                            evidence["recorded_failure"]["detail"] = str(data.get("detail", ""))[:500]
             for model, key, limit in (
                 (Event, "events", 4),
                 (Artifact, "artifacts", 3),
@@ -260,30 +325,7 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                         select(model).where(model.task_id == row.id).order_by(model.id.desc()).limit(limit)
                     )
                 )
-                evidence[key] = [
-                    {
-                        "id": record.id,
-                        "at": record.created_at.isoformat(),
-                        **(
-                            {
-                                "kind": record.kind,
-                                "excerpt": (record.message if model is Event else record.content)[:300],
-                            }
-                            if model is not ModelRun
-                            else {
-                                "role": record.role,
-                                "alias": record.model_alias,
-                                "model": record.model,
-                                "prompt_version": record.prompt_version,
-                                "outcome": record.outcome,
-                                "detail": record.detail[:150],
-                                "tokens": record.tokens,
-                                "cost_reported": record.cost_reported,
-                            }
-                        ),
-                    }
-                    for record in records
-                ]
+                evidence[key] = [diagnostic_record(record, orchestration=orchestration) for record in records]
             items.append(
                 ContextItem(
                     ref=f"task:{row.id}",
@@ -294,7 +336,7 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                     confidence=1,
                     content=redact(
                         f"status={row.status}; objective={row.requirement[:1400]}; "
-                        f"progress={row.last_message}; calls={row.llm_calls}; "
+                        f"calls={row.llm_calls}; "
                         f"tokens={row.tokens}; reported_cost={row.cost_usd}; "
                         f"PR={row.pr_url or 'none'}"
                     )[:4000],
@@ -331,10 +373,11 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                     content=redact(
                         (
                             "Derived proposal, not independent evidence; verify counts and claims against task diagnostics. Legacy recurring-budget proposals may include non-budget failures. "
+                            + f"{row.title}: {row.situation[:1400]}; "
                             if generated
-                            else ""
+                            else "Decision metadata only; its explanation is not independent proof of audited claims. "
                         )
-                        + f"{row.title}: {row.situation[:1400]}; state={row.state}; "
+                        + f"category={row.category}; task_id={row.task_id}; state={row.state}; "
                         f"risk={row.risk_level}; recommendation={row.recommendation}"
                     ),
                 )
@@ -477,12 +520,13 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
         schema = CompactStaffOutput
         user += "\nReturn compact JSON under 5000 characters (hard limit 7000). Use at most 3 findings unless the objective explicitly requires 4-6. Each prose field is one short Indonesian sentence; summary at most two sentences. Cite 1-4 exact refs per finding. Do not repeat context, quotations, or the report across fields. State unavailable proof in short missing_information items. Preserve requested decisions, uncertainty and evidence; no external authority."
     elif schema is OutputEvaluation:
+        user += "\nCheck entailment for EACH material claim against the CONTENT of its cited refs, not merely ref existence or another review's approval. Reject a token-truncation claim citing only a completed task or a confidence rejection. Reject budget-exhaustion claims supported only by budget warnings. Treat prior generated conclusions as hypotheses, never independent confirmation; unavailable live evidence in this context is only a bounded evidence gap."
         user += "\nReview the submitted answer, not the health of the system it audits. Audit findings are not review issues merely because they describe failures. issues contains only defects requiring correction in this answer: identify the exact claim, why it violates evidence or scope, and the correction needed. Distinguish supported observations, labelled hypotheses and evidence gaps. Reject unsupported generalizations; missing live acceptance proof is a limitation, not proof of production failure. Return approved=true with issues=[] when the answer satisfies the objective, otherwise approved=false with concrete issues. Keep JSON under 1800 characters, at most 3 issues and a one-sentence verdict. Do not rewrite the answer or repeat its findings."
     output = await json_completion(
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-13",
+        prompt_version="staff-v03-14",
         max_attempts=max_attempts,
         system=STAFF_BOUNDARY,
         user=user,
