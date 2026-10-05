@@ -106,14 +106,40 @@ async def test_task_44_locks_target_before_context_and_enters_audit_workflow(db,
             return ResolvedIntent(objective=REQUIREMENT, desired_outcome="Audit sumber repository")
         assert schema is not StaffPlan  # deterministic composite audit, no keyword-derived plan
         if schema is StaffOutput:
+            from app.audit_evidence import audit_facts
+
+            context = await staff.assemble_context(await db.get(goal.id))
+            facts = audit_facts(context)
+            expected = {
+                "models": "factory_runtime_configuration",
+                "budget": "factory_runtime_budget",
+                "readiness": "factory_runtime_readiness",
+                "workflow": "registered_repository_source",
+                "tests": "repository_ci",
+            }
             return StaffOutput(
                 summary="Bukti repository tersedia; runtime belum diverifikasi.",
                 findings=[],
                 audit_checks=[
                     {
                         "topic": topic,
-                        "verification": "unverified",
+                        "verification": "repository"
+                        if topic == "workflow" and topic in facts
+                        else "runtime"
+                        if topic in facts
+                        else "unverified",
                         "observation": "Bukti perlu diperiksa.",
+                        "observed_values": facts.get(topic, {}),
+                        "evidence_refs": [
+                            next(
+                                item.ref
+                                for item in context
+                                if item.source == expected[topic]
+                                and (topic != "workflow" or item.ref.endswith("app/staff.py"))
+                            )
+                        ]
+                        if topic in facts
+                        else [],
                         "limitation": "Fixture tidak menjalankan runtime target.",
                     }
                     for topic in ["models", "workflow", "budget", "readiness", "tests"]
