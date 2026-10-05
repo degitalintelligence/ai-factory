@@ -42,6 +42,11 @@ class TaskStatus(StrEnum):
     REVIEWING = "reviewing"
     PUBLISHING = "publishing"
     PR_CREATED = "pr_created"
+    DEPLOYMENT_PENDING = "deployment_pending"
+    DEPLOYING = "deploying"
+    DEPLOYED = "deployed"
+    DEPLOYMENT_UNKNOWN = "deployment_unknown"
+    DEPLOYMENT_FAILED = "deployment_failed"
     COMPLETED = "completed"
     SUPERSEDED = "superseded"
     REVIEWED = "reviewed"
@@ -52,12 +57,22 @@ class TaskStatus(StrEnum):
 # These states reserve a repository even when no worker lease is held. A paused
 # approval/input task or an open PR must not race a second branch on the same repo.
 ACTIVE = {"planning", "developing", "testing", "reviewing", "publishing"}
-# Repository reservation is broader than worker lease activity. Paused tasks and
-# an open PR still own the repository and must not be bypassed by a new branch.
-REPOSITORY_BLOCKING = ACTIVE | {"waiting_input", "awaiting_approval", "pr_created"}
+# Repository reservation is broader than worker lease activity. Paused tasks, an open
+# PR, and an in-flight deployment still own the repository and must not be bypassed.
+REPOSITORY_BLOCKING = ACTIVE | {
+    "waiting_input",
+    "awaiting_approval",
+    "pr_created",
+    "deployment_pending",
+    "deploying",
+    "deployment_unknown",
+}
 # Reserved for intake: a queued task owns the repository too, otherwise repeated
 # /new calls would stack unclaimed work that later claims race to execute.
 REPOSITORY_RESERVED = REPOSITORY_BLOCKING | {"received"}
+# Deployed and deployment_failed are durable terminal outcomes. deployment_unknown is
+# deliberately not terminal and never auto-retries: only an explicit /deployment
+# reconciliation can move it to a final state.
 
 
 class Task(Base):

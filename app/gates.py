@@ -40,6 +40,13 @@ def post_publication_issues(pr, *, digest, sha, deferred):
 
 
 def deployment_issues(files, persistence=False):
+    """Static deployment-file gate only: structure and policy, never runtime verification.
+
+    A clean result proves the declared deployment deliverables exist and the Compose
+    file follows the required shape. It proves nothing about a real image build, boot,
+    or health check; deployment evidence comes only from an explicit /deploy, the
+    /deployment reconciliation, and the project's own post-deployment smoke tests.
+    """
     issues = []
     required = ["Dockerfile", ".dockerignore", ".env.example", "docs/DEPLOYMENT.md"]
     issues.extend(f"Deployment deliverable missing: {p}" for p in required if p not in files)

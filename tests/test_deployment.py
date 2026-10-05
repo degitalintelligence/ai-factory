@@ -51,6 +51,8 @@ class FakeService(DeploymentService):
         self.calls = []
         self.pin = ""
         self.ambiguous = False
+        self.coolify_status = "finished"
+        self.coolify_commit = "b" * 40
 
     async def coolify(self, method, path, **kwargs):
         self.calls.append((method, path))
@@ -65,7 +67,7 @@ class FakeService(DeploymentService):
                 "settings": {"is_auto_deploy_enabled": False},
             }
         if path.startswith("deployments/"):
-            return {"commit": "b" * 40, "status": "finished"}
+            return {"commit": self.coolify_commit, "status": self.coolify_status}
         if self.ambiguous:
             raise TimeoutError("Response lost")
         return {"deployments": [{"deployment_uuid": "deploy123"}]}
@@ -176,3 +178,120 @@ async def test_supersede_rejects_a_current_base(db, publication_task):
     service = FakeService(db.sessions)
     with pytest.raises(ValueError, match="still the current base"):
         await service.supersede(publication_task.id, "This should not bypass publication")
+
+
+async def test_deploy_transitions_task_to_deployment_pending_then_deploying(db, deployment_task):
+    service = FakeService(db.sessions)
+    record = await service.deploy(deployment_task.id, "b" * 40)
+
+    assert record.status == "queued"
+    task = await db.get(deployment_task.id)
+    assert task.status == "deploying"
+    assert "deploy123" in (task.last_message or "")
+    events = await db.events(deployment_task.id)
+    kinds = [event.kind for event in events]
+    assert "deployment_status" in kinds
+    assert any("deployment_pending" in event.message or "requested" in event.message for event in events)
+
+
+async def test_ambiguous_submission_leaves_task_deployment_unknown(db, deployment_task):
+    service = FakeService(db.sessions)
+    service.ambiguous = True
+    with pytest.raises(TimeoutError):
+        await service.deploy(deployment_task.id, "b" * 40)
+
+    task = await db.get(deployment_task.id)
+    assert task.status == "deployment_unknown"
+    # Reconciliation without a Coolify deployment UUID cannot invent an outcome and
+    # must never auto-retry the submission.
+    record = await service.status(deployment_task.id)
+    assert record.status == "unknown"
+    assert (await db.get(deployment_task.id)).status == "deployment_unknown"
+    with pytest.raises(ValueError, match="already requested"):
+        await service.deploy(deployment_task.id, "b" * 40)
+    assert service.calls.count(("POST", "deploy")) == 1
+
+
+@pytest.mark.parametrize(
+    "coolify_status,expected",
+    [
+        ("finished", "deployed"),
+        ("failed", "deployment_failed"),
+        ("cancelled", "deployment_failed"),
+        ("in_progress", "deploying"),
+    ],
+)
+async def test_reconciliation_maps_coolify_outcomes_to_task_states(
+    db, deployment_task, coolify_status, expected
+):
+    service = FakeService(db.sessions)
+    service.coolify_status = coolify_status
+    await service.deploy(deployment_task.id, "b" * 40)
+
+    await service.status(deployment_task.id)
+    assert (await db.get(deployment_task.id)).status == expected
+    # Reconciling twice is idempotent for the task lifecycle state.
+    await service.status(deployment_task.id)
+    assert (await db.get(deployment_task.id)).status == expected
+
+
+async def test_deployed_task_is_terminal_against_later_reconciliation(db, deployment_task):
+    service = FakeService(db.sessions)
+    await service.deploy(deployment_task.id, "b" * 40)
+    await service.status(deployment_task.id)
+    assert (await db.get(deployment_task.id)).status == "deployed"
+
+    # A later Coolify report can no longer reopen a terminal deployment outcome.
+    service.coolify_status = "failed"
+    await service.status(deployment_task.id)
+    assert (await db.get(deployment_task.id)).status == "deployed"
+
+
+@pytest.mark.parametrize(
+    "coolify_status,commit",
+    [
+        ("finished", ""),  # Coolify finished but omitted the commit
+        ("finished", "c" * 40),  # Coolify ran a different commit
+    ],
+)
+async def test_unprovable_commits_stay_deployment_unknown(db, deployment_task, coolify_status, commit):
+    service = FakeService(db.sessions)
+    service.coolify_status = coolify_status
+    service.coolify_commit = commit
+    await service.deploy(deployment_task.id, "b" * 40)
+
+    await service.status(deployment_task.id)
+    task = await db.get(deployment_task.id)
+    assert task.status == "deployment_unknown"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "deployment_pending",
+        "deploying",
+        "deployment_unknown",
+        "deployed",
+        "deployment_failed",
+    ],
+)
+async def test_cancel_rejects_deployment_states(db, deployment_task, status):
+    await db.update(deployment_task.id, status=status)
+    with pytest.raises(ValueError, match="eploy"):
+        await db.cancel(deployment_task.id)
+    assert (await db.get(deployment_task.id)).status == status
+
+
+async def test_in_flight_deployment_reserves_the_repository(db, deployment_task):
+    service = FakeService(db.sessions)
+    await service.deploy(deployment_task.id, "b" * 40)
+
+    with pytest.raises(ValueError, match="One active task per repository"):
+        await db.create("Second task on the same repository")
+
+    # The terminal deployment outcome releases the reservation.
+    await service.status(deployment_task.id)
+    assert (await db.get(deployment_task.id)).status == "deployed"
+    second = await db.create("Second task on the same repository")
+    claimed = await db.claim("worker")
+    assert claimed is not None and claimed.id == second.id
