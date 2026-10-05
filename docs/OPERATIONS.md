@@ -110,7 +110,7 @@ are excluded. This is a minimum, not a guarantee of token/cost availability or
 provider retries; runtime task/subtask/daily ceilings remain binding.
 The planner receives call usage and operator limits. A fresh infeasible plan may
 be revised once, only when that extra call and the minimum required skill coverage
-fit. The original requested budget and high-risk approval requirement cannot be
+fit. The admitted task budget and high-risk approval requirement cannot be
 raised or removed by that revision. An infeasible saved or revised plan stops
 before asking for execution approval. Saved plans are never silently rewritten.
 Approval messages include calls used, minimum remaining calls, and retry headroom.
@@ -138,3 +138,27 @@ run audit subtasks or establish successful live v0.3 acceptance. Increasing call
 alone cannot establish structured-output compatibility. Inspect the recorded
 validation metadata and validate a bounded configured-provider run before claiming
 that provider quality or truncation is resolved.
+
+
+### Intake accounting and named chat-task evidence
+
+Before saving a fresh model-generated staff plan, the engine includes all charged
+intent/planning attempts, two calls per unfinished step, and two final calls.
+If the model's call estimate is below that minimum, the engine may admit the
+minimum plus one retry call, capped by the existing operator call ceiling. The
+`plan_budget_accounting` artifact records the estimate, usage, minimum, admitted
+limit, operator ceiling, and headroom. This admission correction does not change
+operator, token, cost, daily, or subtask limits. Saved/approved task budgets are
+never raised. Requests mentioning budget/call/token/currency constraints skip
+this correction conservatively; an infeasible task remains blocked. An operator
+ceiling below the minimum also remains blocked.
+
+Unscoped staff goals include their owner's unscoped chat-task history alongside
+registered project history. Explicit `task #ID`, `tujuan #ID`, or `intent #ID`
+references are prioritized before the 30-task SQL limit and context-size limit.
+Tenant and owner filters still apply. A project-scoped goal does not gain access
+to unscoped chat history or another registered project by naming a task ID.
+Task #26 supplied a concrete regression: a model estimate of five calls omitted
+the already charged intent call, and its context had omitted chat task #24.
+Configured-provider output quality and live completion remain separate acceptance
+checks; passing deterministic tests does not establish those outcomes.
