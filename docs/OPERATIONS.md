@@ -284,3 +284,21 @@ After deploying the reviewed SHA, repeat the audit as a new goal. Inspect its
 draft and evaluation on rejection before deciding whether model configuration,
 claims, or the workflow needs another change. Passing mock-provider tests does
 not establish live audit quality.
+
+### Precise schema feedback (task #34)
+
+Task #34 returned two complete GPT-4.1 responses with `finish_reason=stop`,
+then failed `CompactStaffOutput` validation. The recorded `findings: too_long`
+does not prove too many findings: the old diagnostic collapsed nested locations,
+so an oversized evidence reference list could produce the same message.
+
+Validation diagnostics and retry prompts now retain schema-owned nested field
+paths and numeric length bounds/counts, for example
+`findings[0].evidence_refs: too_long (max_length=4, actual_length=5)`.
+Unknown keys and rejected input values are excluded. Retry instructions specify
+how to reduce the named field without changing scope or inventing evidence;
+the evidence-reference schema also explicitly requests only 1–4 supporting refs.
+Limits, model configuration, budgets and mandatory review are unchanged. Invalid
+responses are still rejected, not trimmed or published. Mock gateway tests cover
+both top-level finding overflow and nested reference overflow, recovery within
+two charged calls and repeated-invalid failure. Live success remains unverified.
