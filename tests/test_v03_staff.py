@@ -844,3 +844,214 @@ async def test_real_gateway_review_retry_is_funded_and_invalid_review_never_comp
         failure = next(a.content for a in artifacts if a.kind == "staff_failure")
         assert "invalid structured output after 2 attempts" in failure
         assert "Subtask lifetime model-call budget exhausted" not in failure
+
+
+def factual_message(task_id):
+    return f"Analisis task #{task_id} saja. Jelaskan satu penyebab berhenti berdasarkan evidence yang tersedia. Maksimal 150 kata. Jangan melakukan perubahan."
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+async def test_factual_contract_focus_review_and_recovery(db, monkeypatch, rejected):
+    import json
+
+    from app.staff_schemas import FactualOutput
+
+    source = await db.create("Recorded task", user_id=7)
+    await db.update(source.id, status="failed", last_message="Budget exhausted")
+    await db.artifact(source.id, "staff_failure", '{"detail":"7 calls used + 4 required; limit 10"}')
+    other = await db.create("UNRELATED PRIVATE CONTEXT", user_id=8)
+    await db.update(other.id, status="failed")
+    goal = await staff.create_intent(
+        ChatRequest(message=factual_message(source.id), idempotency_key="factual"), 7
+    )
+    await db.claim("worker")
+    monkeypatch.setattr(settings, "max_llm_calls", 10)
+    monkeypatch.setattr(settings, "github_token", "placeholder")
+    monkeypatch.setattr(
+        staff.GitHubAPI, "branch_sha", AsyncMock(side_effect=AssertionError("No repository reads"))
+    )
+    calls = []
+    answer = FactualOutput(
+        summary="Task berhenti karena rencana membutuhkan 11 panggilan: 7 telah digunakan dan 4 masih diperlukan, melebihi batas 10. Ini adalah kondisi berhenti yang tercatat; akar masalah belum terbukti.",
+        evidence_refs=[f"task:{source.id}:evidence"],
+        confidence=1,
+    )
+
+    async def complete(*, schema, role, user, max_attempts=3):
+        calls.append(schema.__name__)
+        assert "UNRELATED PRIVATE CONTEXT" not in user
+        await db.reserve_call(*run_context.get(), token_reserve=1, subtask=subtask_context.get())
+        if schema is ResolvedIntent:
+            return ResolvedIntent(objective="Explain one cause", desired_outcome="Short factual answer")
+        if schema is FactualOutput:
+            assert "Tanpa prioritas" in user
+            return answer
+        assert schema is OutputEvaluation
+        assert "bukan nama field atau enum schema" in user
+        return OutputEvaluation(
+            approved=not rejected,
+            issues=["Klaim tidak didukung"] if rejected else [],
+            summary="Evidence reviewed",
+        )
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(goal.id, "worker")
+    saved = await db.get(goal.id)
+    artifacts = {a.kind: a.content for a in await db.artifacts(goal.id)}
+    context = json.loads(artifacts["context"])
+    assert {i["ref"] for i in context} == {f"task:{source.id}", f"task:{source.id}:evidence"}
+    assert "factual_draft" in artifacts and "factual_draft_evaluation" in artifacts
+    assert saved.llm_calls == (3 if rejected else 5)
+    assert "StaffPlan" not in calls
+    async with db.sessions() as session:
+        cards = list(await session.scalars(select(Decision).where(Decision.task_id == goal.id)))
+    if rejected:
+        assert saved.status == "failed" and "staff_result" not in artifacts
+        assert "Klaim tidak didukung" in saved.last_message
+        assert all(c.category != "recommendation" for c in cards)
+    else:
+        assert saved.status == "completed" and not cards
+        result = FactualOutput.model_validate_json(artifacts["staff_result"])
+        assert len(staff.render_result(goal.id, result).split()) <= 150
+        assert "prioritas" not in staff.render_result(goal.id, result)
+        assert "next_action" not in json.loads(artifacts["staff_result"])
+        await staff.run_staff_task(goal.id, "worker")
+        assert len(calls) == 5
+
+
+@pytest.mark.parametrize("scope,owner", [("", 8), ("self", 7)])
+async def test_factual_named_task_cannot_widen_access(db, monkeypatch, scope, owner):
+    source = await staff.create_intent(
+        ChatRequest(message="Private unscoped source", idempotency_key="private"), owner
+    )
+    await db.update(source.id, status="failed")
+    goal = await staff.create_intent(
+        ChatRequest(message=factual_message(source.id), project=scope, idempotency_key="blocked"), 7
+    )
+    await db.claim("worker")
+    monkeypatch.setattr(
+        staff, "complete", AsyncMock(side_effect=AssertionError("No model call without evidence"))
+    )
+    await staff.run_staff_task(goal.id, "worker")
+    saved = await db.get(goal.id)
+    assert saved.status == "failed" and saved.llm_calls == 0
+    assert "scope akses" in saved.last_message
+
+
+def test_factual_validation_and_conservative_routing():
+    from app.staff_schemas import ContextItem, FactualOutput
+
+    context = [
+        ContextItem(
+            ref="task:24",
+            source="tasks",
+            scope="",
+            owner=7,
+            created_at="now",
+            confidence=1,
+            content="Recorded failure",
+        )
+    ]
+    assert staff.factual_request(factual_message(24)) == (24, 150)
+    assert staff.factual_request(factual_message(24) + " Deploy sekarang.") is None
+    assert staff.factual_request(factual_message(24).replace("150", "1000")) is None
+    answer = FactualOutput(summary="Bukti tersedia.", evidence_refs=["task:99"], confidence=1)
+    assert "unauthorized" in staff.validate_factual(answer, context, 150)[0]
+    answer = FactualOutput(summary="kata " * 150, evidence_refs=["task:24"], confidence=1)
+    assert "word limit" in staff.validate_factual(answer, context, 150)[0]
+    with pytest.raises(ValidationError):
+        FactualOutput(summary="Bukti tersedia.", evidence_refs=["task:24"], confidence=1, priority="high")
+
+
+async def test_factual_gateway_retries_invalid_json_without_planner(db, monkeypatch):
+    import json
+
+    from openai import AsyncOpenAI
+
+    from app import llm
+    from app.staff_schemas import FactualOutput
+
+    source = await db.create("Recorded failed task", user_id=7)
+    await db.update(source.id, status="failed")
+    await db.artifact(source.id, "staff_failure", '{"detail":"7 used + 4 required; limit 10"}')
+    goal = await staff.create_intent(
+        ChatRequest(message=factual_message(source.id), idempotency_key="gateway-factual"), 7
+    )
+    await db.claim("worker")
+    answer = FactualOutput(
+        summary="Rencana memerlukan 11 panggilan, melebihi batas 10: 7 terpakai dan 4 masih diperlukan.",
+        evidence_refs=[f"task:{source.id}:evidence"],
+        confidence=1,
+    ).model_dump_json()
+    approved = OutputEvaluation(approved=True, summary="Bukti dan batas kata sesuai").model_dump_json()
+    replies = [
+        ResolvedIntent(
+            objective="Jelaskan satu penyebab", desired_outcome="Jawaban ringkas"
+        ).model_dump_json(),
+        answer,
+        '{"approved":',
+        approved,
+        answer,
+        approved,
+    ]
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "test",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "test",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": replies[len(requests) - 1]},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0},
+            },
+        )
+
+    monkeypatch.setattr(
+        llm,
+        "AsyncOpenAI",
+        lambda **kwargs: AsyncOpenAI(
+            api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        ),
+    )
+    monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")
+    await staff.run_staff_task(goal.id, "worker")
+    saved = await db.get(goal.id)
+    assert saved.status == "completed" and saved.llm_calls == 6
+    async with db.sessions() as session:
+        step = await session.scalar(select(Subtask).where(Subtask.task_id == goal.id))
+        assert step.calls == 3
+    assert all("StaffPlan" not in r["messages"][0]["content"] for r in requests)
+
+
+async def test_factual_operator_ceiling_is_not_raised(db, monkeypatch):
+    source = await db.create("Failed evidence", user_id=7)
+    await db.update(source.id, status="failed")
+    goal = await staff.create_intent(
+        ChatRequest(message=factual_message(source.id), idempotency_key="low-cap"), 7
+    )
+    await db.claim("worker")
+    monkeypatch.setattr(settings, "max_llm_calls", 4)
+    calls = []
+
+    async def complete(**kwargs):
+        calls.append(kwargs["schema"])
+        await db.reserve_call(*run_context.get(), token_reserve=1)
+        return ResolvedIntent(objective="Analisis terbatas", desired_outcome="Satu penyebab")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(goal.id, "worker")
+    saved = await db.get(goal.id)
+    assert saved.status == "failed" and saved.llm_calls == 1
+    assert calls == [ResolvedIntent]
+    assert StaffPlan.model_validate_json(saved.plan_json).budget.max_llm_calls == 4
+    assert "Plan cannot fit" in saved.last_message
