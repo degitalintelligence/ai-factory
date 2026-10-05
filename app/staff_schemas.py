@@ -1,9 +1,9 @@
 """Strict boundaries for L0/L1 orchestration. These contracts grant no external authority."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.schemas import PlanBudget
 
@@ -107,6 +107,37 @@ class StaffOutput(StrictModel):
     findings: list[Finding] = Field(default_factory=list, max_length=6)
     missing_information: list[str] = Field(default_factory=list, max_length=10)
     next_action: str = Field(min_length=1, max_length=2000)
+
+
+class CompactFinding(Finding):
+    """Same decision fields, bounded prose for provider generation."""
+
+    title: str = Field(min_length=1, max_length=120)
+    situation: str = Field(min_length=1, max_length=400)
+    why_now: str = Field(min_length=1, max_length=180)
+    recommendation: str = Field(min_length=1, max_length=350)
+    alternative: str = Field(min_length=1, max_length=250)
+    risk: str = Field(min_length=1, max_length=200)
+    evidence_refs: list[Annotated[str, StringConstraints(min_length=1, max_length=240)]] = Field(
+        min_length=1, max_length=4
+    )
+
+
+class CompactStaffOutput(StaffOutput):
+    """Generation contract; legacy persisted StaffOutput remains readable."""
+
+    summary: str = Field(min_length=1, max_length=700)
+    findings: list[CompactFinding] = Field(default_factory=list, max_length=6)
+    missing_information: list[Annotated[str, StringConstraints(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=10
+    )
+    next_action: str = Field(min_length=1, max_length=300)
+
+    @model_validator(mode="after")
+    def bounded_json(self):
+        if len(self.model_dump_json()) > 7000:
+            raise ValueError("Staff output JSON must fit 7000 characters; shorten prose, preserve evidence")
+        return self
 
 
 class FactualOutput(StrictModel):
