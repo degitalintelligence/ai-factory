@@ -372,7 +372,7 @@ async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch
     assert result == "Implementation completed"
     assert any("repair feedback requires at least one successful file mutation" in item for item in traces)
     assert workspace.source == "fixed\n"
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v8"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v9"
 
 
 def test_tracked_runtime_artifact_is_binding_initial_feedback():
@@ -662,4 +662,154 @@ async def test_identical_stale_replacement_rolls_over_before_generic_stall(monke
 
     assert len(prompts) == 4
     assert "CURRENT FILE AFTER FAILED REPLACEMENT:\npartial edit" in prompts[-1]
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v8"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v9"
+
+
+async def test_different_ambiguous_replacements_roll_over_on_the_same_path(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        def replace_text(self, path, old_text, content):
+            raise WorkspaceError("old_text must match exactly once (matches=2); read the current file")
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(
+                action="replace_text",
+                path="README.md",
+                old_text="first ambiguous anchor",
+                content="replacement",
+            ),
+            DeveloperAction(
+                action="replace_text",
+                path="README.md",
+                old_text="second ambiguous anchor",
+                content="replacement",
+            ),
+        ]
+    )
+    prompts = []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return next(script)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+
+    with pytest.raises(agents.DeveloperStalled, match="ambiguous or stale replace_text anchors"):
+        await agents.developer_loop(
+            workspace=Workspace(),
+            requirement="Repair duplicated tests",
+            plan=LeadPlan(objective="Repair", acceptance_criteria=["Tests remain unique"]),
+        )
+
+    assert len(prompts) == 3
+    assert "CURRENT FILE AFTER FAILED REPLACEMENT:\n# Demo" in prompts[-1]
+
+
+async def test_runtime_artifact_error_forces_explicit_cleanup_before_more_edits(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        writes = 0
+
+        def list_files(self):
+            return "README.md\ntodos.db\n"
+
+        def run_command(self, command):
+            raise WorkspaceError("Remove generated/runtime artifact: todos.db")
+
+        def replace_text(self, *args):
+            self.writes += 1
+            return "Wrote README.md"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="run_command", command="python -m pytest -q"),
+            DeveloperAction(action="replace_text", path="README.md", old_text="# Demo", content="# Changed"),
+            DeveloperAction(action="run_command", command="python -m pytest -q"),
+        ]
+    )
+    prompts = []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return next(script)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+
+    with pytest.raises(agents.DeveloperStalled, match="artifact cleanup was not performed"):
+        await agents.developer_loop(
+            workspace=workspace,
+            requirement="Repair tests",
+            plan=LeadPlan(objective="Repair", acceptance_criteria=["Clean tests"]),
+        )
+
+    assert workspace.writes == 0
+    assert "CONTROLLER BLOCKER" in prompts[-1]
+    assert "delete_file" in prompts[-1] and "todos.db" in prompts[-1]
+
+
+async def test_explicit_runtime_artifact_cleanup_unblocks_repair(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.source = "# Demo\n"
+            self.artifact_exists = True
+
+        def list_files(self):
+            return "README.md\ntodos.db\n" if self.artifact_exists else "README.md\n"
+
+        def read_file(self, path):
+            assert path == "README.md"
+            return self.source
+
+        def run_command(self, command):
+            if self.artifact_exists:
+                raise WorkspaceError("Remove generated/runtime artifact: todos.db")
+            return "tests passed"
+
+        def delete_file(self, path):
+            assert path == "todos.db"
+            self.artifact_exists = False
+            return "Deleted todos.db"
+
+        def replace_text(self, path, old_text, content):
+            assert path == "README.md"
+            self.source = self.source.replace(old_text, content)
+            return "Wrote README.md"
+
+        def diff(self):
+            if self.artifact_exists:
+                raise WorkspaceError("Remove generated/runtime artifact: todos.db")
+            return "diff --git a/README.md b/README.md\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="run_command", command="python -m pytest -q"),
+            DeveloperAction(action="delete_file", path="todos.db"),
+            DeveloperAction(
+                action="replace_text",
+                path="README.md",
+                old_text="# Demo",
+                content="# Repaired",
+            ),
+            DeveloperAction(action="run_command", command="python -m pytest -q"),
+            DeveloperAction(action="git_diff"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+
+    async def model(**kwargs):
+        return next(script)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+    result = await agents.developer_loop(
+        workspace=workspace,
+        requirement="Repair tests",
+        plan=LeadPlan(objective="Repair", acceptance_criteria=["Clean tests"]),
+    )
+
+    assert result == "Implementation completed"
+    assert workspace.artifact_exists is False
+    assert workspace.source == "# Repaired\n"
