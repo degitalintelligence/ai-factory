@@ -6,7 +6,7 @@ import pytest
 
 from app import agents, orchestrator
 from app.config import settings
-from app.schemas import DeveloperAction, LeadPlan, ReviewResult
+from app.schemas import CommandResult, DeveloperAction, LeadPlan, ReviewResult, TestReport
 from app.store import BudgetExceeded
 from app.workspace import WorkspaceError
 
@@ -261,6 +261,78 @@ async def test_finish_collects_successful_diff_after_the_latest_mutation(monkeyp
     assert "ACTION: finish" in traces[-1]
 
 
+async def test_finish_blocked_until_latest_test_command_reports_no_issues(monkeypatch):
+    """Task 64: a zero exit code with sandbox issues must not allow finish."""
+    artifact_issue = "Commands modified source or left test artifacts: todos.db"
+
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.repaired = False
+
+        def replace_text(self, path, old_text, content):
+            self.repaired = True
+            return f"Wrote {path}"
+
+        def run_command(self, command):
+            # First run recreates the runtime artifact; only after the developer
+            # reroutes storage does the suite come back with an empty issues list.
+            if not self.repaired:
+                return TestReport(
+                    results=[CommandResult(command=["python", "-m", "pytest"], exit_code=0)],
+                    issues=[artifact_issue],
+                )
+            return TestReport(results=[CommandResult(command=["python", "-m", "pytest"], exit_code=0)])
+
+        def diff(self):
+            return "diff --git a/README.md b/README.md\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="run_command", command="python -m pytest -q"),
+            DeveloperAction(action="finish"),
+            DeveloperAction(
+                action="replace_text",
+                path="README.md",
+                old_text="# Demo",
+                content="# Demo (tmp_path storage)",
+            ),
+            DeveloperAction(action="run_command", command="python -m pytest -q"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+    prompts = []
+    traces = []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return next(script)
+
+    async def trace(_step, record):
+        traces.append(record)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    result = await agents.developer_loop(
+        workspace=Workspace(),
+        requirement="Add /todo count",
+        plan=LeadPlan(objective="Count", acceptance_criteria=["Count works"]),
+        trace=trace,
+    )
+
+    assert result == "Implementation completed"
+    assert any(
+        "Finish blocked: the most recent test command still reported sandbox issues" in item
+        for item in traces
+    )
+    assert any(artifact_issue in item for item in traces)
+    # The blocked finish is replayed to the model so the repair instruction is binding.
+    assert any(
+        "Finish blocked: the most recent test command still reported sandbox issues" in prompt
+        for prompt in prompts[3:]
+    )
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v10"
+
+
 async def test_existing_file_whole_write_requires_reading_that_exact_path(monkeypatch):
     class Workspace(FakeDeveloperWorkspace):
         def __init__(self):
@@ -372,7 +444,7 @@ async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch
     assert result == "Implementation completed"
     assert any("repair feedback requires at least one successful file mutation" in item for item in traces)
     assert workspace.source == "fixed\n"
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v9"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v10"
 
 
 def test_tracked_runtime_artifact_is_binding_initial_feedback():
@@ -663,7 +735,7 @@ async def test_identical_stale_replacement_rolls_over_before_generic_stall(monke
 
     assert len(prompts) == 4
     assert "CURRENT FILE AFTER FAILED REPLACEMENT:\npartial edit" in prompts[-1]
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v9"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v10"
 
 
 async def test_different_ambiguous_replacements_roll_over_on_the_same_path(monkeypatch):

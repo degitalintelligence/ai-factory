@@ -89,7 +89,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v9"
+PROMPT_VERSION_DEVELOPER = "developer-v10"
 PROMPT_VERSION_REVIEWER = "reviewer-v4"
 
 
@@ -165,6 +165,8 @@ that creates them: inspect the complete test suite for build_app()/default-stora
 tmp_path, :memory:, or a pytest monkeypatch fixture. If the artifact was tracked, keep its source deletion, but
 do not treat deletion alone as the fix; do not add ignores or claim a passing test report is clean while the
 sandbox `issues` list is nonempty. Make this targeted test mutation before repeating the suite.
+finish is blocked while your most recent run_command result still has a nonempty issues list; rerun the
+suite until that list is empty, then finish.
 If a test command reports that a tracked runtime artifact must be removed, cleanup becomes the immediate blocker:
 delete every listed tracked artifact with delete_file before any further source mutation or test command, then
 repair the tests that recreate it. The controller rejects unrelated edits/tests until that explicit deletion.
@@ -233,6 +235,7 @@ async def developer_loop(
     last_failed_replace = None
     repeated_failed_replace = 0
     ambiguous_replace_paths = {}
+    last_command_issues: list[str] = []
     mutations = {"write_file", "replace_text", "delete_file"}
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
     file_index = workspace.list_files()
@@ -302,6 +305,13 @@ async def developer_loop(
                 result = (
                     "ERROR ValueError: Tracked runtime artifact cleanup required before finish. "
                     "Use delete_file for: " + ", ".join(sorted(tracked_artifacts))
+                )
+            elif last_command_issues:
+                result = (
+                    "Finish blocked: the most recent test command still reported sandbox issues: "
+                    + "; ".join(last_command_issues)
+                    + ". Fix the tests that create them (route storage through tmp_path/:memory:), "
+                    "rerun the suite until its issues list is empty, then finish."
                 )
             elif reviewer_feedback and successful_mutations == 0:
                 result = (
@@ -374,6 +384,11 @@ async def developer_loop(
                         f"{action.path}. Use read_file, preserve existing behavior/tests, and prefer replace_text."
                     )
                 result = await asyncio.to_thread(calls[action.action])
+                if action.action == "run_command":
+                    # A clean exit code is not evidence while the sandbox reports
+                    # issues (for example a test recreating a runtime artifact).
+                    reported = getattr(result, "issues", None)
+                    last_command_issues = list(reported) if reported else []
                 if action.action in {"read_file", "list_files"}:
                     inspected = True
                 if action.action == "read_file" and action.path:
