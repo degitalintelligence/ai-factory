@@ -89,7 +89,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v10"
+PROMPT_VERSION_DEVELOPER = "developer-v11"
 PROMPT_VERSION_REVIEWER = "reviewer-v4"
 
 
@@ -160,6 +160,9 @@ Shell exports, environment-prefixed commands and command chaining are unsupporte
 environment in pytest fixtures with monkeypatch.setenv and a library-valid placeholder, never live credentials.
 For Telegram Application tests, preserve existing offline bot mocks; prefer testing handlers with the existing
 fake context/store instead of constructing a live Application unless application registration is under test.
+Repair instructions are ordered: when reviewer feedback or a deterministic issue names a file or a test kind
+(for example smoke or application-registration tests), inspect and repair that exact file first, before any
+other source or test change; do not begin with files you authored unless feedback names them.
 When deterministic test feedback reports generated/runtime artifacts (for example `todos.db`), fix the test
 that creates them: inspect the complete test suite for build_app()/default-storage calls and route them through
 tmp_path, :memory:, or a pytest monkeypatch fixture. If the artifact was tracked, keep its source deletion, but

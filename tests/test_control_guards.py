@@ -330,7 +330,7 @@ async def test_finish_blocked_until_latest_test_command_reports_no_issues(monkey
         "Finish blocked: the most recent test command still reported sandbox issues" in prompt
         for prompt in prompts[3:]
     )
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v10"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v11"
 
 
 async def test_existing_file_whole_write_requires_reading_that_exact_path(monkeypatch):
@@ -444,7 +444,7 @@ async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch
     assert result == "Implementation completed"
     assert any("repair feedback requires at least one successful file mutation" in item for item in traces)
     assert workspace.source == "fixed\n"
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v10"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v11"
 
 
 def test_tracked_runtime_artifact_is_binding_initial_feedback():
@@ -457,6 +457,20 @@ def test_tracked_runtime_artifact_is_binding_initial_feedback():
     assert any("Deterministic repair required" in item for item in feedback)
     assert any("todos.db" in item for item in feedback)
     assert fixture["base_sha"] == "455ea8620a49356386aa91df43d8b5595a6d587f"
+
+
+def test_developer_prompt_prioritizes_files_named_by_repair_feedback():
+    system, context = agents.developer_request(
+        file_index="README.md\nbot.py\n",
+        requirement="Add /todo count",
+        plan=LeadPlan(objective="Count", acceptance_criteria=["Counted"]),
+        reviewer_feedback=["Deterministic repair required: fix tests/test_smoke.py"],
+    )
+
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v11"
+    assert "inspect and repair that exact file first" in system
+    assert "smoke or application-registration tests" in system
+    assert "tests/test_smoke.py" in context
 
 
 async def test_developer_cannot_consume_the_last_independent_review_call(db, monkeypatch):
@@ -735,7 +749,7 @@ async def test_identical_stale_replacement_rolls_over_before_generic_stall(monke
 
     assert len(prompts) == 4
     assert "CURRENT FILE AFTER FAILED REPLACEMENT:\npartial edit" in prompts[-1]
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v10"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v11"
 
 
 async def test_different_ambiguous_replacements_roll_over_on_the_same_path(monkeypatch):
