@@ -269,3 +269,19 @@ def test_python_mutation_rejects_new_duplicate_top_level_definitions(repo):
         )
 
     assert workspace.read_file("tests/test_feature.py").count("def test_existing") == 1
+
+
+def test_python_mutation_allows_overload_definitions(repo):
+    workspace, _ = repo
+    workspace.write_file(
+        "typed.py",
+        "from typing import overload\n\n"
+        "@overload\n"
+        "def parse(value: int) -> int: ...\n\n"
+        "@overload\n"
+        "def parse(value: str) -> str: ...\n\n"
+        "def parse(value: int | str) -> int | str:\n"
+        "    return value\n",
+    )
+
+    assert workspace.read_file("typed.py").count("def parse") == 3
