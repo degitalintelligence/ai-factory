@@ -78,7 +78,8 @@ def test_fresh_call_estimate_covers_intake_developer_and_review():
     fixture = task_52()
     fixture["plan"]["budget"]["max_llm_calls"] = 2
     plan, accounting = admit(fixture)
-    assert plan.budget.max_llm_calls == accounting["minimum_calls"] == 9
+    assert accounting["minimum_calls"] == 9
+    assert plan.budget.max_llm_calls == accounting["execution_calls"] == 1 + settings.max_dev_steps + 3
     assert not accounting["issues"]
     saved, accounting = admit(fixture, fresh=False)
     assert saved.budget.max_llm_calls == 2
@@ -123,3 +124,22 @@ def test_already_exhausted_cost_is_blocked_without_new_dollar_authority():
     )
     assert any("reported_cost" in issue for issue in accounting["issues"])
     assert accounting["admitted"]["max_cost_usd"] == 0.5
+
+
+async def test_task_53_exact_call_failure_and_fresh_iteration_allowance(db):
+    actual = json.loads((Path(__file__).parent / "fixtures/task_53_budget.json").read_text())
+    task = await db.create(actual["requirement"])
+    await db.claim("w")
+    await db.update(task.id, "w", plan_json=json.dumps(actual["plan"]), llm_calls=20, tokens=118775)
+    with pytest.raises(BudgetExceeded, match="calls=20/20"):
+        await db.reserve_call(task.id, "w", token_reserve=22402)
+    fixture = task_52()
+    fixture["plan"] = actual["plan"]
+    fixture["plan"]["budget"] = actual["plan_budget_accounting"]["estimate"]
+    fixture["used_tokens"] = actual["plan_budget_accounting"]["used"]["tokens"]
+    fresh, accounting = admit(fixture)
+    assert fresh.budget.max_llm_calls >= 1 + settings.max_dev_steps + 3 > 20
+    assert fresh.budget.max_tokens <= settings.max_total_tokens
+    assert not accounting["issues"]
+    saved, _ = admit(fixture, fresh=False)
+    assert saved.budget.max_llm_calls == 20

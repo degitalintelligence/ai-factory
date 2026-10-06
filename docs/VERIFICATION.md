@@ -48,6 +48,20 @@ allowances affect admission through the same reservation helper used by actual
 gateway calls. Real provider completion still requires a new bounded lab task
 after deployment; historical #52 must not be retried expecting a budget reset.
 
+Task #53 regression reproduces the exact `calls=20/20` failure and verifies fresh
+admission funds one configured Developer iteration plus review attempts. A scripted
+24-action regression runs the real Developer loop and workspace tools against a
+temporary Git repository, recovers exact-anchor failures, rejects a tracked runtime
+artifact, repairs an unsupported async test pattern, inspects a fresh diff and
+reaches independent review/publication in 26 accounted calls. Models, sandbox test
+responses and GitHub remain mocked; this is not a replay of unavailable model
+outputs or proof of live `/todo count` behavior. Additional tests keep the final
+review call, constrain gateway retries, require a successful diff after mutations
+and keep long replacement payloads out of history while exposing the error in the
+first 600 trace characters. Original runtime-data, test-failure, source-integrity
+and review gates remain mandatory. Real provider acceptance requires a fresh lab
+task after release; #53 keeps its saved budget and history.
+
 ## Task #47 audit quality regression
 
 `tests/test_repository_audit_evidence.py` exercises pinned source reads, active

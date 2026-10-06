@@ -449,6 +449,12 @@ async def run_task(task_id, notify=None, owner=None):
             async def trace(step, record):
                 await check()
                 await store.event(task_id, "tool", f"Iteration {iteration}, step {step}: {record}")
+                await store.artifact(
+                    task_id,
+                    "developer_trace",
+                    json.dumps({"iteration": iteration, "step": step, "record": record}),
+                    owner=owner,
+                )
 
             await developer_loop(
                 workspace=workspace,

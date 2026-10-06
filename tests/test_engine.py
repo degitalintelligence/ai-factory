@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from app import orchestrator
+from app import agents, orchestrator
 from app.config import settings
 from app.contracts import decision_inbox, resolve_decision
-from app.schemas import CommandResult, CriterionEvidence, LeadPlan, ReviewResult
+from app.schemas import CommandResult, CriterionEvidence, DeveloperAction, LeadPlan, ReviewResult
 from app.schemas import TestReport as Report
 from app.workspace import Workspace
 
@@ -271,6 +271,121 @@ async def test_high_risk_approval_binds_the_admitted_budget(db, engine_fakes, mo
     await resolve_decision(item.id, "approve", user_id=7)
     result = await execute(db, task.id, owner="w2")
     assert result.status == "pr_created" and result.plan_json == admitted
+
+
+async def test_task_53_real_developer_loop_repairs_tool_failures_then_reviews_once(
+    db, repo, engine_fakes, monkeypatch
+):
+    """Script equivalent budget/tool failures, exercising real tools and loop.
+
+    Models, sandbox responses and GitHub remain mocked. No lab code or production
+    runtime is executed. Final SQL/Git/test/review/publication gates are real.
+    """
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_53_budget.json").read_text())
+    workspace, git = repo
+    state, refs = engine_fakes
+    (workspace.path / "todos.db").write_text("disposable test artifact")
+    git("add", "-f", "todos.db")
+    git("commit", "-m", "Fixture with tracked runtime artifact")
+    workspace.base_sha = git("rev-parse", "HEAD")
+    refs["main"] = workspace.base_sha
+    script = [
+        {"action": "read_file", "path": "app.py"},
+        {"action": "list_files"},
+        {"action": "write_file", "path": "app.py", "content": "def value(): return 2\n"},
+        {"action": "replace_text", "path": "app.py", "old_text": "stale anchor", "content": "new"},
+        {"action": "read_file", "path": "app.py"},
+        {"action": "replace_text", "path": "app.py", "old_text": "return 2", "content": "return 3"},
+        {"action": "read_file", "path": "README.md"},
+        {
+            "action": "write_file",
+            "path": "tests/test_app.py",
+            "content": "from app import value\nasync def test_value(): assert value() == 3\n",
+        },
+        {"action": "read_file", "path": "tests/test_app.py"},
+        {"action": "git_diff"},
+        {"action": "run_command", "command": "python -m pytest -q"},
+        {"action": "delete_file", "path": "todos.db"},
+        {"action": "run_command", "command": "python -m pytest -q"},
+        {
+            "action": "replace_text",
+            "path": "tests/test_app.py",
+            "old_text": "stale test anchor",
+            "content": "new",
+        },
+        {"action": "read_file", "path": "tests/test_app.py"},
+        {"action": "replace_text", "path": "tests/test_app.py", "old_text": "async def", "content": "def"},
+        {"action": "run_command", "command": "python -m pytest -q"},
+        {"action": "git_diff"},
+        {"action": "read_file", "path": "app.py"},
+        {"action": "replace_text", "path": "app.py", "old_text": "return 3", "content": "return 4"},
+        {"action": "replace_text", "path": "tests/test_app.py", "old_text": "== 3", "content": "== 4"},
+        {"action": "run_command", "command": "python -m pytest -q"},
+        {"action": "git_diff"},
+        {"action": "finish", "note": "Scoped implementation and test repair completed"},
+    ]
+    seen = []
+    reviewer = orchestrator.review_change
+
+    async def lead(*args):
+        task_id, owner = agents.run_context.get()
+        await db.reserve_call(task_id, owner, token_reserve=24000)
+        await db.record_usage(task_id, owner, 5239, 0.002)
+        return LeadPlan(
+            objective="Feature",
+            acceptance_criteria=["Returns the requested value"],
+            budget=fixture["plan_budget_accounting"]["estimate"],
+        )
+
+    async def developer_model(**kwargs):
+        assert kwargs["role"] == "developer" and 1 <= kwargs["max_attempts"] <= 3
+        task_id, owner = agents.run_context.get()
+        await db.reserve_call(task_id, owner, token_reserve=24000)
+        await db.record_usage(task_id, owner, 6000, 0.002)
+        seen.append(kwargs["user"])
+        return DeveloperAction.model_validate(script[len(seen) - 1])
+
+    def sandbox_command(self, command):
+        self.snapshot()  # Real source hygiene gate, mocked sandbox execution only.
+        asynchronous = "async def" in self.read_file("tests/test_app.py")
+        return Report(
+            results=[
+                CommandResult(
+                    command=["python", "-m", "pytest"],
+                    exit_code=1 if asynchronous else 0,
+                    output="async def functions are not natively supported"
+                    if asynchronous
+                    else "test evidence",
+                )
+            ]
+        ).model_dump_json()
+
+    async def review(**kwargs):
+        task_id, owner = agents.run_context.get()
+        current = await db.get(task_id)
+        assert current.llm_calls == 25 > 20
+        await db.reserve_call(task_id, owner, token_reserve=30000)
+        await db.record_usage(task_id, owner, 6000, 0.002)
+        return await reviewer(**kwargs)
+
+    monkeypatch.setattr(orchestrator, "lead_plan", lead)
+    monkeypatch.setattr(orchestrator, "developer_loop", agents.developer_loop)
+    monkeypatch.setattr(agents, "json_completion", developer_model)
+    monkeypatch.setattr(orchestrator, "review_change", review)
+    monkeypatch.setattr(Workspace, "run_command", sandbox_command)
+    task = await db.create(fixture["requirement"])
+    result = await execute(db, task.id)
+    assert result.status == "pr_created" and result.llm_calls == 26
+    assert len(seen) == 24 and state["prs"] == state["pushes"] == 1
+    traces = [json.loads(a.content) for a in await db.artifacts(task.id) if a.kind == "developer_trace"]
+    assert len(traces) == 24
+    assert "matches=0" in traces[3]["record"][:600]
+    assert "Remove generated/runtime artifact" in traces[10]["record"][:600]
+    assert "async def functions are not natively supported" in traces[12]["record"][:600]
+    assert any("use a smaller unique exact anchor" in prompt for prompt in seen)
+    assert not (workspace.path / "todos.db").exists()
+    assert "def value(): return 4" in workspace.read_file("app.py")
+    assert git("status", "--porcelain") == ""
 
 
 async def test_review_only_completes_without_mutation_or_pr(db, engine_fakes, monkeypatch):

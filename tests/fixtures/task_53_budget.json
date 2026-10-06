@@ -1,0 +1,116 @@
+{
+  "requirement": "Tambahkan subcommand /todo count pada repository degitalintelligence/telegram-lab. Tujuan: pengguna dapat melihat jumlah todo miliknya. Acceptance criteria: 1. /todo count membalas Jumlah todo Anda: N. Jika kosong, N = 0. 2. Hitungan hanya mencakup todo pengguna yang mengirim command. 3. Command ini tidak menambah, mengubah, atau menghapus todo. 4. Fitur add/list dan penyimpanan setelah restart tetap berfungsi. 5. Tambahkan test untuk kondisi kosong, beberapa todo, isolasi antar pengguna, serta memastikan command count tidak mengubah data. Baca implementasi yang ada dan kunci exact base SHA sebelum bekerja. Gunakan penyimpanan yang sudah tersedia. Jalankan seluruh test suite secara offline di sandbox, lakukan review independen, lalu buat PR jika semua pemeriksaan lulus. Target hanya telegram-lab. Jangan mengubah ai-factory, jangan merge, dan jangan deploy. Laporkan target repository, base SHA, hasil test, hasil review, dan URL PR.",
+  "plan_budget_accounting": {
+    "workflow": "engineering",
+    "fresh": true,
+    "explicit_budget": false,
+    "estimate": {
+      "max_llm_calls": 20,
+      "max_tokens": 20000,
+      "max_cost_usd": 0.5
+    },
+    "admitted": {
+      "max_llm_calls": 20,
+      "max_tokens": 340000,
+      "max_cost_usd": 0.5
+    },
+    "effective_limits": {
+      "max_llm_calls": 20,
+      "max_total_tokens": 340000,
+      "max_cost_usd": 0.5
+    },
+    "used": {
+      "calls": 1,
+      "tokens": 5239,
+      "reported_cost_usd": 0.0020632
+    },
+    "developer_baseline_calls": 7,
+    "developer_reserve": 17066,
+    "reviewer_reserve": 26719,
+    "minimum_calls": 9,
+    "minimum_tokens": 151420,
+    "planned_allocation_tokens": 339146,
+    "issues": [],
+    "note": "Initial prompt byte reserves plus output allowance; not billed tokens or guaranteed completion. Saved/user budgets and operator ceilings are never raised; lifetime usage is retained."
+  },
+  "plan": {
+    "objective": "Implement the /todo count subcommand in telegram-lab to allow users to see the count of their own todos without modifying data, preserving existing add/list functionality and persistence.",
+    "acceptance_criteria": [
+      "/todo count command replies with 'Jumlah todo Anda: N' where N is the count of todos for the requesting user, 0 if none.",
+      "The count only includes todos belonging to the user who sent the command.",
+      "The /todo count command does not add, modify, or delete any todos.",
+      "Existing /todo add and /todo list commands and todo persistence after restart continue to work without regression.",
+      "Automated tests cover empty todo list, multiple todos, user isolation (todos counted per user), and verify that /todo count does not alter data."
+    ],
+    "assumptions": [
+      "The existing TodoStore class and SQLite database are used for todo storage and retrieval.",
+      "The bot.py structure and command handler registration pattern will be followed for the new subcommand.",
+      "Tests in tests/test_todo.py can be extended or new tests added there.",
+      "The environment variable TELEGRAM_BOT_TOKEN is set for testing.",
+      "The base branch main is stable and tests pass before starting."
+    ],
+    "constraints": [
+      "Do not modify ai-factory repository or any other repository except telegram-lab.",
+      "Do not merge or deploy the change; only create a PR for review.",
+      "Use only the existing storage mechanism (SQLite) and do not introduce new dependencies.",
+      "Run all tests offline in sandbox before PR creation.",
+      "Follow existing code style and async conventions."
+    ],
+    "dependencies": [
+      "telegram-lab repository main branch at exact base SHA before starting work.",
+      "Python 3 environment with python-telegram-bot 22.3 and pytest 8.4.2 installed.",
+      "Access to run sandbox tests and create GitHub PR in telegram-lab repository."
+    ],
+    "suggested_tests": [
+      "Test /todo count returns 0 when user has no todos.",
+      "Test /todo count returns correct number when user has multiple todos.",
+      "Test /todo count for one user does not include todos from another user.",
+      "Test that /todo count command does not add, modify, or delete any todos.",
+      "Regression test that /todo add and /todo list still work as before."
+    ],
+    "steps": [
+      "1. Identify the exact base SHA of telegram-lab main branch before starting work.",
+      "2. Extend the TodoStore class with a method to count todos for a given user_id, e.g. count_todos(user_id: int) -> int.",
+      "3. Modify the async todo command handler in bot.py to recognize the 'count' subcommand and reply with the count of todos for the requesting user.",
+      "4. Ensure the 'count' subcommand does not modify the database or todos in any way.",
+      "5. Add new tests in tests/test_todo.py to cover: empty todo list count, multiple todos count, isolation between different users, and that count command does not change data.",
+      "6. Run the full test suite offline in sandbox to verify no regressions and that new tests pass.",
+      "7. Perform an independent code review focusing on correctness, security (user isolation), and no side effects.",
+      "8. Create a pull request in telegram-lab repository with the changes referencing the base SHA and including test results and review summary.",
+      "9. Report the target repository, base SHA, test results, review results, and PR URL as final output."
+    ],
+    "skills": [
+      "engineering"
+    ],
+    "risks": [
+      "Potential regression in todo add/list or persistence if code changes are not isolated.",
+      "Incorrect user ID handling causing wrong counts or data leakage.",
+      "Tests may not fully cover concurrency or edge cases if not carefully designed."
+    ],
+    "approval_gates": [
+      "Code review approval by engineering lead or designated reviewer.",
+      "All tests pass in sandbox environment before PR creation.",
+      "Verification that no existing functionality is broken."
+    ],
+    "rollback_plan": "If the /todo count feature causes regressions or issues, revert the commit/PR branch and restore the previous stable main branch state.",
+    "budget": {
+      "max_llm_calls": 20,
+      "max_tokens": 340000,
+      "max_cost_usd": 0.5
+    },
+    "questions": [],
+    "risk": "low",
+    "deployment_required": false,
+    "persistence_required": false,
+    "review_only": false,
+    "post_publication_criteria": []
+  },
+  "failure": {
+    "stage": "developing",
+    "category": "BudgetExceeded",
+    "detail": "Task LLM budget exhausted (calls=20/20); use /report and /logs, then create a new bounded task or obtain an approved policy change. /retry does not reset lifetime usage."
+  },
+  "used_calls": 20,
+  "used_tokens": 118775,
+  "reported_cost_usd": 0.0495
+}

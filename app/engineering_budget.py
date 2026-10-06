@@ -35,9 +35,12 @@ def engineering_budget_admission(
     adjustable = fresh and not explicit
     admitted = plan.model_copy(deep=True)
     minimum_calls = used_calls + DEVELOPER_BASELINE_CALLS + 1
+    # A one-action-per-call Developer can legitimately need more than a model's
+    # estimate of 20 calls. Fund one bounded iteration and gateway review attempts.
+    execution_calls = used_calls + settings.max_dev_steps + 3
     if adjustable:
         admitted.budget.max_llm_calls = min(
-            settings.max_llm_calls, max(estimate["max_llm_calls"], minimum_calls)
+            settings.max_llm_calls, max(estimate["max_llm_calls"], minimum_calls, execution_calls)
         )
 
     # Re-render once after allocation: the budget itself appears in both prompts.
@@ -101,6 +104,7 @@ def engineering_budget_admission(
         "developer_reserve": developer_reserve,
         "reviewer_reserve": reviewer_reserve,
         "minimum_calls": minimum_calls,
+        "execution_calls": execution_calls,
         "minimum_tokens": minimum_tokens,
         "planned_allocation_tokens": allocation,
         "issues": issues,
