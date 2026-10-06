@@ -15,7 +15,7 @@ from app.llm import run_context
 from app.schemas import LeadPlan
 from app.security import redact
 from app.store import BudgetExceeded, TaskStopped, plan_hash, store
-from app.workspace import Workspace
+from app.workspace import Workspace, is_suspicious_artifact
 
 _TEST_ARTIFACT_PREFIX = "Commands modified source or left test artifacts:"
 
@@ -51,6 +51,17 @@ def engineering_repair_feedback(issues: list[str], review_issues: list[str]) -> 
     return list(dict.fromkeys(guidance + issues + filtered_review))
 
 
+def initial_source_hygiene_feedback(file_index: str, feedback: list[str]) -> list[str]:
+    """Make tracked runtime artifacts binding before the first Developer action."""
+    artifact_paths = [path for path in file_index.splitlines() if is_suspicious_artifact(path)]
+    if not artifact_paths:
+        return feedback
+    return engineering_repair_feedback(
+        [f"{_TEST_ARTIFACT_PREFIX} {', '.join(artifact_paths)}"],
+        feedback,
+    )
+
+
 logger = logging.getLogger(__name__)
 
 # Documents that describe how the repository must be changed, captured verbatim for replayable provenance.
@@ -69,6 +80,31 @@ BASELINE_DOCUMENTS = (
 
 # Self-improvement tasks must start from the requested files and policy, not the whole product tree.
 SELF_BASELINE_DOCUMENTS = ("README.md", "AGENTS.md")
+
+
+def requirement_related_paths(file_index: str, requirement: str, *, limit: int = 8) -> list[str]:
+    """Select small, named source/test files whose paths match requirement terms.
+
+    The standard baseline is intentionally small, but feature-specific regression
+    tests are often more useful than a generic smoke test. Path matching is kept
+    deterministic so the recorded baseline remains replayable.
+    """
+    terms = {
+        token
+        for token in re.findall(r"[a-z0-9]+", requirement.casefold())
+        if len(token) >= 4
+    }
+    ranked = []
+    for position, path in enumerate(file_index.splitlines()):
+        if is_suspicious_artifact(path):
+            continue
+        path_terms = set(re.findall(r"[a-z0-9]+", path.casefold()))
+        overlap = terms & path_terms
+        if not overlap:
+            continue
+        test_bonus = 2 if path.startswith("tests/") or "/test" in path else 0
+        ranked.append((-(len(overlap) + test_bonus), position, path))
+    return [path for _score, _position, path in sorted(ranked)[:limit]]
 
 
 async def repository_context(workspace, task):
@@ -96,7 +132,8 @@ async def repository_context(workspace, task):
         baseline_paths = list(dict.fromkeys((*referenced, *SELF_BASELINE_DOCUMENTS)))[:12]
         per_file_limit = 4000
     else:
-        baseline_paths = list(dict.fromkeys((*BASELINE_DOCUMENTS, *referenced)))[:40]
+        related = requirement_related_paths(files, task.requirement)
+        baseline_paths = list(dict.fromkeys((*referenced, *related, *BASELINE_DOCUMENTS)))[:40]
         per_file_limit = 10000
     for path in baseline_paths:
         try:
@@ -473,6 +510,10 @@ async def run_task(task_id, notify=None, owner=None):
             return
 
         feedback = json.loads(task.feedback_json)
+        initial_feedback = initial_source_hygiene_feedback(workspace.list_files(), feedback)
+        if initial_feedback != feedback:
+            feedback = initial_feedback
+            await store.update(task_id, owner, feedback_json=json.dumps(feedback))
         for iteration in range(task.iteration + 1, settings.max_iterations + 1):
             await transition(
                 "developing",
