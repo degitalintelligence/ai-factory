@@ -1,0 +1,21 @@
+{
+  "task_id": 61,
+  "repository": "degitalintelligence/telegram-lab",
+  "base_sha": "455ea8620a49356386aa91df43d8b5595a6d587f",
+  "failure_stage": "developing",
+  "status": "failed",
+  "usage": {
+    "calls": 12,
+    "tokens": 92090,
+    "reported_cost_usd": 0.0399
+  },
+  "successful_mutation_step": 3,
+  "stale_replace_steps": [4, 5, 6, 7, 8, 9, 10, 11],
+  "observed_failure": "Developer stalled: repeated replace_text on bot.py",
+  "required_controls": [
+    "detect an identical stale replacement anchor before the generic stall limit",
+    "preserve partial source mutations",
+    "continue with binding recovery feedback in the next iteration",
+    "do not bypass mandatory tests or independent review"
+  ]
+}
