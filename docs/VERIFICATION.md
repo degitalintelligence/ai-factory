@@ -132,3 +132,12 @@ clause says "jangan" or "do not". This is a bounded advisory text check, not a
 general language parser or an authorization grant; permission/execution gates
 are unchanged. Provider acceptance after deployment remains separate from the
 exact-output replay and infrastructure tests.
+
+Task #54 regression retains the supplied sandbox report (14 passing tests with a
+`todos.db` artifact issue) and first finish action. Scripted model actions exercise
+the real Developer loop, SQL state, workspace/Git, mandatory tests, review and
+publication gates; model, sandbox responses and GitHub are mocked. A controller
+finish checkpoint collects the latest complete diff without another model call.
+Artifact issues reject publication even when the model approves; a second bounded
+iteration repairs test storage before a single PR is allowed. Failed diff hygiene
+checks still block handoff. This is not an actual provider replay or live lab test.

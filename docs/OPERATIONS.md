@@ -506,3 +506,12 @@ semantic review quality or live completion.
 Deploy the reviewed SHA and create a new audit. Do not retry #39 expecting its
 saved plan or lifetime consumption to reset. Roll back to the previous reviewed
 image/commit if the new profile regresses; preserve database/workspace volumes.
+
+For Engineering tasks, `finish` requests handoff rather than asserting approval.
+If source was inspected but no current diff was collected, the controller records
+`git_diff (controller finish checkpoint)` through the existing safe workspace
+path. Mandatory sandbox tests, independent review and publication gates still run.
+A zero pytest exit code with sandbox `issues` is a failed check. Fix test-created
+storage using temporary paths (including existing build/registration smoke tests);
+deleting a workspace database alone does not prevent sandbox recreation. No
+automatic database cleanup, test skipping, budget reset or gate bypass is added.

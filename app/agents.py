@@ -88,7 +88,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v2"
+PROMPT_VERSION_DEVELOPER = "developer-v3"
 PROMPT_VERSION_REVIEWER = "reviewer-v1"
 
 
@@ -152,10 +152,15 @@ Check repository dependencies and existing tests before choosing a test pattern.
 plugin, use a synchronous test with asyncio.run, as existing tests may do; bare async def tests will fail.
 Check source hygiene before tests: tracked runtime databases cannot enter the sandbox snapshot. Never read
 database contents or ignore this gate; use temporary database paths in tests and report unsafe data blockers.
+An exit_code of zero is not sufficient: sandbox issues (including generated todos.db) mean checks failed.
+Inspect existing smoke/registration tests too: build_app() may create its default database. Route every test's
+storage through tmp_path/in-memory configuration; deleting the file alone does not prevent it being recreated.
 Implement meaningful acceptance tests, failure paths, configuration docs and complete requested deployment files.
 For deployment: Dockerfile (non-root), .dockerignore, .env.example (empty placeholders), Compose with healthchecks,
 restart policy and named volumes where stateful; docs/DEPLOYMENT.md with environment, health, backup and rollback.
 Never deploy or push; the orchestrator owns those actions. Use finish only after inspecting the diff.
+finish hands off to mandatory tests and independent review; it is not approval or publication. The controller
+collects a missing final diff itself. Never claim independent review or a PR URL before those stages run.
 Do not repeat identical reads or finish attempts. After understanding the scope, make a targeted mutation or report a concrete blocker.
 If requirements cannot be met within the environment, report the limitation in note and let review reject it.
 """
@@ -222,6 +227,22 @@ async def developer_loop(
             max_attempts=attempts,
         )
         if action.action == "finish":
+            # Final evidence collection is a controller responsibility too. Do not
+            # spend model calls repeating finish merely to request a read-only diff.
+            # This does not approve the work: mandatory tests/review/gates still run.
+            if inspected and not diff_inspected:
+                try:
+                    final_diff = await asyncio.to_thread(workspace.diff)
+                except (ValueError, RuntimeError, OSError) as exc:
+                    result = f"ERROR {type(exc).__name__}: Final diff collection failed: {exc}"
+                else:
+                    diff_inspected = True
+                    if trace:
+                        await trace(
+                            step + 1,
+                            "ACTION: git_diff (controller finish checkpoint)\nRESULT:\n"
+                            + str(final_diff)[:6000],
+                        )
             if inspected and diff_inspected:
                 if trace:
                     await trace(
@@ -229,7 +250,8 @@ async def developer_loop(
                         "ACTION: finish\nRESULT:\n" + (action.note or "Implementation completed")[:6000],
                     )
                 return action.note or "Implementation completed"
-            result = "Inspect existing files and git_diff before finish"
+            if not inspected:
+                result = "Finish blocked: read_file or list_files must inspect existing source first"
         else:
             try:
                 calls = {

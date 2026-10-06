@@ -135,9 +135,12 @@ async def test_large_failed_replacement_keeps_error_visible_without_replaying_so
     assert "old_text" in traces[1] and "characters" in traces[1]
 
 
-async def test_finish_requires_successful_diff_after_the_latest_mutation(monkeypatch):
+async def test_finish_collects_successful_diff_after_the_latest_mutation(monkeypatch):
     class Workspace(FakeDeveloperWorkspace):
+        diffs = 0
+
         def diff(self):
+            self.diffs += 1
             return "reviewable diff"
 
         def write_file(self, *args):
@@ -148,9 +151,7 @@ async def test_finish_requires_successful_diff_after_the_latest_mutation(monkeyp
             DeveloperAction(action="read_file", path="README.md"),
             DeveloperAction(action="git_diff"),
             DeveloperAction(action="write_file", path="README.md", content="changed"),
-            DeveloperAction(action="finish"),
-            DeveloperAction(action="git_diff"),
-            DeveloperAction(action="finish", note="final diff inspected"),
+            DeveloperAction(action="finish", note="ready for mandatory checks"),
         ]
     )
     prompts = []
@@ -160,13 +161,22 @@ async def test_finish_requires_successful_diff_after_the_latest_mutation(monkeyp
         return next(script)
 
     monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+    traces = []
+
+    async def trace(step, record):
+        traces.append(record)
+
     result = await agents.developer_loop(
-        workspace=Workspace(),
+        workspace=workspace,
+        trace=trace,
         requirement="Small edit",
         plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
     )
-    assert result == "final diff inspected" and len(prompts) == 6
-    assert "Inspect existing files and git_diff before finish" in prompts[4]
+    assert result == "ready for mandatory checks" and len(prompts) == 4
+    assert workspace.diffs == 2
+    assert "controller finish checkpoint" in traces[-2]
+    assert "ACTION: finish" in traces[-1]
 
 
 async def test_developer_cannot_consume_the_last_independent_review_call(db, monkeypatch):
@@ -189,6 +199,50 @@ async def test_developer_cannot_consume_the_last_independent_review_call(db, mon
     finally:
         agents.run_context.reset(token)
     assert (await db.get(task.id)).llm_calls == 2
+
+
+async def test_finish_checkpoint_failure_requires_repair_and_never_bypasses_hygiene(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        unsafe = True
+
+        def diff(self):
+            if self.unsafe:
+                raise WorkspaceError("Remove generated/runtime artifact: todos.db")
+            return "clean complete diff"
+
+        def delete_file(self, path):
+            assert path == "todos.db"
+            self.unsafe = False
+            return "Deleted todos.db"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="finish"),
+            DeveloperAction(action="delete_file", path="todos.db"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+    prompts, traces = [], []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return next(script)
+
+    async def trace(step, record):
+        traces.append(record)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    await agents.developer_loop(
+        workspace=Workspace(),
+        requirement="Edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        trace=trace,
+    )
+    assert "Final diff collection failed" in prompts[2]
+    assert "todos.db" in prompts[2]
+    assert sum("controller finish checkpoint" in item for item in traces) == 1
+    assert "ACTION: finish" in traces[-1]
 
 
 async def test_gateway_retries_leave_review_and_review_fits_remaining_calls(db, monkeypatch):
