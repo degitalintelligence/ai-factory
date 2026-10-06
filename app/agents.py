@@ -297,8 +297,7 @@ async def developer_loop(
                     if trace:
                         await trace(
                             step + 1,
-                            "ACTION: finish\nRESULT:\n"
-                            + (action.note or "Implementation completed")[:6000],
+                            "ACTION: finish\nRESULT:\n" + (action.note or "Implementation completed")[:6000],
                         )
                     return action.note or "Implementation completed"
                 if not inspected:
