@@ -180,3 +180,15 @@ step limit and reserves those later calls before authoring. A deterministic diff
 gate also rejects Python test functions removed without an equivalent definition,
 even when pytest and the model review say approved. The regression verifies budget
 math and gates; it does not replay omitted model payloads or certify live quality.
+
+Task #62 regression retains the supplied target/SHA, final `49/50` call reserve,
+three-iteration failure stage, ambiguous `matches=2` replacements and tracked
+`todos.db` blocker. The Developer loop now treats repeated failed anchors on one
+path as a bounded stall even when the payload changes. After a sandbox command
+reports a tracked runtime artifact, unrelated edits and test reruns are rejected
+until the model explicitly deletes that artifact; the controller never deletes it
+silently. Python writes also reject newly duplicated module-level definitions. A
+safe nonempty diff from the final stalled iteration still enters the unchanged
+mandatory test and independent-review gates without another Developer call. The
+fixture is an equivalent deterministic replay; it does not certify the failed
+task branch or live provider behavior.
