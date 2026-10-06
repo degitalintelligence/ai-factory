@@ -4,7 +4,13 @@ from pathlib import Path
 import pytest
 
 from app.config import settings
-from app.engineering_budget import engineering_budget_admission
+from app.engineering_budget import (
+    DEVELOPER_BASELINE_CALLS,
+    REVIEW_CALLS_PER_ITERATION,
+    SCHEMA_RETRY_MARGIN_CALLS,
+    engineering_budget_admission,
+    engineering_iteration_step_limit,
+)
 from app.schemas import LeadPlan
 from app.store import BudgetExceeded
 
@@ -79,7 +85,14 @@ def test_fresh_call_estimate_covers_intake_developer_and_review():
     fixture["plan"]["budget"]["max_llm_calls"] = 2
     plan, accounting = admit(fixture)
     assert accounting["minimum_calls"] == 9
-    assert plan.budget.max_llm_calls == accounting["execution_calls"] == 1 + settings.max_dev_steps + 3
+    expected = (
+        1
+        + settings.max_dev_steps
+        + REVIEW_CALLS_PER_ITERATION
+        + (settings.max_iterations - 1) * (DEVELOPER_BASELINE_CALLS + REVIEW_CALLS_PER_ITERATION)
+        + SCHEMA_RETRY_MARGIN_CALLS
+    )
+    assert plan.budget.max_llm_calls == accounting["execution_calls"] == expected
     assert not accounting["issues"]
     saved, accounting = admit(fixture, fresh=False)
     assert saved.budget.max_llm_calls == 2
@@ -143,3 +156,26 @@ async def test_task_53_exact_call_failure_and_fresh_iteration_allowance(db):
     assert not accounting["issues"]
     saved, _ = admit(fixture, fresh=False)
     assert saved.budget.max_llm_calls == 20
+
+
+def test_task_59_reserves_bounded_repair_and_review_calls(monkeypatch):
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_59_budget.json").read_text())
+    policy = fixture["runtime_policy"]
+    monkeypatch.setattr(settings, "max_dev_steps", policy["max_dev_steps"])
+    monkeypatch.setattr(settings, "max_iterations", policy["max_iterations"])
+    task = task_52()
+    plan, accounting = admit(task)
+
+    assert policy["admitted_calls"] == 34  # Exact failed deployment behavior.
+    assert accounting["execution_calls"] == 50
+    assert plan.budget.max_llm_calls == 50
+    assert accounting["repair_iterations_funded"] == 2
+
+    first = engineering_iteration_step_limit(current_calls=1, max_calls=50, iteration=1, max_iterations=3)
+    second = engineering_iteration_step_limit(current_calls=32, max_calls=50, iteration=2, max_iterations=3)
+    third = engineering_iteration_step_limit(current_calls=42, max_calls=50, iteration=3, max_iterations=3)
+    assert (first, second, third) == (30, 9, 7)
+
+
+def test_iteration_allocation_fails_closed_when_review_reserve_would_be_consumed():
+    assert engineering_iteration_step_limit(current_calls=9, max_calls=10, iteration=1, max_iterations=1) == 0
