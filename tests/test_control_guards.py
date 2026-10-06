@@ -287,3 +287,87 @@ async def test_gateway_retries_leave_review_and_review_fits_remaining_calls(db, 
     assert result.approved
     assert attempts == [("developer", 3), ("developer", 2), ("developer", 1), ("reviewer", 1)]
     assert (await db.get(task.id)).llm_calls == 4
+
+
+async def test_step_limit_collects_latest_diff_without_an_extra_model_call(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        def write_file(self, *args):
+            return "Wrote README.md"
+
+        def diff(self):
+            return "complete latest source diff"
+
+    actions = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="write_file", path="README.md", content="latest repair"),
+        ]
+    )
+    prompts, traces = [], []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return next(actions)
+
+    async def trace(step, record):
+        traces.append((step, record))
+
+    monkeypatch.setattr(settings, "max_dev_steps", 2)
+    monkeypatch.setattr(agents, "json_completion", model)
+    note = await agents.developer_loop(
+        workspace=Workspace(),
+        requirement="Edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        trace=trace,
+    )
+    assert "Completion has not been established" in note
+    assert len(prompts) == 2
+    assert "CONTROLLER STEP: 2/2" in prompts[-1]
+    assert "controller step-limit checkpoint" in traces[-2][1]
+    assert "complete latest source diff" in traces[-2][1]
+    assert traces[-1][0] == 2 and "ACTION: handoff" in traces[-1][1]
+
+
+@pytest.mark.parametrize("unsafe", [False, True])
+async def test_step_limit_cannot_handoff_empty_or_unsafe_source(monkeypatch, unsafe):
+    class Workspace(FakeDeveloperWorkspace):
+        def write_file(self, *args):
+            return "Wrote README.md"
+
+        def diff(self):
+            if unsafe:
+                raise WorkspaceError("Remove generated/runtime artifact: todos.db")
+            return ""
+
+    actions = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="write_file", path="README.md", content="unchanged"),
+        ]
+    )
+
+    async def model(**kwargs):
+        return next(actions)
+
+    monkeypatch.setattr(settings, "max_dev_steps", 2)
+    monkeypatch.setattr(agents, "json_completion", model)
+    with pytest.raises(RuntimeError, match="runtime artifact" if unsafe else "without an evaluable diff"):
+        await agents.developer_loop(
+            workspace=Workspace(),
+            requirement="Edit",
+            plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        )
+
+
+async def test_step_limit_does_not_handoff_read_only_exhaustion(monkeypatch):
+    async def model(**kwargs):
+        return DeveloperAction(action="read_file", path="README.md")
+
+    monkeypatch.setattr(settings, "max_dev_steps", 1)
+    monkeypatch.setattr(agents, "json_completion", model)
+    with pytest.raises(RuntimeError, match="without an evaluable diff"):
+        await agents.developer_loop(
+            workspace=FakeDeveloperWorkspace(),
+            requirement="Edit",
+            plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        )

@@ -515,3 +515,13 @@ A zero pytest exit code with sandbox `issues` is a failed check. Fix test-create
 storage using temporary paths (including existing build/registration smoke tests);
 deleting a workspace database alone does not prevent sandbox recreation. No
 automatic database cleanup, test skipping, budget reset or gate bypass is added.
+
+`MAX_DEV_STEPS` bounds one Developer authoring iteration. Reaching it after a
+successful mutation now collects the current safe, nonempty diff and records a
+controller `handoff` to mandatory sandbox tests and independent review. It does
+not assert completion or authorize publication, increase the step/call/token
+limits, reset lifetime usage, or bypass stall/source-hygiene checks. A final
+mutation is therefore evaluated rather than discarded solely because no model
+turn remains to request finish. Failed checks retain the existing bounded repair
+and review policy; there is no guaranteed extra repair budget. Test-only
+environment belongs in fixtures, not shell exports or live credentials.

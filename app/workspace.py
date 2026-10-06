@@ -278,7 +278,12 @@ class Workspace:
             ("node", "--test"),
         )
         if not any(tuple(args[: len(p)]) == p for p in allowed):
-            raise WorkspaceError("Use pytest, Python compile checks, npm test/build, or node --test")
+            raise WorkspaceError(
+                "Use pytest, Python compile checks, npm test/build, or node --test. "
+                "Shell exports and environment-prefixed commands are unsupported; "
+                "configure test-only environment with pytest monkeypatch.setenv in the test fixture. "
+                "Never use live credentials."
+            )
         return self.run_commands([args]).model_dump_json()
 
     def default_tests(self):
