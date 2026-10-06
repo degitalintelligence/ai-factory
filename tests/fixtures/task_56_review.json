@@ -1,0 +1,16 @@
+{
+  "task_id": 56,
+  "repository": "degitalintelligence/telegram-lab",
+  "base_sha": "455ea8620a49356386aa91df43d8b5595a6d587f",
+  "failure_stage": "reviewing",
+  "failure": "RuntimeError: Review iteration limit reached; use /report and /logs, then /retry or create a smaller task",
+  "observed_usage": {
+    "llm_calls": 25,
+    "tokens": 103886,
+    "reported_cost_usd": 0.0356
+  },
+  "test_result": "14 passed in 1.19s",
+  "sandbox_issue": "Commands modified source or left test artifacts: todos.db",
+  "review_issue": "The todos.db file was deleted during testing, which is a side effect on the repository state and should be restored or ignored in future tests.",
+  "scope": "Anonymized supplied Task #56 metadata and exact failure strings; regression scripts equivalent repository changes and mocked boundaries, not provider output replay."
+}

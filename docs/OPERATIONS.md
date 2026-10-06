@@ -525,3 +525,12 @@ mutation is therefore evaluated rather than discarded solely because no model
 turn remains to request finish. Failed checks retain the existing bounded repair
 and review policy; there is no guaranteed extra repair budget. Test-only
 environment belongs in fixtures, not shell exports or live credentials.
+
+When sandbox tests pass at process level but report generated source artifacts,
+the next Engineering iteration receives binding repair guidance before model
+review comments. A tracked runtime database remains removed from source; tests
+that invoke application factories must select temporary or in-memory storage.
+Reviewer suggestions to restore or ignore that same artifact are omitted from
+Developer feedback because they conflict with the deterministic source-hygiene
+gate. The raw review and gate evidence remain stored. Other review issues are
+preserved, and publication still requires a later clean test and review result.
