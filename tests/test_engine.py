@@ -1,5 +1,6 @@
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -170,6 +171,106 @@ async def test_end_to_end_real_git_mocked_external_services(db, repo, engine_fak
     assert standalone["test_files"] == ["tests/test_app.py"]
     assert json.loads(next(a.content for a in artifacts if a.kind == "post_publication"))["issues"] == []
     assert repo[1]("status", "--porcelain") == ""
+
+
+async def test_task_52_budget_is_admitted_before_developer_and_reaches_review_and_pr(
+    db, repo, engine_fakes, monkeypatch
+):
+    # Replay the real plan budget/usage; source edits, sandbox and model review use
+    # the existing engine harness. This verifies admission, not /todo implementation.
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_52_budget.json").read_text())
+    state, refs = engine_fakes
+    original_develop = orchestrator.developer_loop
+    original_review = orchestrator.review_change
+    phases = []
+
+    async def plan(*args):
+        task_id, owner = orchestrator.run_context.get()
+        await db.reserve_call(task_id, owner, token_reserve=22402)
+        await db.record_usage(task_id, owner, 13088, 0.01)
+        return LeadPlan(
+            objective="Feature",
+            acceptance_criteria=["Returns the requested value"],
+            budget=fixture["plan"]["budget"],
+        )
+
+    async def develop(**kwargs):
+        task_id, owner = orchestrator.run_context.get()
+        current = await db.get(task_id)
+        accounting = next(a for a in await db.artifacts(task_id) if a.kind == "plan_budget_accounting")
+        assert json.loads(accounting.content)["estimate"]["max_tokens"] == 30000
+        assert json.loads(current.plan_json)["budget"]["max_tokens"] > 35490
+        phases.append("developing")
+        await db.reserve_call(task_id, owner, token_reserve=22402)
+        await db.record_usage(task_id, owner, 10000, 0.001)
+        return await original_develop(**kwargs)
+
+    async def review(**kwargs):
+        task_id, owner = orchestrator.run_context.get()
+        phases.append("reviewing")
+        await db.reserve_call(task_id, owner, token_reserve=30000)
+        await db.record_usage(task_id, owner, 10000, 0.001)
+        return await original_review(**kwargs)
+
+    monkeypatch.setattr(orchestrator, "lead_plan", plan)
+    monkeypatch.setattr(orchestrator, "developer_loop", develop)
+    monkeypatch.setattr(orchestrator, "review_change", review)
+    task = await db.create(fixture["requirement"])
+    result = await execute(db, task.id)
+    assert result.status == "pr_created"
+    assert result.project == "lab" and result.repo == "owner/repo"
+    assert result.base_sha == refs["main"]
+    assert phases == ["developing", "reviewing"]
+    assert (result.llm_calls, result.tokens) == (3, 33088)
+    assert state["prs"] == state["pushes"] == 1
+    gates = [json.loads(a.content) for a in await db.artifacts(task.id) if a.kind == "gates"]
+    assert gates and all(g["passed"] for g in gates)
+
+
+@pytest.mark.parametrize("saved", [False, True])
+async def test_inadequate_explicit_or_saved_plan_stops_before_developer(db, engine_fakes, monkeypatch, saved):
+    state, _ = engine_fakes
+    plan = LeadPlan(objective="Feature", acceptance_criteria=["Returns value"], budget={"max_tokens": 30000})
+
+    async def lead(*args):
+        return plan
+
+    monkeypatch.setattr(orchestrator, "lead_plan", lead)
+    task = await db.create("Change the return value" + ("" if saved else " Budget: 30000 tokens."))
+    if saved:
+        await db.update(task.id, plan_json=plan.model_dump_json(), tokens=13088, llm_calls=1)
+    result = await execute(db, task.id)
+    assert result.status == "failed" and state["develop"] == state["prs"] == 0
+    assert LeadPlan.model_validate_json(result.plan_json).budget.max_tokens == 30000
+    failure = json.loads(next(a.content for a in await db.artifacts(task.id) if a.kind == "failure"))
+    assert failure["stage"] == "plan_budget_admission"
+    if saved:
+        assert (result.llm_calls, result.tokens) == (1, 13088)
+
+
+async def test_high_risk_approval_binds_the_admitted_budget(db, engine_fakes, monkeypatch):
+    state, _ = engine_fakes
+
+    async def lead(*args):
+        return LeadPlan(
+            objective="Feature",
+            acceptance_criteria=["Returns value"],
+            risk="high",
+            budget={"max_tokens": 30000},
+        )
+
+    monkeypatch.setattr(orchestrator, "lead_plan", lead)
+    task = await db.create("Change the return value")
+    result = await execute(db, task.id)
+    assert result.status == "awaiting_approval" and state["develop"] == 0
+    admitted = result.plan_json
+    assert LeadPlan.model_validate_json(admitted).budget.max_tokens > 30000
+    items = await decision_inbox(state="open", project=task.project)
+    item = next(item for item in items if item.task_id == task.id)
+    assert f"plan_sha256={orchestrator.plan_hash(admitted)}" in json.loads(item.evidence_json)
+    await resolve_decision(item.id, "approve", user_id=7)
+    result = await execute(db, task.id, owner="w2")
+    assert result.status == "pr_created" and result.plan_json == admitted
 
 
 async def test_review_only_completes_without_mutation_or_pr(db, engine_fakes, monkeypatch):
