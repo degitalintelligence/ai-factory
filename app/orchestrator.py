@@ -565,16 +565,18 @@ async def run_task(task_id, notify=None, owner=None):
                     step_limit=step_limit,
                 )
             except DeveloperStalled as exc:
-                if iteration >= settings.max_iterations:
-                    raise RuntimeError(
-                        "Developer stalled after the final repair iteration; inspect the task trace "
-                        "and create a smaller task"
-                    ) from exc
+                recoverable = iteration < settings.max_iterations
                 stall_feedback = [
                     redact(str(exc)),
-                    "Recovery iteration required: inspect the current mutated source again. Do not repeat "
-                    "the stale replace_text anchor. Use a small exact anchor from the current file, or a "
-                    "whole-file write only after reading that exact path. Preserve all existing tests.",
+                    (
+                        "Recovery iteration required: inspect the current mutated source again. Do not "
+                        "repeat the stale replace_text anchor. Use a small exact anchor from the current "
+                        "file, or a whole-file write only after reading that exact path. Preserve all "
+                        "existing tests."
+                        if recoverable
+                        else "Final authoring iteration stopped; a safe nonempty partial diff may proceed "
+                        "only through mandatory tests and independent review."
+                    ),
                 ]
                 feedback = list(dict.fromkeys(feedback + stall_feedback))
                 await store.update(task_id, owner, feedback_json=json.dumps(feedback))
@@ -584,14 +586,36 @@ async def run_task(task_id, notify=None, owner=None):
                     json.dumps(
                         {
                             "iteration": iteration,
-                            "recoverable": True,
+                            "recoverable": recoverable,
                             "feedback": stall_feedback,
                         },
                         sort_keys=True,
                     ),
                 )
-                await store.event(task_id, "developer_recovery", "\n".join(stall_feedback))
-                continue
+                await store.event(
+                    task_id,
+                    "developer_recovery" if recoverable else "developer_stall",
+                    "\n".join(stall_feedback),
+                )
+                if recoverable:
+                    continue
+                try:
+                    final_stall_diff = await asyncio.to_thread(workspace.diff)
+                except (ValueError, RuntimeError, OSError) as diff_exc:
+                    raise RuntimeError(
+                        "Developer stalled after the final repair iteration and the partial source "
+                        f"cannot enter mandatory checks: {redact(str(diff_exc))}"
+                    ) from exc
+                if not final_stall_diff.strip():
+                    raise RuntimeError(
+                        "Developer stalled after the final repair iteration without an evaluable diff"
+                    ) from exc
+                await store.event(
+                    task_id,
+                    "developer_handoff",
+                    "Final stalled iteration produced a safe nonempty diff; running mandatory tests "
+                    "and independent review without another model call.",
+                )
             await check()
             try:
                 diff = await asyncio.to_thread(workspace.diff)
