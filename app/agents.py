@@ -89,7 +89,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v11"
+PROMPT_VERSION_DEVELOPER = "developer-v12"
 PROMPT_VERSION_REVIEWER = "reviewer-v4"
 
 
@@ -163,6 +163,9 @@ fake context/store instead of constructing a live Application unless application
 Repair instructions are ordered: when reviewer feedback or a deterministic issue names a file or a test kind
 (for example smoke or application-registration tests), inspect and repair that exact file first, before any
 other source or test change; do not begin with files you authored unless feedback names them.
+When the full suite reports an artifact or source issue while a standalone run of the single test file you
+edited is clean, stop editing that file: it is not the creator. Run list_files, read every test file you have
+not inspected yet, identify the test that creates the artifact or violation, and repair that exact file first.
 When deterministic test feedback reports generated/runtime artifacts (for example `todos.db`), fix the test
 that creates them: inspect the complete test suite for build_app()/default-storage calls and route them through
 tmp_path, :memory:, or a pytest monkeypatch fixture. If the artifact was tracked, keep its source deletion, but
@@ -170,6 +173,8 @@ do not treat deletion alone as the fix; do not add ignores or claim a passing te
 sandbox `issues` list is nonempty. Make this targeted test mutation before repeating the suite.
 finish is blocked while your most recent run_command result still has a nonempty issues list; rerun the
 suite until that list is empty, then finish.
+Never finish while your last action after the most recent test command was a file mutation: rerun the full
+suite immediately after the final mutation and only then finish.
 If a test command reports that a tracked runtime artifact must be removed, cleanup becomes the immediate blocker:
 delete every listed tracked artifact with delete_file before any further source mutation or test command, then
 repair the tests that recreate it. The controller rejects unrelated edits/tests until that explicit deletion.
@@ -390,8 +395,18 @@ async def developer_loop(
                 if action.action == "run_command":
                     # A clean exit code is not evidence while the sandbox reports
                     # issues (for example a test recreating a runtime artifact).
+                    # Production Workspace.run_command returns a serialized
+                    # TestReport JSON string, so a plain attribute lookup would
+                    # silently miss issues and disarm the finish guard.
                     reported = getattr(result, "issues", None)
-                    last_command_issues = list(reported) if reported else []
+                    if reported is None and isinstance(result, str):
+                        try:
+                            reported = json.loads(result).get("issues")
+                        except (json.JSONDecodeError, AttributeError):
+                            reported = None
+                    last_command_issues = (
+                        [str(item) for item in reported] if isinstance(reported, list) and reported else []
+                    )
                 if action.action in {"read_file", "list_files"}:
                     inspected = True
                 if action.action == "read_file" and action.path:

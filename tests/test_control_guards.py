@@ -330,7 +330,77 @@ async def test_finish_blocked_until_latest_test_command_reports_no_issues(monkey
         "Finish blocked: the most recent test command still reported sandbox issues" in prompt
         for prompt in prompts[3:]
     )
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v11"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v12"
+
+
+async def test_finish_guard_reads_issues_from_serialized_test_report(monkeypatch):
+    """Task 65: production Workspace.run_command returns TestReport.model_dump_json()
+    (a JSON string); the finish guard must still see issues in that shape, not only
+    through attribute access on a TestReport object."""
+    artifact_issue = "Commands modified source or left test artifacts: todos.db"
+
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.repaired = False
+
+        def replace_text(self, path, old_text, content):
+            self.repaired = True
+            return f"Wrote {path}"
+
+        def run_command(self, command):
+            report = TestReport(
+                results=[CommandResult(command=["python", "-m", "pytest"], exit_code=0)],
+                issues=[] if self.repaired else [artifact_issue],
+            )
+            return report.model_dump_json()
+
+        def diff(self):
+            return "diff --git a/README.md b/README.md\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="run_command", command="python -m pytest -q"),
+            DeveloperAction(action="finish"),
+            DeveloperAction(
+                action="replace_text",
+                path="README.md",
+                old_text="# Demo",
+                content="# Demo (tmp_path storage)",
+            ),
+            DeveloperAction(action="run_command", command="python -m pytest -q"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+    prompts = []
+    traces = []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return next(script)
+
+    async def trace(_step, record):
+        traces.append(record)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    result = await agents.developer_loop(
+        workspace=Workspace(),
+        requirement="Add /todo count",
+        plan=LeadPlan(objective="Count", acceptance_criteria=["Count works"]),
+        trace=trace,
+    )
+
+    assert result == "Implementation completed"
+    assert any(
+        "Finish blocked: the most recent test command still reported sandbox issues" in item
+        for item in traces
+    )
+    assert any(artifact_issue in item for item in traces)
+    # The blocked finish is replayed to the model so the repair instruction is binding.
+    assert any(
+        "Finish blocked: the most recent test command still reported sandbox issues" in prompt
+        for prompt in prompts[3:]
+    )
 
 
 async def test_existing_file_whole_write_requires_reading_that_exact_path(monkeypatch):
@@ -444,7 +514,7 @@ async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch
     assert result == "Implementation completed"
     assert any("repair feedback requires at least one successful file mutation" in item for item in traces)
     assert workspace.source == "fixed\n"
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v11"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v12"
 
 
 def test_tracked_runtime_artifact_is_binding_initial_feedback():
@@ -467,10 +537,28 @@ def test_developer_prompt_prioritizes_files_named_by_repair_feedback():
         reviewer_feedback=["Deterministic repair required: fix tests/test_smoke.py"],
     )
 
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v11"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v12"
     assert "inspect and repair that exact file first" in system
     assert "smoke or application-registration tests" in system
     assert "tests/test_smoke.py" in context
+
+
+def test_developer_prompt_requires_creator_hunt_and_rerun_after_final_mutation():
+    """Task 65: the v11 file-priority rule never triggered because the deterministic
+    issue named only the artifact, not the file. v12 adds the standalone-vs-full-suite
+    creator hunt and forbids finishing after an untested final mutation."""
+    system, _ = agents.developer_request(
+        file_index="README.md\nbot.py\n",
+        requirement="Add /todo count",
+        plan=LeadPlan(objective="Count", acceptance_criteria=["Counted"]),
+    )
+
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v12"
+    assert "standalone run of the single test file you" in system
+    assert "read every test file you have" in system
+    assert "identify the test that creates the artifact" in system
+    assert "Never finish while your last action after the most recent test command" in system
+    assert "rerun the full" in system
 
 
 async def test_developer_cannot_consume_the_last_independent_review_call(db, monkeypatch):
@@ -749,7 +837,7 @@ async def test_identical_stale_replacement_rolls_over_before_generic_stall(monke
 
     assert len(prompts) == 4
     assert "CURRENT FILE AFTER FAILED REPLACEMENT:\npartial edit" in prompts[-1]
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v11"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v12"
 
 
 async def test_different_ambiguous_replacements_roll_over_on_the_same_path(monkeypatch):

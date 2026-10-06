@@ -399,13 +399,15 @@ async def test_task_53_real_developer_loop_repairs_tool_failures_then_reviews_on
     assert git("status", "--porcelain") == ""
 
 
-async def test_task_54_finish_handoff_rejects_passing_tests_with_artifacts_then_repairs(
+async def test_task_54_finish_is_blocked_by_reported_artifacts_then_repairs(
     db, repo, engine_fakes, monkeypatch
 ):
     """Real controller/tools/Git/SQL; model, sandbox and GitHub boundaries mocked.
 
-    Reproduces Task 54's passing pytest with sandbox issues and missing git_diff.
-    Does not execute lab/production code or claim an actual provider replay.
+    Reproduces Task 54's passing pytest with sandbox issues. Since the Task 65
+    guard fix the serialized run_command report (production shape) is parsed, so
+    the controller blocks the first finish itself; the developer then repairs,
+    reruns the suite clean, and only then finishes into review.
     """
     fixture = json.loads((Path(__file__).parent / "fixtures/task_54_finish.json").read_text())
     workspace, git = repo
@@ -428,6 +430,7 @@ async def test_task_54_finish_handoff_rejects_passing_tests_with_artifacts_then_
                 "path": "tests/test_app.py",
                 "content": "from app import value\ndef test_value(tmp_path): assert value() == 2\n",
             },
+            {"action": "run_command", "command": "python -m pytest -q"},
             {"action": "finish", "note": "Temporary storage fixed; ready for independent review"},
         ]
     )
@@ -462,15 +465,15 @@ async def test_task_54_finish_handoff_rejects_passing_tests_with_artifacts_then_
     monkeypatch.setattr(Workspace, "standalone_tests", lambda self, paths: sandbox_report(self))
     task = await db.create("Small scoped feature with persistent user data tests")
     result = await execute(db, task.id)
-    assert result.status == "pr_created" and result.iteration == 2
-    assert len(prompts) == 8 and len(reviews) == 2
+    assert result.status == "pr_created" and result.iteration == 1
+    assert len(prompts) == 9 and len(reviews) == 1
     assert "test artifacts: todos.db" in prompts[5]
-    assert "test artifacts: todos.db" in reviews[0]["test_output"]
+    assert "todos.db" not in reviews[0]["test_output"]
     artifacts = await db.artifacts(task.id)
     gates = [json.loads(a.content) for a in artifacts if a.kind == "gates"]
-    assert not gates[0]["passed"] and gates[1]["passed"]
+    assert len(gates) == 1 and gates[0]["passed"]
     traces = [json.loads(a.content) for a in artifacts if a.kind == "developer_trace"]
-    assert sum("controller finish checkpoint" in item["record"] for item in traces) == 2
+    assert sum("controller finish checkpoint" in item["record"] for item in traces) == 1
     assert state["prs"] == state["pushes"] == 1
     assert git("status", "--porcelain") == ""
 
