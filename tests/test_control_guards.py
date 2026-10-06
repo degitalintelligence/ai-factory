@@ -608,6 +608,7 @@ def test_reviewer_prompt_treats_tracked_runtime_artifact_deletion_as_corrective(
     assert "No PR exists at this review stage" in system
     assert agents.PROMPT_VERSION_REVIEWER == "reviewer-v3"
 
+
 async def test_identical_stale_replacement_rolls_over_before_generic_stall(monkeypatch):
     fixture = json.loads((Path(__file__).parent / "fixtures/task_61_stale_replace.json").read_text())
     assert fixture["task_id"] == 61
@@ -662,4 +663,3 @@ async def test_identical_stale_replacement_rolls_over_before_generic_stall(monke
     assert len(prompts) == 4
     assert "CURRENT FILE AFTER FAILED REPLACEMENT:\npartial edit" in prompts[-1]
     assert agents.PROMPT_VERSION_DEVELOPER == "developer-v8"
-
