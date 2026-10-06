@@ -534,3 +534,10 @@ Reviewer suggestions to restore or ignore that same artifact are omitted from
 Developer feedback because they conflict with the deterministic source-hygiene
 gate. The raw review and gate evidence remain stored. Other review issues are
 preserved, and publication still requires a later clean test and review result.
+
+An exact-match replacement failure now includes a bounded current-file excerpt
+for the next Developer turn. If the Developer explicitly reads that same failed
+target, the controller recognizes the one-time read as recovery progress and
+restarts the generic no-mutation counter. This does not increase authoring steps,
+budgets or retry limits: repeated reads, unrelated inspection and repeated failed
+actions remain subject to the existing stall guards.

@@ -88,7 +88,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v4"
+PROMPT_VERSION_DEVELOPER = "developer-v5"
 PROMPT_VERSION_REVIEWER = "reviewer-v2"
 
 
@@ -138,8 +138,9 @@ Examples: {"action":"list_files"}, {"action":"read_file","path":"README.md"},
 {"action":"search","content":"handler"}, {"action":"run_command","command":"python -m pytest -q"}.
 read_file/write_file/replace_text/delete_file require path. write_file/replace_text/search require content.
 replace_text also requires non-empty old_text; run_command requires command. Optional fields may be omitted.
-Use a small unique exact anchor for replace_text. If it fails, read the current file and change the anchor;
-do not repeat a whole-function replacement with stale text. Preserve existing tests when adding new cases.
+Use a small unique exact anchor for replace_text. If it fails, use the current-file excerpt attached to the
+error (or read the file once when no excerpt is available), then change to a smaller current anchor. Do not
+repeat a whole-function replacement with stale text. Preserve existing tests when adding new cases.
 Use content for search text and replacement text; do not invent query, args, parameters or new_text fields.
 write_file replaces the WHOLE file; replace_text needs old_text that occurs exactly once.
 search searches literal content; git_diff includes all staged and newly created files.
@@ -206,6 +207,7 @@ async def developer_loop(
     repeated_steps = 0
     non_mutation_steps = 0
     successful_mutations = 0
+    recovery_read_path = None
     mutations = {"write_file", "replace_text", "delete_file"}
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
     system, context = developer_request(
@@ -300,6 +302,15 @@ async def developer_loop(
                     diff_inspected = True
             except (ValueError, RuntimeError, OSError) as exc:
                 result = f"ERROR {type(exc).__name__}: {exc}"
+                if action.action in mutations and action.path:
+                    recovery_read_path = action.path
+                if action.action == "replace_text" and action.path and "matches=0" in str(exc):
+                    try:
+                        current_file = await asyncio.to_thread(workspace.read_file, action.path)
+                    except (ValueError, RuntimeError, OSError):
+                        pass
+                    else:
+                        result += "\nCURRENT FILE AFTER FAILED REPLACEMENT:\n" + str(current_file)[:5000]
         # Do not replay full write payloads; the resulting diff is separately reviewed.
         compact = action.model_copy(
             update={
@@ -317,11 +328,25 @@ async def developer_loop(
         if trace:
             await trace(step + 1, record)
         successful_mutation = action.action in mutations and not str(result).startswith("ERROR")
+        recovery_read = (
+            action.action == "read_file"
+            and action.path == recovery_read_path
+            and not str(result).startswith("ERROR")
+        )
         if successful_mutation:
             successful_mutations += 1
             non_mutation_steps = 0
             last_signature = None
             repeated_steps = 0
+            recovery_read_path = None
+        elif recovery_read:
+            # A fresh read of the exact file whose mutation failed is corrective
+            # progress: it invalidates stale replacement anchors. It is allowed
+            # once per failed mutation; unrelated/repeated reads remain bounded.
+            non_mutation_steps = 0
+            last_signature = None
+            repeated_steps = 0
+            recovery_read_path = None
         else:
             non_mutation_steps += 1
             signature = f"{action.action}|{action.path or ''}|{str(result)[:500]}"

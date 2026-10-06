@@ -161,3 +161,12 @@ produce one PR. Unrelated review issues remain. Models, sandbox execution and
 GitHub are mocked; the regression does not claim the failed task branch was valid
 or replay the provider. The Reviewer prompt independently treats deletion of a
 tracked runtime database as corrective source hygiene.
+
+Task #57 regression retains the supplied target repository, exact base SHA,
+usage, failure stage and tool-step sequence. After a successful source mutation,
+six stale exact-match replacements fail, then a read of that same file is treated
+as bounded recovery progress instead of triggering the generic eight-step stall.
+The first exact-match failure also returns a bounded current-file excerpt, while
+replacement payloads remain compacted from traces. Repeated or unrelated reads
+still hit the existing stall guard. The scripted actions are an equivalent replay;
+omitted provider payloads and live model behavior are not certified.
