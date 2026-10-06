@@ -125,6 +125,26 @@ def test_command_never_runs_on_control_host(repo, monkeypatch):
     assert calls == [[["python", "-m", "pytest", "-q"]]]
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "export TELEGRAM_BOT_TOKEN=dummy_token && python -m pytest -q --tb=short",
+        "TELEGRAM_BOT_TOKEN=dummy_token python -m pytest -q --tb=short",
+    ],
+)
+def test_task_55_shell_environment_attempts_remain_blocked_with_actionable_feedback(
+    repo, monkeypatch, command
+):
+    workspace, _ = repo
+
+    def never(commands):
+        raise AssertionError("Rejected shell command must not reach the runner")
+
+    monkeypatch.setattr(workspace, "run_commands", never)
+    with pytest.raises(WorkspaceError, match="monkeypatch.setenv"):
+        workspace.run_command(command)
+
+
 def test_url_embedded_credentials_are_redacted():
     leaked = "postgres://operator:s3cret-password@db.internal:5432/prod"
     assert "s3cret-password" not in redact(leaked)

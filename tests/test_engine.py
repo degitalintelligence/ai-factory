@@ -464,6 +464,130 @@ async def test_task_54_finish_handoff_rejects_passing_tests_with_artifacts_then_
     assert git("status", "--porcelain") == ""
 
 
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_task_55_last_step_repair_is_evaluated_without_extra_developer_calls(
+    db, repo, engine_fakes, monkeypatch, repair_succeeds
+):
+    """Script an equivalent supplied tail, with a synthetic unavailable prefix.
+
+    Real tools/Git/SQL/gates; models, sandbox execution and GitHub are mocked.
+    No assertion about the unsupplied actual source patch or provider quality.
+    """
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_55_step_limit.json").read_text())
+    workspace, _ = repo
+    state, _ = engine_fakes
+    monkeypatch.setattr(settings, "max_dev_steps", fixture["max_dev_steps"])
+    broken_test = "from app import value\ndef test_value(): assert value() == 999\n"
+    fixture_test = (
+        "from app import value\n# test environment missing\ndef test_value(): assert value() == 2\n"
+    )
+    script = [
+        {"action": "read_file", "path": "app.py"},
+        {"action": "write_file", "path": "app.py", "content": "def value(): return 2\n"},
+        {"action": "write_file", "path": "tests/test_app.py", "content": broken_test},
+    ]
+    # Only steps 21--30 were supplied. This synthetic prefix spends the same
+    # remaining steps with valid tools; it is not presented as real task history.
+    while len(script) < 20:
+        script.append({"action": "write_file", "path": "app.py", "content": "def value(): return 2\n"})
+    script.extend(
+        [
+            {
+                "action": "replace_text",
+                "path": "tests/test_app.py",
+                "old_text": "== 999",
+                "content": "== 998",
+            },
+            {"action": "run_command", "command": "python -m pytest -q --tb=short"},
+            {"action": "write_file", "path": "tests/test_app.py", "content": fixture_test},
+            {"action": "run_command", "command": "python -m pytest -q --tb=short"},
+            {
+                "action": "replace_text",
+                "path": "tests/test_app.py",
+                "old_text": "absent anchor",
+                "content": "fixed",
+            },
+            {"action": "read_file", "path": "tests/test_app.py"},
+            {
+                "action": "run_command",
+                "command": "export TELEGRAM_BOT_TOKEN=dummy_token && python -m pytest -q --tb=short",
+            },
+            {
+                "action": "run_command",
+                "command": "TELEGRAM_BOT_TOKEN=dummy_token python -m pytest -q --tb=short",
+            },
+            {"action": "run_command", "command": "python -m pytest -q --tb=short"},
+            {
+                "action": "replace_text",
+                "path": "tests/test_app.py",
+                "old_text": "# test environment missing",
+                "content": "# test environment configured",
+            },
+        ]
+    )
+    seen, reviews = [], []
+    reviewer = orchestrator.review_change
+
+    async def lead(*args):
+        task_id, owner = agents.run_context.get()
+        await db.reserve_call(task_id, owner, token_reserve=1000)
+        await db.record_usage(task_id, owner, 1000, 0.002)
+        return LeadPlan(objective="Feature", acceptance_criteria=["Returns the requested value"])
+
+    async def model(**kwargs):
+        task_id, owner = agents.run_context.get()
+        await db.reserve_call(task_id, owner, token_reserve=1000)
+        await db.record_usage(task_id, owner, 1000, 0.001)
+        seen.append(kwargs["user"])
+        return DeveloperAction.model_validate(script[len(seen) - 1])
+
+    def report(self):
+        source = self.read_file("tests/test_app.py")
+        passed = repair_succeeds and "# test environment configured" in source
+        return Report(
+            results=[
+                CommandResult(
+                    command=["pytest"],
+                    exit_code=0 if passed else 1,
+                    output="15 passed" if passed else "RuntimeError: TELEGRAM_BOT_TOKEN is required",
+                )
+            ]
+        )
+
+    async def review(**kwargs):
+        task_id, owner = agents.run_context.get()
+        assert (await db.get(task_id)).llm_calls == 31
+        assert state["prs"] == state["pushes"] == 0
+        await db.reserve_call(task_id, owner, token_reserve=1000)
+        await db.record_usage(task_id, owner, 1000, 0.001)
+        reviews.append(kwargs)
+        return await reviewer(**kwargs)  # Approving fake cannot override a failed check.
+
+    monkeypatch.setattr(orchestrator, "lead_plan", lead)
+    monkeypatch.setattr(orchestrator, "developer_loop", agents.developer_loop)
+    monkeypatch.setattr(orchestrator, "review_change", review)
+    monkeypatch.setattr(agents, "json_completion", model)
+    monkeypatch.setattr(Workspace, "run_commands", lambda self, commands: report(self))
+    monkeypatch.setattr(Workspace, "default_tests", report)
+    monkeypatch.setattr(Workspace, "standalone_tests", lambda self, paths: report(self))
+    task = await db.create("Scoped feature with meaningful regression tests")
+    if repair_succeeds:
+        result = await execute(db, task.id)
+        assert result.status == "pr_created"
+    else:
+        result = await execute(db, task.id)
+        assert result.status == "failed"
+        assert "Review iteration limit" in result.last_message
+    assert len(seen) == 30 and len(reviews) == 1 and result.llm_calls == 32
+    assert state["prs"] == state["pushes"] == int(repair_succeeds)
+    assert "CONTROLLER STEP: 30/30" in seen[-1]
+    traces = [json.loads(a.content) for a in await db.artifacts(task.id) if a.kind == "developer_trace"]
+    assert "matches=0" in traces[24]["record"][:600]
+    assert "monkeypatch.setenv" in traces[26]["record"][:600]
+    assert "controller step-limit checkpoint" in traces[-2]["record"]
+    assert "ACTION: handoff" in traces[-1]["record"]
+
+
 async def test_review_only_completes_without_mutation_or_pr(db, engine_fakes, monkeypatch):
     state, refs = engine_fakes
 

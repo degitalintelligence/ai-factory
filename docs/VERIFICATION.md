@@ -141,3 +141,13 @@ finish checkpoint collects the latest complete diff without another model call.
 Artifact issues reject publication even when the model approves; a second bounded
 iteration repairs test storage before a single PR is allowed. Failed diff hygiene
 checks still block handoff. This is not an actual provider replay or live lab test.
+
+Task #55 regression captures the supplied Telegram metadata and last-step tool
+sequence. Only steps 21--30 were supplied, and mutation payloads were omitted; the
+regression uses an equivalent scripted tail with a synthetic earlier prefix. Real
+Developer tools, Git, SQL and publication gates exercise 30 authoring calls plus
+Lead and Reviewer. A correct final repair proceeds through mandatory checks and
+a single PR; an incorrect final repair fails even with an approving review.
+Unsafe/empty/read-only exhaustion still blocks handoff. Shell environment commands
+remain rejected with fixture guidance. Models, sandbox execution and GitHub are
+mocked; this does not certify the actual Task #55 patch or live model competence.

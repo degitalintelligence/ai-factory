@@ -88,7 +88,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v3"
+PROMPT_VERSION_DEVELOPER = "developer-v4"
 PROMPT_VERSION_REVIEWER = "reviewer-v1"
 
 
@@ -145,6 +145,10 @@ write_file replaces the WHOLE file; replace_text needs old_text that occurs exac
 search searches literal content; git_diff includes all staged and newly created files.
 run_command runs only in a fresh isolated snapshot: shell commands cannot install dependencies or access secrets.
 Available commands: python -m pytest, python -m compileall, python -m py_compile, npm test, npm run build, node --test.
+Shell exports, environment-prefixed commands and command chaining are unsupported. Configure fake test-only
+environment in pytest fixtures with monkeypatch.setenv and a library-valid placeholder, never live credentials.
+For Telegram Application tests, preserve existing offline bot mocks; prefer testing handlers with the existing
+fake context/store instead of constructing a live Application unless application registration is under test.
 Dependencies are installed by the sandbox operator policy; declare them in requirements or lockfile.
 Persist user data using proper storage and named volumes, never a committed database file.
 Tests use tmp_path/in-memory storage; do not hide failures, skip required tests, or replace tests with stubs.
@@ -174,6 +178,18 @@ If requirements cannot be met within the environment, report the limitation in n
     return system, context
 
 
+def developer_turn(context: str, history: str = "", *, step: int = 1) -> str:
+    """Share bounded turn instructions with initial budget admission."""
+    return (
+        context
+        + f"\nCONTROLLER STEP: {step}/{settings.max_dev_steps}; "
+        + f"remaining actions including this one: {settings.max_dev_steps - step + 1}. "
+        + "Preserve existing tests. Finish hands off to mandatory checks, not publication.\n"
+        + "TOOL HISTORY:\n"
+        + history
+    )
+
+
 async def developer_loop(
     *, workspace, requirement, plan, reviewer_feedback=None, checkpoint=None, trace=None
 ):
@@ -183,6 +199,7 @@ async def developer_loop(
     last_signature = None
     repeated_steps = 0
     non_mutation_steps = 0
+    successful_mutations = 0
     mutations = {"write_file", "replace_text", "delete_file"}
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
     system, context = developer_request(
@@ -222,7 +239,7 @@ async def developer_loop(
             role="developer",
             prompt_version=PROMPT_VERSION_DEVELOPER,
             system=system,
-            user=context + "\nTOOL HISTORY:\n" + "\n".join(reversed(window)),
+            user=developer_turn(context, "\n".join(reversed(window)), step=step + 1),
             schema=DeveloperAction,
             max_attempts=attempts,
         )
@@ -295,6 +312,7 @@ async def developer_loop(
             await trace(step + 1, record)
         successful_mutation = action.action in mutations and not str(result).startswith("ERROR")
         if successful_mutation:
+            successful_mutations += 1
             non_mutation_steps = 0
             last_signature = None
             repeated_steps = 0
@@ -315,7 +333,26 @@ async def developer_loop(
                     f"Developer stalled: no successful file mutation in {non_mutation_steps} steps; "
                     "inspect the task trace and split the task"
                 )
-    raise RuntimeError("Developer exceeded MAX_DEV_STEPS; inspect tool trace and split/clarify task")
+    # MAX_DEV_STEPS bounds authoring, not eligibility for evaluation. A final
+    # mutation may repair the last failed check. Evaluate the actual source in
+    # the existing mandatory test/review path without granting another model call.
+    if inspected and successful_mutations:
+        if checkpoint:
+            await checkpoint()
+        final_diff = await asyncio.to_thread(workspace.diff)
+        if final_diff.strip():
+            note = (
+                "Developer reached MAX_DEV_STEPS; handing off current changes for mandatory "
+                "tests and independent review. Completion has not been established."
+            )
+            if trace:
+                await trace(
+                    settings.max_dev_steps,
+                    "ACTION: git_diff (controller step-limit checkpoint)\nRESULT:\n" + str(final_diff)[:6000],
+                )
+                await trace(settings.max_dev_steps, "ACTION: handoff\nRESULT:\n" + note)
+            return note
+    raise RuntimeError("Developer exceeded MAX_DEV_STEPS without an evaluable diff; inspect tool trace")
 
 
 def reviewer_request(

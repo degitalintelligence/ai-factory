@@ -2,7 +2,7 @@
 
 import re
 
-from app.agents import developer_request, reviewer_request
+from app.agents import developer_request, developer_turn, reviewer_request
 from app.config import settings
 from app.llm import completion_messages, completion_token_reserve
 from app.schemas import DeveloperAction, LeadPlan, PlanBudget, ReviewResult
@@ -52,7 +52,7 @@ def engineering_budget_admission(
             reviewer_feedback=reviewer_feedback,
         )
         developer_reserve = completion_token_reserve(
-            completion_messages(system, user + "\nTOOL HISTORY:\n", DeveloperAction)
+            completion_messages(system, developer_turn(user), DeveloperAction)
         )
         review_system, review_user = reviewer_request(
             requirement=requirement,
