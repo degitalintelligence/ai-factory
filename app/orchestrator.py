@@ -17,6 +17,40 @@ from app.security import redact
 from app.store import BudgetExceeded, TaskStopped, plan_hash, store
 from app.workspace import Workspace
 
+_TEST_ARTIFACT_PREFIX = "Commands modified source or left test artifacts:"
+
+
+def engineering_repair_feedback(issues: list[str], review_issues: list[str]) -> list[str]:
+    """Turn deterministic failures into non-contradictory Developer instructions."""
+    artifact_paths = []
+    for issue in issues:
+        if issue.startswith(_TEST_ARTIFACT_PREFIX):
+            artifact_paths.extend(
+                path.strip() for path in issue.removeprefix(_TEST_ARTIFACT_PREFIX).split(",") if path.strip()
+            )
+
+    conflicting = ("restore", "ignore", "ignored")
+    filtered_review = []
+    for issue in review_issues:
+        lowered = issue.casefold()
+        names_artifact = any(path.casefold() in lowered for path in artifact_paths)
+        if names_artifact and any(word in lowered for word in conflicting):
+            continue
+        filtered_review.append(issue)
+
+    guidance = []
+    if artifact_paths:
+        guidance.append(
+            "Deterministic repair required: keep tracked/generated runtime artifacts out of the source "
+            "snapshot; do not restore or ignore them. Inspect every existing test, including smoke and "
+            "application-registration tests, for default storage creation. Route those calls through "
+            "tmp_path, an in-memory store, or the repository's test storage configuration before rerunning "
+            f"the suite. A zero test exit code with sandbox issues is still a failure. Artifacts: "
+            f"{', '.join(artifact_paths)}"
+        )
+    return list(dict.fromkeys(guidance + issues + filtered_review))
+
+
 logger = logging.getLogger(__name__)
 
 # Documents that describe how the repository must be changed, captured verbatim for replayable provenance.
@@ -539,8 +573,9 @@ async def run_task(task_id, notify=None, owner=None):
                 )
                 await publish(sha, digest, review.summary)
                 return
-            feedback = list(
-                dict.fromkeys(issues + review.issues + ([] if review.approved else [review.summary]))
+            feedback = engineering_repair_feedback(
+                issues,
+                review.issues + ([] if review.approved else [review.summary]),
             )
             await store.update(task_id, owner, feedback_json=json.dumps(feedback))
             await store.event(task_id, "rejected", "\n".join(feedback))

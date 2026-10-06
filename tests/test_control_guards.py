@@ -371,3 +371,16 @@ async def test_step_limit_does_not_handoff_read_only_exhaustion(monkeypatch):
             requirement="Edit",
             plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
         )
+
+
+def test_reviewer_prompt_treats_tracked_runtime_artifact_deletion_as_corrective():
+    system, _ = agents.reviewer_request(
+        requirement="Small edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        diff="diff --git a/todos.db b/todos.db\ndeleted file mode 100644",
+        test_output='{"issues":["Commands modified source or left test artifacts: todos.db"]}',
+        hygiene_issues=["Commands modified source or left test artifacts: todos.db"],
+    )
+    assert "deletion is corrective" in system
+    assert "Do not recommend restoring or ignoring it" in system
+    assert agents.PROMPT_VERSION_REVIEWER == "reviewer-v2"

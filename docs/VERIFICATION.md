@@ -151,3 +151,13 @@ a single PR; an incorrect final repair fails even with an approving review.
 Unsafe/empty/read-only exhaustion still blocks handoff. Shell environment commands
 remain rejected with fixture guidance. Models, sandbox execution and GitHub are
 mocked; this does not certify the actual Task #55 patch or live model competence.
+
+Task #56 regression retains the supplied repository/SHA, usage, test-artifact and
+Reviewer-conflict strings. It exercises two real orchestration iterations with
+workspace/Git/SQL and publication gates: an approving Reviewer cannot override
+the `todos.db` sandbox issue, the next Developer receives one deterministic
+temporary-storage repair instruction, and only a clean second test/review may
+produce one PR. Unrelated review issues remain. Models, sandbox execution and
+GitHub are mocked; the regression does not claim the failed task branch was valid
+or replay the provider. The Reviewer prompt independently treats deletion of a
+tracked runtime database as corrective source hygiene.
