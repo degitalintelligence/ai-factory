@@ -850,6 +850,7 @@ async def test_task_44_command_reaches_lead_audit_without_lab_or_old_task_contex
     assert json.loads(artifacts["resolved_skills"])["workflow"] == "lead/audit"
     assert "tests" in artifacts and "review" in artifacts
 
+
 async def test_task_61_stale_replace_rolls_into_repair_iteration_then_publishes(
     db, repo, engine_fakes, monkeypatch
 ):
