@@ -551,17 +551,18 @@ are not enlarged; if they cannot preserve an independent review, execution fails
 closed. This raises the default fresh-task allowance, not daily tenant limits,
 token ceilings, cost ceilings or retry resets.
 
-After a sandbox command reports a tracked runtime artifact, the Developer must
-explicitly delete the listed artifact before further edits or test commands. The
-controller surfaces that cleanup as a current-turn blocker and rolls repeated
-noncompliance into the next bounded iteration; it does not delete repository
-content automatically. Failed exact replacements with either zero or multiple
-matches are counted per target path, so changing a still-ambiguous payload cannot
-consume the remaining call envelope indefinitely. Python mutations that newly
-duplicate a module-level function or class are rejected before the file is
-written. If the final iteration stalls with a safe nonempty diff, normal mandatory
-tests and independent review evaluate that partial result without granting an
-extra model call or bypassing any hygiene gate.
+When a tracked runtime artifact is present in the source inventory or later
+reported by a sandbox command, the Developer must explicitly delete the listed
+artifact before further edits or test commands. The controller surfaces that
+cleanup as a current-turn blocker and rolls repeated noncompliance into the next
+bounded iteration; it does not delete repository content automatically. Failed
+exact replacements with either zero or multiple matches are counted per target
+path, so changing a still-ambiguous payload cannot consume the remaining call
+envelope indefinitely. Python mutations that newly duplicate a module-level
+function or class are rejected before the file is written. If the final iteration
+stalls with a safe nonempty diff, normal mandatory tests and independent review
+evaluate that partial result without granting an extra model call or bypassing
+any hygiene gate.
 
 Independent review occurs before publication and must never claim a PR already
 exists. Passing feature tests do not override sandbox artifact issues, and Python
