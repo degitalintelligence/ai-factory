@@ -8,7 +8,7 @@ from app.agents import developer_loop, lead_plan, normalize_lead_plan, review_ch
 from app.audit_scope import referenced_tasks, repository_audit, target_project, validate_sha
 from app.config import Project, settings
 from app.contracts import context_slice
-from app.engineering_budget import engineering_budget_admission
+from app.engineering_budget import engineering_budget_admission, engineering_iteration_step_limit
 from app.gates import deployment_issues, post_publication_issues, quality_issues
 from app.github_api import GitHubAPI
 from app.llm import run_context
@@ -490,6 +490,27 @@ async def run_task(task_id, notify=None, owner=None):
                     owner=owner,
                 )
 
+            current = await store.get(task_id)
+            envelope = store.budget_envelope(current)
+            step_limit = engineering_iteration_step_limit(
+                current_calls=current.llm_calls,
+                max_calls=envelope["max_llm_calls"],
+                iteration=iteration,
+                max_iterations=settings.max_iterations,
+            )
+            await store.artifact(
+                task_id,
+                "developer_allocation",
+                json.dumps(
+                    {
+                        "iteration": iteration,
+                        "step_limit": step_limit,
+                        "used_calls": current.llm_calls,
+                        "max_llm_calls": envelope["max_llm_calls"],
+                        "future_iterations": settings.max_iterations - iteration,
+                    }
+                ),
+            )
             await developer_loop(
                 workspace=workspace,
                 requirement=task.requirement,
@@ -497,6 +518,7 @@ async def run_task(task_id, notify=None, owner=None):
                 reviewer_feedback=feedback,
                 checkpoint=check,
                 trace=trace,
+                step_limit=step_limit,
             )
             await check()
             try:
