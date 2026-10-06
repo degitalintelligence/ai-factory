@@ -5,6 +5,11 @@
   "failure_stage": "developing",
   "status": "failed",
   "iteration": 3,
+  "budget": {
+    "max_llm_calls": 50,
+    "max_tokens": 600000,
+    "max_cost_usd": 0.5
+  },
   "usage": {
     "calls": 49,
     "tokens": 283704,
