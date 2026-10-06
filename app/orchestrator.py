@@ -565,7 +565,11 @@ async def run_task(task_id, notify=None, owner=None):
                     step_limit=step_limit,
                 )
             except (DeveloperStalled, BudgetExceeded) as exc:
-                budget_reserved = isinstance(exc, BudgetExceeded)
+                budget_reserved = isinstance(exc, BudgetExceeded) and (
+                    "reserving independent review" in str(exc)
+                )
+                if isinstance(exc, BudgetExceeded) and not budget_reserved:
+                    raise
                 recoverable = not budget_reserved and iteration < settings.max_iterations
                 stall_feedback = [
                     redact(str(exc)),
