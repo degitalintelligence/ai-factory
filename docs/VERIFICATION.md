@@ -170,3 +170,13 @@ The first exact-match failure also returns a bounded current-file excerpt, while
 replacement payloads remain compacted from traces. Repeated or unrelated reads
 still hit the existing stall guard. The scripted actions are an equivalent replay;
 omitted provider payloads and live model behavior are not certified.
+
+Task #59 regression retains the supplied target/SHA, `33/34` call exhaustion,
+three-iteration policy, test result and `todos.db` artifact failure. Fresh
+Engineering admission now funds one full Developer iteration plus a seven-action
+repair baseline and one independent review for every remaining iteration, with a
+small schema-retry margin. Runtime allocation records each iteration's effective
+step limit and reserves those later calls before authoring. A deterministic diff
+gate also rejects Python test functions removed without an equivalent definition,
+even when pytest and the model review say approved. The regression verifies budget
+math and gates; it does not replay omitted model payloads or certify live quality.
