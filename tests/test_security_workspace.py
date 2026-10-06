@@ -255,3 +255,17 @@ def test_ci_fixture_lines_do_not_block_snapshot_but_real_credentials_still_do(re
     )
     with pytest.raises(WorkspaceError, match="Credential detected"):
         workspace.snapshot()
+
+
+def test_python_mutation_rejects_new_duplicate_top_level_definitions(repo):
+    workspace, _ = repo
+    workspace.write_file("tests/test_feature.py", "def test_existing():\n    assert True\n")
+
+    with pytest.raises(WorkspaceError, match="duplicate top-level definitions: test_existing"):
+        workspace.replace_text(
+            "tests/test_feature.py",
+            "def test_existing():\n    assert True\n",
+            "def test_existing():\n    assert True\n\ndef test_existing():\n    assert False\n",
+        )
+
+    assert workspace.read_file("tests/test_feature.py").count("def test_existing") == 1
