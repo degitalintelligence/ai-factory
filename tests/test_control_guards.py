@@ -441,6 +441,20 @@ async def test_step_limit_cannot_handoff_empty_or_unsafe_source(monkeypatch, uns
         )
 
 
+async def test_developer_zero_allocation_fails_before_model_call(monkeypatch):
+    async def never(**_kwargs):
+        raise AssertionError("No model call is allowed")
+
+    monkeypatch.setattr(agents, "json_completion", never)
+    with pytest.raises(BudgetExceeded, match="No Developer call allocation remains"):
+        await agents.developer_loop(
+            workspace=FakeDeveloperWorkspace(),
+            requirement="Edit",
+            plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+            step_limit=0,
+        )
+
+
 async def test_step_limit_does_not_handoff_read_only_exhaustion(monkeypatch):
     async def model(**kwargs):
         return DeveloperAction(action="read_file", path="README.md")
@@ -465,4 +479,5 @@ def test_reviewer_prompt_treats_tracked_runtime_artifact_deletion_as_corrective(
     )
     assert "deletion is corrective" in system
     assert "Do not recommend restoring or ignoring it" in system
-    assert agents.PROMPT_VERSION_REVIEWER == "reviewer-v2"
+    assert "No PR exists at this review stage" in system
+    assert agents.PROMPT_VERSION_REVIEWER == "reviewer-v3"
