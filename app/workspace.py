@@ -48,6 +48,12 @@ def top_level_definition_counts(content):
     counts = {}
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                (isinstance(decorator, ast.Name) and decorator.id == "overload")
+                or (isinstance(decorator, ast.Attribute) and decorator.attr == "overload")
+                for decorator in node.decorator_list
+            ):
+                continue
             counts[node.name] = counts.get(node.name, 0) + 1
     return counts
 
