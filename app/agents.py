@@ -88,7 +88,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v6"
+PROMPT_VERSION_DEVELOPER = "developer-v7"
 PROMPT_VERSION_REVIEWER = "reviewer-v3"
 
 
@@ -142,7 +142,10 @@ Use a small unique exact anchor for replace_text. If it fails, use the current-f
 error (or read the file once when no excerpt is available), then change to a smaller current anchor. Do not
 repeat a whole-function replacement with stale text. Preserve existing tests when adding new cases.
 Use content for search text and replacement text; do not invent query, args, parameters or new_text fields.
-write_file replaces the WHOLE file; replace_text needs old_text that occurs exactly once.
+write_file replaces the WHOLE file. The controller blocks whole-file replacement of an existing file until
+that exact path has been read in the current iteration. Prefer replace_text for targeted edits. Never replace
+an existing test file with only the new cases: preserve its complete regression coverage and append tests.
+replace_text needs old_text that occurs exactly once.
 search searches literal content; git_diff includes all staged and newly created files.
 run_command runs only in a fresh isolated snapshot: shell commands cannot install dependencies or access secrets.
 Available commands: python -m pytest, python -m compileall, python -m py_compile, npm test, npm run build, node --test.
@@ -210,6 +213,7 @@ async def developer_loop(
 ):
     history = []
     inspected = False
+    read_paths = set()
     diff_inspected = False
     last_signature = None
     repeated_steps = 0
@@ -218,8 +222,10 @@ async def developer_loop(
     recovery_read_path = None
     mutations = {"write_file", "replace_text", "delete_file"}
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
+    file_index = workspace.list_files()
+    existing_paths = set(file_index.splitlines())
     system, context = developer_request(
-        file_index=workspace.list_files(),
+        file_index=file_index,
         requirement=requirement,
         plan=plan,
         reviewer_feedback=reviewer_feedback,
@@ -265,31 +271,38 @@ async def developer_loop(
             max_attempts=attempts,
         )
         if action.action == "finish":
-            # Final evidence collection is a controller responsibility too. Do not
-            # spend model calls repeating finish merely to request a read-only diff.
-            # This does not approve the work: mandatory tests/review/gates still run.
-            if inspected and not diff_inspected:
-                try:
-                    final_diff = await asyncio.to_thread(workspace.diff)
-                except (ValueError, RuntimeError, OSError) as exc:
-                    result = f"ERROR {type(exc).__name__}: Final diff collection failed: {exc}"
-                else:
-                    diff_inspected = True
+            if reviewer_feedback and successful_mutations == 0:
+                result = (
+                    "Finish blocked: repair feedback requires at least one successful file mutation "
+                    "in this iteration"
+                )
+            else:
+                # Final evidence collection is a controller responsibility too. Do not
+                # spend model calls repeating finish merely to request a read-only diff.
+                # This does not approve the work: mandatory tests/review/gates still run.
+                if inspected and not diff_inspected:
+                    try:
+                        final_diff = await asyncio.to_thread(workspace.diff)
+                    except (ValueError, RuntimeError, OSError) as exc:
+                        result = f"ERROR {type(exc).__name__}: Final diff collection failed: {exc}"
+                    else:
+                        diff_inspected = True
+                        if trace:
+                            await trace(
+                                step + 1,
+                                "ACTION: git_diff (controller finish checkpoint)\nRESULT:\n"
+                                + str(final_diff)[:6000],
+                            )
+                if inspected and diff_inspected:
                     if trace:
                         await trace(
                             step + 1,
-                            "ACTION: git_diff (controller finish checkpoint)\nRESULT:\n"
-                            + str(final_diff)[:6000],
+                            "ACTION: finish\nRESULT:\n"
+                            + (action.note or "Implementation completed")[:6000],
                         )
-            if inspected and diff_inspected:
-                if trace:
-                    await trace(
-                        step + 1,
-                        "ACTION: finish\nRESULT:\n" + (action.note or "Implementation completed")[:6000],
-                    )
-                return action.note or "Implementation completed"
-            if not inspected:
-                result = "Finish blocked: read_file or list_files must inspect existing source first"
+                    return action.note or "Implementation completed"
+                if not inspected:
+                    result = "Finish blocked: read_file or list_files must inspect existing source first"
         else:
             try:
                 calls = {
@@ -306,9 +319,20 @@ async def developer_loop(
                 }
                 if action.action in {"write_file", "replace_text", "delete_file"} and not inspected:
                     raise ValueError("Inspect existing repository files first")
+                if (
+                    action.action == "write_file"
+                    and action.path in existing_paths
+                    and action.path not in read_paths
+                ):
+                    raise ValueError(
+                        "Existing file must be read before whole-file write: "
+                        f"{action.path}. Use read_file, preserve existing behavior/tests, and prefer replace_text."
+                    )
                 result = await asyncio.to_thread(calls[action.action])
                 if action.action in {"read_file", "list_files"}:
                     inspected = True
+                if action.action == "read_file" and action.path:
+                    read_paths.add(action.path)
                 if action.action in mutations:
                     diff_inspected = False
                 elif action.action == "git_diff":
@@ -323,6 +347,7 @@ async def developer_loop(
                     except (ValueError, RuntimeError, OSError):
                         pass
                     else:
+                        read_paths.add(action.path)
                         result += "\nCURRENT FILE AFTER FAILED REPLACEMENT:\n" + str(current_file)[:5000]
         # Do not replay full write payloads; the resulting diff is separately reviewed.
         compact = action.model_copy(
