@@ -261,6 +261,132 @@ async def test_finish_collects_successful_diff_after_the_latest_mutation(monkeyp
     assert "ACTION: finish" in traces[-1]
 
 
+async def test_existing_file_whole_write_requires_reading_that_exact_path(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.test_source = "def test_existing(): pass\n"
+
+        def list_files(self):
+            return "README.md\ntests/test_todo.py\n"
+
+        def read_file(self, path):
+            if path == "README.md":
+                return "# Demo\n"
+            if path == "tests/test_todo.py":
+                return self.test_source
+            raise ValueError(path)
+
+        def write_file(self, path, content):
+            assert path == "tests/test_todo.py"
+            self.test_source = content
+            return f"Wrote {path}"
+
+        def diff(self):
+            return "diff --git a/tests/test_todo.py b/tests/test_todo.py\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="write_file", path="tests/test_todo.py", content="new tests\n"),
+            DeveloperAction(action="read_file", path="tests/test_todo.py"),
+            DeveloperAction(
+                action="write_file",
+                path="tests/test_todo.py",
+                content="def test_existing(): pass\ndef test_count(): pass\n",
+            ),
+            DeveloperAction(action="git_diff"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+    traces = []
+
+    async def model(**_kwargs):
+        return next(script)
+
+    async def trace(_step, record):
+        traces.append(record)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+    await agents.developer_loop(
+        workspace=workspace,
+        requirement="Add todo count tests",
+        plan=LeadPlan(objective="Edit tests", acceptance_criteria=["Coverage preserved"]),
+        trace=trace,
+    )
+
+    assert "Existing file must be read before whole-file write" in traces[1]
+    assert "test_existing" in workspace.test_source
+    assert "test_count" in workspace.test_source
+
+
+async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch):
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_60_repair.json").read_text())
+    assert fixture["task_id"] == 60
+    assert fixture["developer_allocations"] == [30, 8, 11]
+    assert fixture["usage"]["calls"] == 50
+
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.source = "old\n"
+
+        def read_file(self, path):
+            assert path == "README.md"
+            return self.source
+
+        def replace_text(self, path, old_text, content):
+            assert path == "README.md" and old_text in self.source
+            self.source = self.source.replace(old_text, content)
+            return "Wrote README.md"
+
+        def diff(self):
+            return "diff --git a/README.md b/README.md\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="git_diff"),
+            DeveloperAction(action="finish"),
+            DeveloperAction(action="replace_text", path="README.md", old_text="old", content="fixed"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+    traces = []
+
+    async def model(**_kwargs):
+        return next(script)
+
+    async def trace(_step, record):
+        traces.append(record)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+    result = await agents.developer_loop(
+        workspace=workspace,
+        requirement="Repair rejected change",
+        plan=LeadPlan(objective="Repair", acceptance_criteria=["Issue fixed"]),
+        reviewer_feedback=["Tests still fail"],
+        trace=trace,
+    )
+
+    assert result == "Implementation completed"
+    assert any("repair feedback requires at least one successful file mutation" in item for item in traces)
+    assert workspace.source == "fixed\n"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v7"
+
+
+def test_tracked_runtime_artifact_is_binding_initial_feedback():
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_60_repair.json").read_text())
+    feedback = orchestrator.initial_source_hygiene_feedback(
+        "README.md\nbot.py\ntests/test_todo.py\ntodos.db\n",
+        [],
+    )
+
+    assert any("Deterministic repair required" in item for item in feedback)
+    assert any("todos.db" in item for item in feedback)
+    assert fixture["base_sha"] == "455ea8620a49356386aa91df43d8b5595a6d587f"
+
+
 async def test_developer_cannot_consume_the_last_independent_review_call(db, monkeypatch):
     task = await db.create("Small edit")
     await db.claim("w")
