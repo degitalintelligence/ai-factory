@@ -88,8 +88,12 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v7"
+PROMPT_VERSION_DEVELOPER = "developer-v8"
 PROMPT_VERSION_REVIEWER = "reviewer-v3"
+
+
+class DeveloperStalled(RuntimeError):
+    """Recoverable lack of Developer progress within one authoring iteration."""
 
 
 async def lead_plan(requirement: str, context: str = "") -> LeadPlan:
@@ -140,7 +144,9 @@ read_file/write_file/replace_text/delete_file require path. write_file/replace_t
 replace_text also requires non-empty old_text; run_command requires command. Optional fields may be omitted.
 Use a small unique exact anchor for replace_text. If it fails, use the current-file excerpt attached to the
 error (or read the file once when no excerpt is available), then change to a smaller current anchor. Do not
-repeat a whole-function replacement with stale text. Preserve existing tests when adding new cases.
+repeat a whole-function replacement with stale text. After any matches=0 failure, do not submit the same
+old_text again. Read the current path explicitly and use a small current anchor, or use write_file only after
+that exact existing path has been read. Preserve existing tests when adding new cases.
 Use content for search text and replacement text; do not invent query, args, parameters or new_text fields.
 write_file replaces the WHOLE file. The controller blocks whole-file replacement of an existing file until
 that exact path has been read in the current iteration. Prefer replace_text for targeted edits. Never replace
@@ -220,6 +226,8 @@ async def developer_loop(
     non_mutation_steps = 0
     successful_mutations = 0
     recovery_read_path = None
+    last_failed_replace = None
+    repeated_failed_replace = 0
     mutations = {"write_file", "replace_text", "delete_file"}
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
     file_index = workspace.list_files()
@@ -270,6 +278,7 @@ async def developer_loop(
             schema=DeveloperAction,
             max_attempts=attempts,
         )
+        failed_replace = False
         if action.action == "finish":
             if reviewer_feedback and successful_mutations == 0:
                 result = (
@@ -341,6 +350,7 @@ async def developer_loop(
                 if action.action in mutations and action.path:
                     recovery_read_path = action.path
                 if action.action == "replace_text" and action.path and "matches=0" in str(exc):
+                    failed_replace = True
                     try:
                         current_file = await asyncio.to_thread(workspace.read_file, action.path)
                     except (ValueError, RuntimeError, OSError):
@@ -364,6 +374,18 @@ async def developer_loop(
         history.append(record)
         if trace:
             await trace(step + 1, record)
+        if failed_replace:
+            failed_signature = (action.path, action.old_text)
+            if failed_signature == last_failed_replace:
+                repeated_failed_replace += 1
+            else:
+                last_failed_replace = failed_signature
+                repeated_failed_replace = 1
+            if repeated_failed_replace >= 2:
+                raise DeveloperStalled(
+                    "Developer stalled: repeated the same stale replace_text anchor on "
+                    f"{action.path}. Preserve current partial changes and continue in a repair iteration."
+                )
         successful_mutation = action.action in mutations and not str(result).startswith("ERROR")
         recovery_read = (
             action.action == "read_file"
@@ -376,6 +398,8 @@ async def developer_loop(
             last_signature = None
             repeated_steps = 0
             recovery_read_path = None
+            last_failed_replace = None
+            repeated_failed_replace = 0
         elif recovery_read:
             # A fresh read of the exact file whose mutation failed is corrective
             # progress: it invalidates stale replacement anchors. It is allowed
@@ -384,6 +408,8 @@ async def developer_loop(
             last_signature = None
             repeated_steps = 0
             recovery_read_path = None
+            last_failed_replace = None
+            repeated_failed_replace = 0
         else:
             non_mutation_steps += 1
             signature = f"{action.action}|{action.path or ''}|{str(result)[:500]}"
@@ -393,11 +419,11 @@ async def developer_loop(
                 repeated_steps = 1
             last_signature = signature
             if repeated_steps >= settings.max_developer_stall_steps:
-                raise RuntimeError(
+                raise DeveloperStalled(
                     f"Developer stalled: repeated {action.action} on {action.path or 'the same target'}"
                 )
             if non_mutation_steps >= settings.max_developer_stall_steps:
-                raise RuntimeError(
+                raise DeveloperStalled(
                     f"Developer stalled: no successful file mutation in {non_mutation_steps} steps; "
                     "inspect the task trace and split the task"
                 )

@@ -849,3 +849,59 @@ async def test_task_44_command_reaches_lead_audit_without_lab_or_old_task_contex
     assert json.loads(artifacts["audit_target"])["base_sha"] == refs["main"]
     assert json.loads(artifacts["resolved_skills"])["workflow"] == "lead/audit"
     assert "tests" in artifacts and "review" in artifacts
+
+
+async def test_task_61_stale_replace_rolls_into_repair_iteration_then_publishes(
+    db, repo, engine_fakes, monkeypatch
+):
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_61_stale_replace.json").read_text())
+    workspace, _ = repo
+    state, _ = engine_fakes
+    monkeypatch.setattr(settings, "max_iterations", 2)
+    monkeypatch.setattr(orchestrator, "developer_loop", agents.developer_loop)
+
+    stale = {
+        "action": "replace_text",
+        "path": "app.py",
+        "old_text": "def value(): return 1\n",
+        "content": "def value(): return 3\n",
+    }
+    script = iter(
+        [
+            {"action": "read_file", "path": "app.py"},
+            {
+                "action": "replace_text",
+                "path": "app.py",
+                "old_text": "return 1",
+                "content": "return 2",
+            },
+            stale,
+            stale,
+            {"action": "read_file", "path": "app.py"},
+            {
+                "action": "write_file",
+                "path": "tests/test_app.py",
+                "content": "from app import value\ndef test_value(): assert value() == 2\n",
+            },
+            {"action": "git_diff"},
+            {"action": "finish", "note": "Recovered after stale anchor"},
+        ]
+    )
+    prompts = []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return DeveloperAction.model_validate(next(script))
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    task = await db.create("Change the return value and add a regression test")
+    result = await execute(db, task.id)
+
+    assert fixture["observed_failure"] == "Developer stalled: repeated replace_text on bot.py"
+    assert result.status == "pr_created" and result.iteration == 2
+    assert state["prs"] == state["pushes"] == 1
+    assert "return 2" in workspace.read_file("app.py")
+    artifacts = await db.artifacts(task.id)
+    stalls = [json.loads(item.content) for item in artifacts if item.kind == "developer_stall"]
+    assert len(stalls) == 1 and stalls[0]["recoverable"] is True
+    assert any("Recovery iteration required" in prompt for prompt in prompts[4:])

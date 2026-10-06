@@ -372,7 +372,7 @@ async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch
     assert result == "Implementation completed"
     assert any("repair feedback requires at least one successful file mutation" in item for item in traces)
     assert workspace.source == "fixed\n"
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v7"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v8"
 
 
 def test_tracked_runtime_artifact_is_binding_initial_feedback():
@@ -607,3 +607,59 @@ def test_reviewer_prompt_treats_tracked_runtime_artifact_deletion_as_corrective(
     assert "Do not recommend restoring or ignoring it" in system
     assert "No PR exists at this review stage" in system
     assert agents.PROMPT_VERSION_REVIEWER == "reviewer-v3"
+
+
+async def test_identical_stale_replacement_rolls_over_before_generic_stall(monkeypatch):
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_61_stale_replace.json").read_text())
+    assert fixture["task_id"] == 61
+    assert fixture["successful_mutation_step"] == 3
+    assert len(fixture["stale_replace_steps"]) == 8
+
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.source = "current source\n"
+
+        def read_file(self, path):
+            assert path == "README.md"
+            return self.source
+
+        def write_file(self, path, content):
+            self.source = content
+            return f"Wrote {path}"
+
+        def replace_text(self, path, old_text, content):
+            raise WorkspaceError("old_text must match exactly once (matches=0); read current file")
+
+    stale = DeveloperAction(
+        action="replace_text",
+        path="README.md",
+        old_text="stale whole function",
+        content="replacement",
+    )
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="write_file", path="README.md", content="partial edit\n"),
+            stale,
+            stale,
+        ]
+    )
+    prompts = []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return next(script)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    monkeypatch.setattr(settings, "max_developer_stall_steps", 8)
+
+    with pytest.raises(agents.DeveloperStalled, match="same stale replace_text anchor"):
+        await agents.developer_loop(
+            workspace=Workspace(),
+            requirement="Repair a feature",
+            plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        )
+
+    assert len(prompts) == 4
+    assert "CURRENT FILE AFTER FAILED REPLACEMENT:\npartial edit" in prompts[-1]
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v8"
