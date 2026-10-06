@@ -1,0 +1,16 @@
+{
+  "task_id": 57,
+  "repository": "degitalintelligence/telegram-lab",
+  "base_sha": "455ea8620a49356386aa91df43d8b5595a6d587f",
+  "failure_stage": "developing",
+  "failure": "RuntimeError: Developer stalled: no successful file mutation in 8 steps; inspect the task trace and split the task",
+  "observed_usage": {
+    "llm_calls": 12,
+    "tokens": 49247,
+    "reported_cost_usd": 0.0207
+  },
+  "successful_mutation_step": 3,
+  "failed_replacement_steps": [4, 5, 6, 7, 8, 9],
+  "recovery_read_steps": [10, 11],
+  "scope": "Supplied Task #57 metadata and tool sequence; replacement payloads were omitted. The regression scripts equivalent stale-anchor failures and does not replay provider output."
+}
