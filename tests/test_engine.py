@@ -656,6 +656,73 @@ async def test_task_56_artifact_feedback_drives_test_storage_repair_then_one_pr(
     assert git("status", "--porcelain") == ""
 
 
+async def test_task_63_reviewer_deletion_complaint_never_reaches_developer_feedback(
+    db, repo, engine_fakes, monkeypatch
+):
+    complaint = "The todos.db file was deleted during testing as a corrective cleanup of test artifacts."
+    workspace, git = repo
+    state, refs = engine_fakes
+    (workspace.path / "todos.db").write_text("disposable runtime state")
+    git("add", "-f", "todos.db")
+    git("commit", "-m", "Fixture with tracked runtime database")
+    workspace.base_sha = git("rev-parse", "HEAD")
+    refs["main"] = workspace.base_sha
+    monkeypatch.setattr(settings, "max_iterations", 2)
+    feedback_seen = []
+    reviews = 0
+
+    async def develop(*, workspace, reviewer_feedback, **kwargs):
+        feedback_seen.append(list(reviewer_feedback))
+        workspace.write_file("app.py", "def value(): return 2\n")
+        if len(feedback_seen) == 1:
+            workspace.write_file(
+                "tests/test_app.py",
+                "from app import value\n# default-storage\ndef test_value(): assert value() == 2\n",
+            )
+            workspace.delete_file("todos.db")
+            return "Feature implemented; ready for mandatory checks"
+        joined = "\n".join(reviewer_feedback)
+        assert "Deterministic repair required" in joined
+        assert "Reviewer cannot approve while reporting unresolved issues" in joined
+        assert complaint not in joined
+        workspace.write_file(
+            "tests/test_app.py",
+            "from app import value\n# temporary-storage\ndef test_value(): assert value() == 2\n",
+        )
+        return "Test storage repaired; ready for mandatory checks"
+
+    def report(self):
+        repaired = "temporary-storage" in self.read_file("tests/test_app.py")
+        return Report(
+            results=[CommandResult(command=["pytest"], exit_code=0, output="15 passed in 1.0s")],
+            issues=[] if repaired else ["Commands modified source or left test artifacts: todos.db"],
+        )
+
+    async def review(**kwargs):
+        nonlocal reviews
+        reviews += 1
+        return ReviewResult(
+            approved=True,
+            summary="Acceptance criteria verified",
+            issues=[complaint] if reviews == 1 else [],
+            criteria=[CriterionEvidence(criterion=1, satisfied=True, evidence="tests/test_app.py")],
+        )
+
+    monkeypatch.setattr(orchestrator, "developer_loop", develop)
+    monkeypatch.setattr(orchestrator, "review_change", review)
+    monkeypatch.setattr(Workspace, "default_tests", report)
+    monkeypatch.setattr(Workspace, "standalone_tests", lambda self, paths: report(self))
+    task = await db.create("Small feature")
+    result = await execute(db, task.id)
+    assert result.status == "pr_created" and result.iteration == 2
+    assert reviews == 2 and state["prs"] == state["pushes"] == 1
+    assert complaint not in "\n".join(feedback_seen[1])
+    gates = [json.loads(a.content) for a in await db.artifacts(task.id) if a.kind == "gates"]
+    assert not gates[0]["passed"] and gates[1]["passed"]
+    assert not (workspace.path / "todos.db").exists()
+    assert git("status", "--porcelain") == ""
+
+
 def test_task_56_feedback_drops_only_the_conflicting_reviewer_advice():
     fixture = json.loads((Path(__file__).parent / "fixtures/task_56_review.json").read_text())
     issues = [
@@ -672,6 +739,24 @@ def test_task_56_feedback_drops_only_the_conflicting_reviewer_advice():
     assert "tmp_path" in feedback[0] and "todos.db" in feedback[0]
     assert fixture["review_issue"] not in feedback
     assert "Keep this unrelated correctness issue" in feedback
+
+
+def test_task_63_feedback_drops_non_actionable_artifact_deletion_complaints():
+    issues = [
+        "Mandatory test gate failed (including missing tests, timeout, or test artifacts)",
+        "Commands modified source or left test artifacts: todos.db",
+        "Reviewer cannot approve while reporting unresolved issues",
+    ]
+    review_issues = [
+        "The todos.db file was deleted during testing as a corrective cleanup of test artifacts.",
+        "The todos.db file was deleted as a cleanup step to avoid test artifacts, which is appropriate.",
+        "tests/test_app.py recreates todos.db through the default store path; route build_app through tmp_path",
+    ]
+    feedback = orchestrator.engineering_repair_feedback(issues, review_issues)
+    assert feedback[0].startswith("Deterministic repair required")
+    assert all("corrective cleanup" not in item and "cleanup step" not in item for item in feedback)
+    assert "Reviewer cannot approve while reporting unresolved issues" in feedback
+    assert any("route build_app through tmp_path" in item for item in feedback)
 
 
 async def test_review_only_completes_without_mutation_or_pr(db, engine_fakes, monkeypatch):

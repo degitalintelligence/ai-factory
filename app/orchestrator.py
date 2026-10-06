@@ -27,7 +27,13 @@ _TEST_ARTIFACT_PREFIX = "Commands modified source or left test artifacts:"
 
 
 def engineering_repair_feedback(issues: list[str], review_issues: list[str]) -> list[str]:
-    """Turn deterministic failures into non-contradictory Developer instructions."""
+    """Turn deterministic failures into non-contradictory Developer instructions.
+
+    Removing a flagged tracked runtime artifact is mandated controller policy, so
+    review issues that advise restoring/ignoring the artifact (Task 56) or merely
+    describe its mandated deletion as a problem (Task 63) carry no actionable
+    repair and must not contradict the deterministic guidance below.
+    """
     artifact_paths = []
     for issue in issues:
         if issue.startswith(_TEST_ARTIFACT_PREFIX):
@@ -35,12 +41,14 @@ def engineering_repair_feedback(issues: list[str], review_issues: list[str]) -> 
                 path.strip() for path in issue.removeprefix(_TEST_ARTIFACT_PREFIX).split(",") if path.strip()
             )
 
-    conflicting = ("restore", "ignore", "ignored")
+    # "delete"/"remove" cover deleted/deletion/removal inflections; "cleanup" covers
+    # "corrective cleanup" style phrasing observed in Task 63 review issues.
+    non_actionable = ("restore", "ignore", "delete", "remove", "cleanup")
     filtered_review = []
     for issue in review_issues:
         lowered = issue.casefold()
         names_artifact = any(path.casefold() in lowered for path in artifact_paths)
-        if names_artifact and any(word in lowered for word in conflicting):
+        if names_artifact and any(word in lowered for word in non_actionable):
             continue
         filtered_review.append(issue)
 

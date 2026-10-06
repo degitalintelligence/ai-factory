@@ -605,8 +605,9 @@ def test_reviewer_prompt_treats_tracked_runtime_artifact_deletion_as_corrective(
     )
     assert "deletion is corrective" in system
     assert "Do not recommend restoring or ignoring it" in system
+    assert "never list it in issues" in system
     assert "No PR exists at this review stage" in system
-    assert agents.PROMPT_VERSION_REVIEWER == "reviewer-v3"
+    assert agents.PROMPT_VERSION_REVIEWER == "reviewer-v4"
 
 
 async def test_identical_stale_replacement_rolls_over_before_generic_stall(monkeypatch):
