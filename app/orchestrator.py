@@ -564,8 +564,9 @@ async def run_task(task_id, notify=None, owner=None):
                     trace=trace,
                     step_limit=step_limit,
                 )
-            except DeveloperStalled as exc:
-                recoverable = iteration < settings.max_iterations
+            except (DeveloperStalled, BudgetExceeded) as exc:
+                budget_reserved = isinstance(exc, BudgetExceeded)
+                recoverable = not budget_reserved and iteration < settings.max_iterations
                 stall_feedback = [
                     redact(str(exc)),
                     (
@@ -574,8 +575,13 @@ async def run_task(task_id, notify=None, owner=None):
                         "file, or a whole-file write only after reading that exact path. Preserve all "
                         "existing tests."
                         if recoverable
-                        else "Final authoring iteration stopped; a safe nonempty partial diff may proceed "
-                        "only through mandatory tests and independent review."
+                        else (
+                            "Developer call budget reached the independent-review reserve; a safe nonempty "
+                            "partial diff may proceed only through mandatory tests and that reserved review."
+                            if budget_reserved
+                            else "Final authoring iteration stopped; a safe nonempty partial diff may proceed "
+                            "only through mandatory tests and independent review."
+                        )
                     ),
                 ]
                 feedback = list(dict.fromkeys(feedback + stall_feedback))
@@ -587,6 +593,7 @@ async def run_task(task_id, notify=None, owner=None):
                         {
                             "iteration": iteration,
                             "recoverable": recoverable,
+                            "reason": "budget_reserved" if budget_reserved else "stalled",
                             "feedback": stall_feedback,
                         },
                         sort_keys=True,
@@ -594,7 +601,13 @@ async def run_task(task_id, notify=None, owner=None):
                 )
                 await store.event(
                     task_id,
-                    "developer_recovery" if recoverable else "developer_stall",
+                    (
+                        "developer_recovery"
+                        if recoverable
+                        else "developer_budget_reserved"
+                        if budget_reserved
+                        else "developer_stall"
+                    ),
                     "\n".join(stall_feedback),
                 )
                 if recoverable:
@@ -603,18 +616,16 @@ async def run_task(task_id, notify=None, owner=None):
                     final_stall_diff = await asyncio.to_thread(workspace.diff)
                 except (ValueError, RuntimeError, OSError) as diff_exc:
                     raise RuntimeError(
-                        "Developer stalled after the final repair iteration and the partial source "
+                        "Developer authoring stopped and the partial source "
                         f"cannot enter mandatory checks: {redact(str(diff_exc))}"
                     ) from exc
                 if not final_stall_diff.strip():
-                    raise RuntimeError(
-                        "Developer stalled after the final repair iteration without an evaluable diff"
-                    ) from exc
+                    raise RuntimeError("Developer authoring stopped without an evaluable diff") from exc
                 await store.event(
                     task_id,
                     "developer_handoff",
-                    "Final stalled iteration produced a safe nonempty diff; running mandatory tests "
-                    "and independent review without another model call.",
+                    "Developer authoring stopped with a safe nonempty diff; running mandatory tests "
+                    "and the reserved independent review without another Developer call.",
                 )
             await check()
             try:
