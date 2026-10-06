@@ -1,6 +1,6 @@
 import pytest
 
-from app.gates import deployment_issues, post_publication_issues, quality_issues
+from app.gates import deployment_issues, post_publication_issues, quality_issues, removed_python_tests
 from app.schemas import CommandResult, CriterionEvidence, LeadPlan, ReviewResult
 from app.schemas import TestReport as Report
 
@@ -146,6 +146,39 @@ def test_new_tests_must_pass_standalone():
     failed = Report(results=[CommandResult(command=["pytest"], exit_code=1)])
     assert any("standalone" in x for x in quality_issues(plan, passed, review, "diff", [], failed))
     assert quality_issues(plan, passed, review, "diff", [], passed) == []
+
+
+def test_existing_python_tests_cannot_be_silently_replaced():
+    diff = """diff --git a/tests/test_todo.py b/tests/test_todo.py
+--- a/tests/test_todo.py
++++ b/tests/test_todo.py
+-def test_todo_adds_description():
+-    pass
+-def test_todo_data_persists_after_store_restart(tmp_path):
+-    pass
++def test_todo_count_empty():
++    pass
+"""
+    assert removed_python_tests(diff) == [
+        "test_todo_adds_description",
+        "test_todo_data_persists_after_store_restart",
+    ]
+    plan = LeadPlan(objective="Feature", acceptance_criteria=["Works"])
+    report = Report(results=[CommandResult(command=["pytest"], exit_code=0)])
+    review = ReviewResult(
+        approved=True,
+        summary="Approved",
+        criteria=[CriterionEvidence(criterion=1, satisfied=True, evidence="new test")],
+    )
+    issues = quality_issues(plan, report, review, diff, [])
+    assert any("Existing Python tests were removed" in issue for issue in issues)
+
+
+def test_moved_python_test_definition_is_not_treated_as_deleted():
+    diff = """-def test_existing_behavior():
++def test_existing_behavior():
+"""
+    assert removed_python_tests(diff) == []
 
 
 def test_post_publication_criterion_is_not_blocking_before_pr_exists():
