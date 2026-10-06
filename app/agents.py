@@ -88,8 +88,8 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v5"
-PROMPT_VERSION_REVIEWER = "reviewer-v2"
+PROMPT_VERSION_DEVELOPER = "developer-v6"
+PROMPT_VERSION_REVIEWER = "reviewer-v3"
 
 
 async def lead_plan(requirement: str, context: str = "") -> LeadPlan:
@@ -185,12 +185,13 @@ If requirements cannot be met within the environment, report the limitation in n
     return system, context
 
 
-def developer_turn(context: str, history: str = "", *, step: int = 1) -> str:
+def developer_turn(context: str, history: str = "", *, step: int = 1, step_limit: int | None = None) -> str:
     """Share bounded turn instructions with initial budget admission."""
+    limit = settings.max_dev_steps if step_limit is None else step_limit
     return (
         context
-        + f"\nCONTROLLER STEP: {step}/{settings.max_dev_steps}; "
-        + f"remaining actions including this one: {settings.max_dev_steps - step + 1}. "
+        + f"\nCONTROLLER STEP: {step}/{limit}; "
+        + f"remaining actions including this one: {limit - step + 1}. "
         + "Preserve existing tests. Finish hands off to mandatory checks, not publication.\n"
         + "TOOL HISTORY:\n"
         + history
@@ -198,7 +199,14 @@ def developer_turn(context: str, history: str = "", *, step: int = 1) -> str:
 
 
 async def developer_loop(
-    *, workspace, requirement, plan, reviewer_feedback=None, checkpoint=None, trace=None
+    *,
+    workspace,
+    requirement,
+    plan,
+    reviewer_feedback=None,
+    checkpoint=None,
+    trace=None,
+    step_limit=None,
 ):
     history = []
     inspected = False
@@ -217,7 +225,12 @@ async def developer_loop(
         reviewer_feedback=reviewer_feedback,
     )
     schema_chars = len(json.dumps(DeveloperAction.model_json_schema()))
-    for step in range(settings.max_dev_steps):
+    limit = settings.max_dev_steps if step_limit is None else min(settings.max_dev_steps, step_limit)
+    if limit < 1:
+        raise BudgetExceeded(
+            "No Developer call allocation remains after reserving repair and independent review calls"
+        )
+    for step in range(limit):
         if checkpoint:
             await checkpoint()
         # Keep the newest records that fit the prompt budget; drop oldest records when over budget.
@@ -247,7 +260,7 @@ async def developer_loop(
             role="developer",
             prompt_version=PROMPT_VERSION_DEVELOPER,
             system=system,
-            user=developer_turn(context, "\n".join(reversed(window)), step=step + 1),
+            user=developer_turn(context, "\n".join(reversed(window)), step=step + 1, step_limit=limit),
             schema=DeveloperAction,
             max_attempts=attempts,
         )
@@ -378,10 +391,10 @@ async def developer_loop(
             )
             if trace:
                 await trace(
-                    settings.max_dev_steps,
+                    limit,
                     "ACTION: git_diff (controller step-limit checkpoint)\nRESULT:\n" + str(final_diff)[:6000],
                 )
-                await trace(settings.max_dev_steps, "ACTION: handoff\nRESULT:\n" + note)
+                await trace(limit, "ACTION: handoff\nRESULT:\n" + note)
             return note
     raise RuntimeError("Developer exceeded MAX_DEV_STEPS without an evaluable diff; inspect tool trace")
 
@@ -414,6 +427,8 @@ unsafe configuration, missing runtime dependency, or unresolved issue. Existing 
 A new or changed test that only passes inside the full suite does not prove the new behavior; check standalone evidence.
 Do not reject a criterion solely because a PR URL/body or published metadata does not exist yet when that criterion is
 listed in post_publication_criteria; those are verified only after publication.
+No PR exists at this review stage. Never claim a PR was created, tests were clean, or gates passed when the supplied
+evidence says otherwise. Report deterministic issues as unresolved even if the feature-specific tests passed.
 """
         + deferred_note
         + """

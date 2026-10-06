@@ -10,6 +10,21 @@ from app.schemas import DeveloperAction, LeadPlan, PlanBudget, ReviewResult
 # Inspect source/tests, change source/tests, test, inspect diff, finish; then review.
 # This is a planning baseline, not a promise that every implementation takes seven calls.
 DEVELOPER_BASELINE_CALLS = 7
+REVIEW_CALLS_PER_ITERATION = 1
+SCHEMA_RETRY_MARGIN_CALLS = 2
+
+
+def engineering_iteration_step_limit(
+    *, current_calls: int, max_calls: int, iteration: int, max_iterations: int
+) -> int:
+    """Allocate Developer actions without consuming later repair/review capacity."""
+    future_iterations = max(0, max_iterations - iteration)
+    future_reserve = future_iterations * (DEVELOPER_BASELINE_CALLS + REVIEW_CALLS_PER_ITERATION)
+    current_review = REVIEW_CALLS_PER_ITERATION
+    return max(
+        0,
+        min(settings.max_dev_steps, max_calls - current_calls - current_review - future_reserve),
+    )
 
 
 def engineering_budget_admission(
@@ -35,9 +50,16 @@ def engineering_budget_admission(
     adjustable = fresh and not explicit
     admitted = plan.model_copy(deep=True)
     minimum_calls = used_calls + DEVELOPER_BASELINE_CALLS + 1
-    # A one-action-per-call Developer can legitimately need more than a model's
-    # estimate of 20 calls. Fund one bounded iteration and gateway review attempts.
-    execution_calls = used_calls + settings.max_dev_steps + 3
+    # Fund one complete authoring iteration plus a bounded repair/review baseline
+    # for every remaining iteration. Otherwise MAX_DEV_STEPS can consume the
+    # lifetime envelope before deterministic test feedback can be repaired.
+    execution_calls = (
+        used_calls
+        + settings.max_dev_steps
+        + REVIEW_CALLS_PER_ITERATION
+        + (settings.max_iterations - 1) * (DEVELOPER_BASELINE_CALLS + REVIEW_CALLS_PER_ITERATION)
+        + SCHEMA_RETRY_MARGIN_CALLS
+    )
     if adjustable:
         admitted.budget.max_llm_calls = min(
             settings.max_llm_calls, max(estimate["max_llm_calls"], minimum_calls, execution_calls)
@@ -101,6 +123,9 @@ def engineering_budget_admission(
         "effective_limits": limits,
         "used": {"calls": used_calls, "tokens": used_tokens, "reported_cost_usd": used_cost},
         "developer_baseline_calls": DEVELOPER_BASELINE_CALLS,
+        "repair_iterations_funded": settings.max_iterations - 1,
+        "review_calls_per_iteration": REVIEW_CALLS_PER_ITERATION,
+        "schema_retry_margin_calls": SCHEMA_RETRY_MARGIN_CALLS,
         "developer_reserve": developer_reserve,
         "reviewer_reserve": reviewer_reserve,
         "minimum_calls": minimum_calls,

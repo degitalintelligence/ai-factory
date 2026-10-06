@@ -110,6 +110,24 @@ def _root_account(user: str) -> bool:
     return user.split(":", 1)[0].lower() in {"root", "0"}
 
 
+def removed_python_tests(diff: str) -> list[str]:
+    """Return existing Python test functions deleted without an equivalent addition."""
+    removed = set()
+    added = set()
+    pattern = re.compile(r"^(?:async\s+)?def\s+(test_[A-Za-z0-9_]+)\s*\(")
+    for line in diff.splitlines():
+        if line.startswith(("---", "+++")) or len(line) < 2:
+            continue
+        match = pattern.match(line[1:])
+        if not match:
+            continue
+        if line[0] == "-":
+            removed.add(match.group(1))
+        elif line[0] == "+":
+            added.add(match.group(1))
+    return sorted(removed - added)
+
+
 def quality_issues(
     plan: LeadPlan,
     report: TestReport,
@@ -128,6 +146,11 @@ def quality_issues(
     if standalone is not None and not standalone.passed:
         issues.append("New or changed tests must pass when run standalone")
         issues.extend(standalone.issues)
+    removed_tests = removed_python_tests(diff)
+    if removed_tests:
+        issues.append(
+            "Existing Python tests were removed without equivalent definitions: " + ", ".join(removed_tests)
+        )
     if review.approved and review.issues:
         issues.append("Reviewer cannot approve while reporting unresolved issues")
     # Criteria that depend on the published PR are verified after publication, not before it.

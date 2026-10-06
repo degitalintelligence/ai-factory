@@ -541,3 +541,16 @@ target, the controller recognizes the one-time read as recovery progress and
 restarts the generic no-mutation counter. This does not increase authoring steps,
 budgets or retry limits: repeated reads, unrelated inspection and repeated failed
 actions remain subject to the existing stall guards.
+
+Fresh Engineering plans reserve bounded repair capacity across all configured
+iterations instead of allowing the first `MAX_DEV_STEPS` window to consume the
+task's entire call envelope. Before each iteration the controller records a
+`developer_allocation` artifact with the effective step limit, used calls, total
+limit and future iteration count. Existing saved plans and explicit user budgets
+are not enlarged; if they cannot preserve an independent review, execution fails
+closed. This raises the default fresh-task allowance, not daily tenant limits,
+token ceilings, cost ceilings or retry resets.
+
+Independent review occurs before publication and must never claim a PR already
+exists. Passing feature tests do not override sandbox artifact issues, and Python
+test definitions cannot be silently removed while adding replacement coverage.
