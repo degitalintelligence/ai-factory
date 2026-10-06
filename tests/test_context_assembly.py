@@ -141,3 +141,35 @@ async def test_self_improvement_context_also_carries_memory(db, monkeypatch):
     assert "strict-parser" in context
     assert len(context) <= settings.self_task_context_chars
     assert json.loads(raw)["memory_slice_included"] is True
+
+
+async def test_standard_context_prioritizes_feature_specific_existing_tests(db, monkeypatch):
+    class TodoWorkspace:
+        files = "README.md\nbot.py\ntests/test_smoke.py\ntests/test_todo.py\ntodos.db\n"
+
+        def list_files(self):
+            return self.files
+
+        def read_file(self, path):
+            content = {
+                "README.md": "# Telegram Lab\n",
+                "bot.py": "async def todo(): pass\n",
+                "tests/test_smoke.py": "def test_smoke(): pass\n",
+                "tests/test_todo.py": "def test_todo_persists(): pass\n",
+            }
+            if path not in content:
+                raise ValueError(path)
+            return content[path]
+
+    async def no_previous_tasks(_limit):
+        return []
+
+    monkeypatch.setattr(orchestrator.store, "list", no_previous_tasks)
+    task = fake_task(requirement="Tambahkan subcommand /todo count")
+
+    context, raw = await orchestrator.repository_context(TodoWorkspace(), task)
+    inspected = [entry["path"] for entry in json.loads(raw)["inspected"]]
+
+    assert inspected[0] == "tests/test_todo.py"
+    assert "def test_todo_persists" in context
+    assert "todos.db:" not in context
