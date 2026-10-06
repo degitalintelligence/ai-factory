@@ -388,6 +388,82 @@ async def test_task_53_real_developer_loop_repairs_tool_failures_then_reviews_on
     assert git("status", "--porcelain") == ""
 
 
+async def test_task_54_finish_handoff_rejects_passing_tests_with_artifacts_then_repairs(
+    db, repo, engine_fakes, monkeypatch
+):
+    """Real controller/tools/Git/SQL; model, sandbox and GitHub boundaries mocked.
+
+    Reproduces Task 54's passing pytest with sandbox issues and missing git_diff.
+    Does not execute lab/production code or claim an actual provider replay.
+    """
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_54_finish.json").read_text())
+    workspace, git = repo
+    state, _ = engine_fakes
+    monkeypatch.setattr(settings, "max_iterations", 2)
+    actions = iter(
+        [
+            {"action": "read_file", "path": "app.py"},
+            {"action": "write_file", "path": "app.py", "content": "def value(): return 2\n"},
+            {
+                "action": "write_file",
+                "path": "tests/test_app.py",
+                "content": "from app import value\ndef test_value(): assert value() == 2\n",
+            },
+            {"action": "run_command", "command": "python -m pytest -q"},
+            fixture["first_finish"],
+            {"action": "read_file", "path": "tests/test_app.py"},
+            {
+                "action": "write_file",
+                "path": "tests/test_app.py",
+                "content": "from app import value\ndef test_value(tmp_path): assert value() == 2\n",
+            },
+            {"action": "finish", "note": "Temporary storage fixed; ready for independent review"},
+        ]
+    )
+    prompts, reviews = [], []
+    reviewer = orchestrator.review_change
+
+    def sandbox_report(self):
+        isolated = "tmp_path" in self.read_file("tests/test_app.py")
+        return Report(
+            results=Report.model_validate(fixture["sandbox_report"]).results,
+            issues=[] if isolated else fixture["sandbox_report"]["issues"],
+            environment=fixture["sandbox_report"]["environment"],
+        )
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return DeveloperAction.model_validate(next(actions))
+
+    async def review(**kwargs):
+        # Even an approving model cannot override the artifact gate.
+        assert state["prs"] == state["pushes"] == 0
+        reviews.append(kwargs)
+        return await reviewer(**kwargs)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    monkeypatch.setattr(orchestrator, "developer_loop", agents.developer_loop)
+    monkeypatch.setattr(orchestrator, "review_change", review)
+    monkeypatch.setattr(
+        Workspace, "run_command", lambda self, command: sandbox_report(self).model_dump_json()
+    )
+    monkeypatch.setattr(Workspace, "default_tests", sandbox_report)
+    monkeypatch.setattr(Workspace, "standalone_tests", lambda self, paths: sandbox_report(self))
+    task = await db.create("Small scoped feature with persistent user data tests")
+    result = await execute(db, task.id)
+    assert result.status == "pr_created" and result.iteration == 2
+    assert len(prompts) == 8 and len(reviews) == 2
+    assert "test artifacts: todos.db" in prompts[5]
+    assert "test artifacts: todos.db" in reviews[0]["test_output"]
+    artifacts = await db.artifacts(task.id)
+    gates = [json.loads(a.content) for a in artifacts if a.kind == "gates"]
+    assert not gates[0]["passed"] and gates[1]["passed"]
+    traces = [json.loads(a.content) for a in artifacts if a.kind == "developer_trace"]
+    assert sum("controller finish checkpoint" in item["record"] for item in traces) == 2
+    assert state["prs"] == state["pushes"] == 1
+    assert git("status", "--porcelain") == ""
+
+
 async def test_review_only_completes_without_mutation_or_pr(db, engine_fakes, monkeypatch):
     state, refs = engine_fakes
 
