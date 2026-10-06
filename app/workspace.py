@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import json
 import os
@@ -36,6 +37,19 @@ def is_suspicious_artifact(path):
 
 class WorkspaceError(RuntimeError):
     pass
+
+
+def top_level_definition_counts(content):
+    """Count module-level Python definitions without rejecting transient syntax."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return {}
+    counts = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            counts[node.name] = counts.get(node.name, 0) + 1
+    return counts
 
 
 def credential_scan_content(path, content):
@@ -177,6 +191,22 @@ class Workspace:
         target = self._safe_path(path)
         if len(content.encode()) > 200000 or secret_present(content):
             raise WorkspaceError("File too large or contains credentials")
+        if target.suffix == ".py":
+            current_counts = {}
+            if target.is_file():
+                current_counts = top_level_definition_counts(target.read_text(encoding="utf-8"))
+            candidate_counts = top_level_definition_counts(content)
+            introduced = {
+                name
+                for name, count in candidate_counts.items()
+                if count > 1 and count > max(1, current_counts.get(name, 0))
+            }
+            if introduced:
+                raise WorkspaceError(
+                    "Python mutation would introduce duplicate top-level definitions: "
+                    + ", ".join(sorted(introduced))
+                    + "; read the current file and preserve every existing definition exactly once"
+                )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"Wrote {path}"
