@@ -904,4 +904,3 @@ async def test_task_61_stale_replace_rolls_into_repair_iteration_then_publishes(
     stalls = [json.loads(item.content) for item in artifacts if item.kind == "developer_stall"]
     assert len(stalls) == 1 and stalls[0]["recoverable"] is True
     assert any("Recovery iteration required" in prompt for prompt in prompts[4:])
-
