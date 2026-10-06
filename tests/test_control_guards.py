@@ -372,7 +372,7 @@ async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch
     assert result == "Implementation completed"
     assert any("repair feedback requires at least one successful file mutation" in item for item in traces)
     assert workspace.source == "fixed\n"
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v7"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v8"
 
 
 def test_tracked_runtime_artifact_is_binding_initial_feedback():
