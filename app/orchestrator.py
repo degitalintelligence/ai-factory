@@ -4,7 +4,7 @@ import json
 import logging
 import re
 
-from app.agents import developer_loop, lead_plan, normalize_lead_plan, review_change
+from app.agents import DeveloperStalled, developer_loop, lead_plan, normalize_lead_plan, review_change
 from app.audit_scope import referenced_tasks, repository_audit, target_project, validate_sha
 from app.config import Project, settings
 from app.contracts import context_slice
@@ -548,15 +548,44 @@ async def run_task(task_id, notify=None, owner=None):
                     }
                 ),
             )
-            await developer_loop(
-                workspace=workspace,
-                requirement=task.requirement,
-                plan=plan,
-                reviewer_feedback=feedback,
-                checkpoint=check,
-                trace=trace,
-                step_limit=step_limit,
-            )
+            try:
+                await developer_loop(
+                    workspace=workspace,
+                    requirement=task.requirement,
+                    plan=plan,
+                    reviewer_feedback=feedback,
+                    checkpoint=check,
+                    trace=trace,
+                    step_limit=step_limit,
+                )
+            except DeveloperStalled as exc:
+                if iteration >= settings.max_iterations:
+                    raise RuntimeError(
+                        "Developer stalled after the final repair iteration; inspect the task trace "
+                        "and create a smaller task"
+                    ) from exc
+                stall_feedback = [
+                    redact(str(exc)),
+                    "Recovery iteration required: inspect the current mutated source again. Do not repeat "
+                    "the stale replace_text anchor. Use a small exact anchor from the current file, or a "
+                    "whole-file write only after reading that exact path. Preserve all existing tests.",
+                ]
+                feedback = list(dict.fromkeys(feedback + stall_feedback))
+                await store.update(task_id, owner, feedback_json=json.dumps(feedback))
+                await store.artifact(
+                    task_id,
+                    "developer_stall",
+                    json.dumps(
+                        {
+                            "iteration": iteration,
+                            "recoverable": True,
+                            "feedback": stall_feedback,
+                        },
+                        sort_keys=True,
+                    ),
+                )
+                await store.event(task_id, "developer_recovery", "\n".join(stall_feedback))
+                continue
             await check()
             try:
                 diff = await asyncio.to_thread(workspace.diff)
