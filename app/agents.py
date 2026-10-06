@@ -238,10 +238,7 @@ async def developer_loop(
     file_index = workspace.list_files()
     existing_paths = set(file_index.splitlines())
     tracked_artifacts = {path for path in existing_paths if is_suspicious_artifact(path)}
-    artifact_cleanup_required = any(
-        "tracked runtime artifact cleanup was not performed" in str(item).casefold()
-        for item in (reviewer_feedback or [])
-    )
+    artifact_cleanup_required = bool(tracked_artifacts)
     artifact_policy_violations = 0
     system, context = developer_request(
         file_index=file_index,
