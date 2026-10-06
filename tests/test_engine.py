@@ -905,3 +905,65 @@ async def test_task_61_stale_replace_rolls_into_repair_iteration_then_publishes(
     stalls = [json.loads(item.content) for item in artifacts if item.kind == "developer_stall"]
     assert len(stalls) == 1 and stalls[0]["recoverable"] is True
     assert any("Recovery iteration required" in prompt for prompt in prompts[4:])
+
+
+async def test_task_62_final_stall_hands_safe_partial_diff_to_tests_and_review(
+    db, repo, engine_fakes, monkeypatch
+):
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_62_budget.json").read_text())
+    workspace, _ = repo
+    state, _ = engine_fakes
+    monkeypatch.setattr(settings, "max_iterations", 1)
+    monkeypatch.setattr(orchestrator, "developer_loop", agents.developer_loop)
+
+    script = iter(
+        [
+            {"action": "read_file", "path": "app.py"},
+            {
+                "action": "replace_text",
+                "path": "app.py",
+                "old_text": "return 1",
+                "content": (
+                    "return 2\n"
+                    "# ambiguous marker one\n"
+                    "# ambiguous marker one\n"
+                    "# ambiguous marker two\n"
+                    "# ambiguous marker two"
+                ),
+            },
+            {
+                "action": "write_file",
+                "path": "tests/test_app.py",
+                "content": "from app import value\ndef test_value(): assert value() == 2\n",
+            },
+            {
+                "action": "replace_text",
+                "path": "app.py",
+                "old_text": "# ambiguous marker one",
+                "content": "replacement",
+            },
+            {
+                "action": "replace_text",
+                "path": "app.py",
+                "old_text": "# ambiguous marker two",
+                "content": "replacement",
+            },
+        ]
+    )
+
+    async def model(**kwargs):
+        return DeveloperAction.model_validate(next(script))
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    task = await db.create("Change the return value with bounded recovery")
+    result = await execute(db, task.id)
+
+    assert fixture["usage"]["calls"] == 49
+    assert fixture["failure_stage"] == "developing"
+    assert result.status == "pr_created" and result.iteration == 1
+    assert state["prs"] == state["pushes"] == 1
+    assert "return 2" in workspace.read_file("app.py")
+    artifacts = await db.artifacts(task.id)
+    assert any(item.kind == "developer_stall" for item in artifacts)
+    events = await db.events(task.id)
+    assert any(event.kind == "developer_handoff" for event in events)
