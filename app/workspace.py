@@ -183,8 +183,12 @@ class Workspace:
 
     def replace_text(self, path, old_text, content):
         current = self._read_raw(path)
-        if current.count(old_text) != 1:
-            raise WorkspaceError("old_text must match exactly once")
+        matches = current.count(old_text)
+        if matches != 1:
+            raise WorkspaceError(
+                f"old_text must match exactly once (matches={matches}); "
+                "read the current file and use a smaller unique exact anchor"
+            )
         return self.write_file(path, current.replace(old_text, content, 1))
 
     def delete_file(self, path):

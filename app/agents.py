@@ -2,9 +2,10 @@ import asyncio
 import json
 
 from app.config import settings
-from app.llm import json_completion
+from app.llm import json_completion, run_context
 from app.schemas import DeveloperAction, LeadPlan, PlanBudget, ReviewResult
 from app.skills import SKILLS, select_skills
+from app.store import BudgetExceeded, store
 
 POST_PUBLICATION_MARKERS = (
     "pull request",
@@ -87,7 +88,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v1"
+PROMPT_VERSION_DEVELOPER = "developer-v2"
 PROMPT_VERSION_REVIEWER = "reviewer-v1"
 
 
@@ -137,6 +138,8 @@ Examples: {"action":"list_files"}, {"action":"read_file","path":"README.md"},
 {"action":"search","content":"handler"}, {"action":"run_command","command":"python -m pytest -q"}.
 read_file/write_file/replace_text/delete_file require path. write_file/replace_text/search require content.
 replace_text also requires non-empty old_text; run_command requires command. Optional fields may be omitted.
+Use a small unique exact anchor for replace_text. If it fails, read the current file and change the anchor;
+do not repeat a whole-function replacement with stale text. Preserve existing tests when adding new cases.
 Use content for search text and replacement text; do not invent query, args, parameters or new_text fields.
 write_file replaces the WHOLE file; replace_text needs old_text that occurs exactly once.
 search searches literal content; git_diff includes all staged and newly created files.
@@ -145,6 +148,10 @@ Available commands: python -m pytest, python -m compileall, python -m py_compile
 Dependencies are installed by the sandbox operator policy; declare them in requirements or lockfile.
 Persist user data using proper storage and named volumes, never a committed database file.
 Tests use tmp_path/in-memory storage; do not hide failures, skip required tests, or replace tests with stubs.
+Check repository dependencies and existing tests before choosing a test pattern. Without a declared async pytest
+plugin, use a synchronous test with asyncio.run, as existing tests may do; bare async def tests will fail.
+Check source hygiene before tests: tracked runtime databases cannot enter the sandbox snapshot. Never read
+database contents or ignore this gate; use temporary database paths in tests and report unsafe data blockers.
 Implement meaningful acceptance tests, failure paths, configuration docs and complete requested deployment files.
 For deployment: Dockerfile (non-root), .dockerignore, .env.example (empty placeholders), Compose with healthchecks,
 restart policy and named volumes where stateful; docs/DEPLOYMENT.md with environment, health, backup and rollback.
@@ -167,6 +174,7 @@ async def developer_loop(
 ):
     history = []
     inspected = False
+    diff_inspected = False
     last_signature = None
     repeated_steps = 0
     non_mutation_steps = 0
@@ -191,6 +199,19 @@ async def developer_loop(
                 break
             window.append(record)
             budget -= cost
+        # Schema retries also consume calls. Keep at least one independent review
+        # call instead of allowing Developer to consume the entire task envelope.
+        attempts = 3
+        task_context = run_context.get()
+        if task_context:
+            current = await store.get(task_context[0])
+            available = store.budget_envelope(current)["max_llm_calls"] - current.llm_calls
+            if available <= 1:
+                raise BudgetExceeded(
+                    "Developer call allowance exhausted while reserving independent review; "
+                    "unfinished work cannot be published. Inspect /report and /logs; lifetime usage is retained."
+                )
+            attempts = min(3, available - 1)
         action = await json_completion(
             model=settings.model_for("developer"),
             role="developer",
@@ -198,9 +219,15 @@ async def developer_loop(
             system=system,
             user=context + "\nTOOL HISTORY:\n" + "\n".join(reversed(window)),
             schema=DeveloperAction,
+            max_attempts=attempts,
         )
         if action.action == "finish":
-            if inspected and any('"action":"git_diff"' in h for h in history):
+            if inspected and diff_inspected:
+                if trace:
+                    await trace(
+                        step + 1,
+                        "ACTION: finish\nRESULT:\n" + (action.note or "Implementation completed")[:6000],
+                    )
                 return action.note or "Implementation completed"
             result = "Inspect existing files and git_diff before finish"
         else:
@@ -222,13 +249,25 @@ async def developer_loop(
                 result = await asyncio.to_thread(calls[action.action])
                 if action.action in {"read_file", "list_files"}:
                     inspected = True
+                if action.action in mutations:
+                    diff_inspected = False
+                elif action.action == "git_diff":
+                    diff_inspected = True
             except (ValueError, RuntimeError, OSError) as exc:
                 result = f"ERROR {type(exc).__name__}: {exc}"
         # Do not replay full write payloads; the resulting diff is separately reviewed.
         compact = action.model_copy(
-            update={"content": f"[{len(action.content)} characters]" if action.content else None}
+            update={
+                "content": f"[{len(action.content)} characters]" if action.content else None,
+                "old_text": f"[{len(action.old_text)} characters]" if action.old_text else None,
+            }
         )
-        record = f"ACTION: {compact.model_dump_json()}\nRESULT:\n{str(result)[:6000]}"
+        # /logs shows a short prefix. Put the result before replacement payload
+        # metadata so the exact failure remains visible instead of stale source.
+        record = (
+            f"ACTION: {action.action} {action.path or action.command or ''}\n"
+            f"RESULT:\n{str(result)[:6000]}\nDETAILS: {compact.model_dump_json()}"
+        )
         history.append(record)
         if trace:
             await trace(step + 1, record)
@@ -313,6 +352,14 @@ async def review_change(
         standalone_output=standalone_output,
         context=context,
     )
+    attempts = 3
+    task_context = run_context.get()
+    if task_context:
+        current = await store.get(task_context[0])
+        available = store.budget_envelope(current)["max_llm_calls"] - current.llm_calls
+        if available < 1:
+            raise BudgetExceeded("No independent review call available within task lifetime limit")
+        attempts = min(3, available)
     return await json_completion(
         model=settings.model_for("reviewer"),
         role="reviewer",
@@ -320,4 +367,5 @@ async def review_change(
         schema=ReviewResult,
         system=system,
         user=user,
+        max_attempts=attempts,
     )

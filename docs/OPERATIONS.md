@@ -64,7 +64,9 @@ of seven Developer actions (inspect source/tests, change source/tests, test,
 inspect diff, finish) plus one independent review.
 
 For a fresh plan without user budget constraints, the model's call/token estimate
-is allocated before persistence and approval: calls cover the baseline, and tokens
+is allocated before persistence and approval: calls cover one configured bounded
+Developer iteration (`MAX_DEV_STEPS`) plus three gateway review attempts and usage
+already consumed, and tokens
 cover the admitted call allowance at initial prompt size, with a 120,000-token
 planning floor, rounded up to the next 1,000 tokens. Allocation remains capped by
 the existing operator ceilings; cost limits are not increased. Saved/approved
@@ -80,6 +82,24 @@ active. Read-only and clarification plans keep their existing path. No model,
 operator/daily hard limit, database schema or production settings are changed.
 After releasing the reviewed fix, create a fresh `/todo count` lab task; retrying
 #52 retains its 30,000-token plan and lifetime usage and cannot silently fund it.
+
+Task #53 exhausted its admitted 20-call estimate after repeated edits and test
+repair. Fresh admission now funds the configured iteration rather than only the
+seven-action baseline (with 36 Developer steps and one intake call, 40 calls).
+This is capped by `MAX_LLM_CALLS`; no explicit or stored task budget is increased.
+Developer gateway retries preserve at least one independent review call, and
+Reviewer retries fit the actual remaining call allowance. Exhausting unfinished
+Developer work still blocks publication; reserving review does not approve it.
+
+`developer-v2` directs small fresh replacement anchors, preservation of existing
+tests, and dependency-aware async test patterns (`asyncio.run` when no async pytest
+plugin is declared). Failed replacements report the match count without quoting
+source. Tool history compacts both write and old-text payloads and puts the result
+first in the short `/logs` view. Bounded redacted `developer_trace` artifacts in
+`/report` retain every step, including finish. Finish requires a successful diff
+inspection after the latest mutation; failed/stale diff attempts do not qualify.
+Tracked database/snapshot and mandatory sandbox test gates remain fail-closed;
+the engine does not silently erase database files or install plugins.
 
 `/cancel` is cooperative; a running model/sandbox request may finish and consume cost. Cancellation does not undo a completed Git push/PR or a deployment. Check the terminal task status. Restart recovery is bounded; after repeated failures inspect logs instead of repeatedly restarting the container.
 
