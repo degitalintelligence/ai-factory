@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -131,8 +132,89 @@ async def test_large_failed_replacement_keeps_error_visible_without_replaying_so
         trace=trace,
     )
     assert "matches=0" in traces[1][:600]
+    assert "CURRENT FILE AFTER FAILED REPLACEMENT:\n# Demo" in traces[1]
     assert payload not in "\n".join(traces + prompts)
     assert "old_text" in traces[1] and "characters" in traces[1]
+
+
+async def test_recovery_read_after_failed_replacements_prevents_false_stall(monkeypatch):
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_57_stall.json").read_text())
+    assert fixture["repository"] == "degitalintelligence/telegram-lab"
+    assert fixture["base_sha"] == "455ea8620a49356386aa91df43d8b5595a6d587f"
+    assert fixture["failure_stage"] == "developing"
+
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.source = "first edit\n"
+
+        def read_file(self, path):
+            if path == "README.md":
+                return self.source
+            if path == "tests/test_todo.py":
+                return "existing tests\n"
+            raise ValueError(path)
+
+        def write_file(self, path, content):
+            self.source = content
+            return f"Wrote {path}"
+
+        def replace_text(self, path, old_text, content):
+            if old_text not in self.source:
+                raise WorkspaceError("old_text must match exactly once (matches=0); read the current file")
+            self.source = self.source.replace(old_text, content)
+            return f"Wrote {path}"
+
+        def diff(self):
+            return "diff --git a/README.md b/README.md\n"
+
+    stale_actions = [
+        DeveloperAction(
+            action="replace_text",
+            path="README.md",
+            old_text=f"stale whole function {index}",
+            content="replacement",
+        )
+        for index, _step in enumerate(fixture["failed_replacement_steps"])
+    ]
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="write_file", path="README.md", content="first edit\n"),
+            *stale_actions,
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="read_file", path="tests/test_todo.py"),
+            DeveloperAction(
+                action="replace_text",
+                path="README.md",
+                old_text="first edit",
+                content="recovered edit",
+            ),
+            DeveloperAction(action="git_diff"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+    prompts = []
+
+    async def model(**kwargs):
+        prompts.append(kwargs["user"])
+        return next(script)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    monkeypatch.setattr(settings, "max_developer_stall_steps", 8)
+    monkeypatch.setattr(settings, "max_dev_steps", 20)
+    workspace = Workspace()
+
+    result = await agents.developer_loop(
+        workspace=workspace,
+        requirement="Recover from stale replacements",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+    )
+
+    assert result == "Implementation completed"
+    assert workspace.source == "recovered edit\n"
+    assert len(fixture["recovery_read_steps"]) == 2
+    # The next model turn gets current source without spending another tool call.
+    assert "CURRENT FILE AFTER FAILED REPLACEMENT:\nfirst edit" in prompts[3]
 
 
 async def test_finish_collects_successful_diff_after_the_latest_mutation(monkeypatch):
