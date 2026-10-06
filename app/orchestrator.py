@@ -89,11 +89,7 @@ def requirement_related_paths(file_index: str, requirement: str, *, limit: int =
     tests are often more useful than a generic smoke test. Path matching is kept
     deterministic so the recorded baseline remains replayable.
     """
-    terms = {
-        token
-        for token in re.findall(r"[a-z0-9]+", requirement.casefold())
-        if len(token) >= 4
-    }
+    terms = {token for token in re.findall(r"[a-z0-9]+", requirement.casefold()) if len(token) >= 4}
     ranked = []
     for position, path in enumerate(file_index.splitlines()):
         if is_suspicious_artifact(path):
