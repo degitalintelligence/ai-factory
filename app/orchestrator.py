@@ -4,7 +4,13 @@ import json
 import logging
 import re
 
-from app.agents import DeveloperStalled, developer_loop, lead_plan, normalize_lead_plan, review_change
+from app.agents import (
+    DeveloperStalled,
+    developer_loop,
+    lead_plan,
+    normalize_lead_plan,
+    review_change,
+)
 from app.audit_scope import referenced_tasks, repository_audit, target_project, validate_sha
 from app.config import Project, settings
 from app.contracts import context_slice
