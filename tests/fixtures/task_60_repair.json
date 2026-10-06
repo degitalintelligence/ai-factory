@@ -1,0 +1,27 @@
+{
+  "task_id": 60,
+  "repository": "degitalintelligence/telegram-lab",
+  "base_sha": "455ea8620a49356386aa91df43d8b5595a6d587f",
+  "failure_stage": "reviewing",
+  "status": "failed",
+  "usage": {
+    "calls": 50,
+    "tokens": 277648,
+    "reported_cost_usd": 0.1012
+  },
+  "developer_allocations": [30, 8, 11],
+  "observed_failures": [
+    "existing tests/test_todo.py was overwritten before being read",
+    "repair iteration finished without a successful file mutation",
+    "TELEGRAM_BOT_TOKEN was missing in new Application-based tests",
+    "tests used an invalid app.handlers[2] lookup",
+    "tracked runtime artifact todos.db blocked the mandatory gate",
+    "six existing Python tests were removed"
+  ],
+  "required_controls": [
+    "feature-specific existing tests are included in repository context",
+    "whole-file writes to existing files require reading the exact path first",
+    "repair iterations cannot finish without a successful mutation",
+    "tracked runtime artifacts become binding initial repair feedback"
+  ]
+}
