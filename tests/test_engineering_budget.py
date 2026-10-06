@@ -19,7 +19,7 @@ def task_52() -> dict:
     return json.loads((Path(__file__).parent / "fixtures/task_52_budget.json").read_text())
 
 
-def admit(fixture: dict, *, fresh: bool = True, requirement: str | None = None):
+def admit(fixture: dict, *, fresh: bool = True, requirement: str | None = None, readmit: bool = False):
     return engineering_budget_admission(
         LeadPlan.model_validate(fixture["plan"]),
         requirement=requirement or fixture["requirement"],
@@ -29,6 +29,7 @@ def admit(fixture: dict, *, fresh: bool = True, requirement: str | None = None):
         used_tokens=fixture["used_tokens"],
         used_cost=0.01,
         fresh=fresh,
+        readmit=readmit,
         reviewer_feedback=[],
     )
 
@@ -71,6 +72,16 @@ def test_explicit_budget_is_preserved_and_inadequacy_reported(constraint):
     assert accounting["explicit_budget"] and accounting["issues"]
 
 
+@pytest.mark.parametrize("constraint", ["Budget maksimal 30000 token.", "At most 20 calls, $0.50."])
+def test_explicit_budget_stays_binding_on_retry_readmission(constraint):
+    fixture = task_52()
+    plan, accounting = admit(
+        fixture, fresh=False, readmit=True, requirement=fixture["requirement"] + " " + constraint
+    )
+    assert plan.budget.model_dump() == fixture["plan"]["budget"]
+    assert accounting["explicit_budget"] and accounting["readmit"] and accounting["issues"]
+
+
 def test_saved_plan_remains_exact_and_is_not_reallocated():
     fixture = task_52()
     original = LeadPlan.model_validate(fixture["plan"])
@@ -78,6 +89,43 @@ def test_saved_plan_remains_exact_and_is_not_reallocated():
     assert plan.model_dump_json() == original.model_dump_json()
     assert accounting["used"]["tokens"] == 13088
     assert accounting["issues"] and accounting["fresh"] is False
+
+
+def test_retry_readmission_refunds_remaining_iterations_within_operator_ceiling():
+    """Regression (task #64): /retry kept the saved 55-call envelope while 29 calls
+    were already spent, so iteration 1 was allocated 9 steps and failed with
+    MAX_DEV_STEPS. Re-admission must fund the remaining work inside operator ceilings."""
+    fixture = task_52()
+    plan, accounting = engineering_budget_admission(
+        LeadPlan.model_validate(fixture["plan"]),
+        requirement=fixture["requirement"],
+        file_index=fixture["file_index"],
+        context=fixture["context"],
+        used_calls=29,
+        used_tokens=fixture["used_tokens"] + 100_000,
+        used_cost=0.05,
+        fresh=False,
+        readmit=True,
+        reviewer_feedback=[],
+    )
+    expected = (
+        29
+        + settings.max_dev_steps
+        + REVIEW_CALLS_PER_ITERATION
+        + (settings.max_iterations - 1) * (DEVELOPER_BASELINE_CALLS + REVIEW_CALLS_PER_ITERATION)
+        + SCHEMA_RETRY_MARGIN_CALLS
+    )
+    assert plan.budget.max_llm_calls == accounting["execution_calls"] == expected
+    assert plan.budget.max_llm_calls <= settings.max_llm_calls
+    assert plan.budget.max_tokens <= settings.max_total_tokens
+    assert not accounting["issues"]
+    first = engineering_iteration_step_limit(
+        current_calls=29,
+        max_calls=plan.budget.max_llm_calls,
+        iteration=1,
+        max_iterations=settings.max_iterations,
+    )
+    assert first == settings.max_dev_steps
 
 
 def test_fresh_call_estimate_covers_intake_developer_and_review():

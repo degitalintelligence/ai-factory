@@ -228,7 +228,9 @@ async def test_task_52_budget_is_admitted_before_developer_and_reaches_review_an
 
 
 @pytest.mark.parametrize("saved", [False, True])
-async def test_inadequate_explicit_or_saved_plan_stops_before_developer(db, engine_fakes, monkeypatch, saved):
+async def test_inadequate_explicit_or_approved_plan_stops_before_developer(
+    db, engine_fakes, monkeypatch, saved
+):
     state, _ = engine_fakes
     plan = LeadPlan(objective="Feature", acceptance_criteria=["Returns value"], budget={"max_tokens": 30000})
 
@@ -238,7 +240,15 @@ async def test_inadequate_explicit_or_saved_plan_stops_before_developer(db, engi
     monkeypatch.setattr(orchestrator, "lead_plan", lead)
     task = await db.create("Change the return value" + ("" if saved else " Budget: 30000 tokens."))
     if saved:
-        await db.update(task.id, plan_json=plan.model_dump_json(), tokens=13088, llm_calls=1)
+        # An approved plan is never re-funded: readmission only re-funds an
+        # unapproved saved plan (retry), so the exact inadequate budget fails closed.
+        await db.update(
+            task.id,
+            plan_json=plan.model_dump_json(),
+            tokens=13088,
+            llm_calls=1,
+            approved_plan_hash=orchestrator.plan_hash(plan.model_dump_json()),
+        )
     result = await execute(db, task.id)
     assert result.status == "failed" and state["develop"] == state["prs"] == 0
     assert LeadPlan.model_validate_json(result.plan_json).budget.max_tokens == 30000

@@ -393,7 +393,12 @@ async def run_task(task_id, notify=None, owner=None):
             stage = "plan_budget_admission"
             if not fresh_plan:
                 current = await store.get(task_id)
-                _, accounting = engineering_budget_admission(
+                saved_plan_json = task.plan_json
+                # Re-fund an unapproved saved plan (retry or recovery) for the lifetime
+                # usage already spent. An approved plan keeps its exact binding: the
+                # approval hash must never move silently.
+                readmit = current.approved_plan_hash is None
+                plan, accounting = engineering_budget_admission(
                     plan,
                     requirement=task.requirement,
                     file_index=workspace.list_files(),
@@ -402,8 +407,15 @@ async def run_task(task_id, notify=None, owner=None):
                     used_tokens=current.tokens,
                     used_cost=current.cost_usd,
                     fresh=False,
+                    readmit=readmit,
                     reviewer_feedback=json.loads(task.feedback_json),
                 )
+                task.plan_json = plan.model_dump_json()
+                if task.plan_json != saved_plan_json:
+                    # Persisting the re-funded plan is what makes the new allocation
+                    # effective for budget_envelope and the step allocator.
+                    await store.update(task_id, owner, plan_json=task.plan_json)
+                    await store.artifact(task_id, "plan", task.plan_json)
                 await store.artifact(task_id, "plan_budget_accounting", json.dumps(accounting))
             if accounting["issues"]:
                 raise BudgetExceeded(
