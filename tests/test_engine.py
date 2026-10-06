@@ -291,7 +291,7 @@ async def test_task_53_real_developer_loop_repairs_tool_failures_then_reviews_on
     refs["main"] = workspace.base_sha
     script = [
         {"action": "read_file", "path": "app.py"},
-        {"action": "list_files"},
+        {"action": "delete_file", "path": "todos.db"},
         {"action": "write_file", "path": "app.py", "content": "def value(): return 2\n"},
         {"action": "replace_text", "path": "app.py", "old_text": "stale anchor", "content": "new"},
         {"action": "read_file", "path": "app.py"},
@@ -305,7 +305,7 @@ async def test_task_53_real_developer_loop_repairs_tool_failures_then_reviews_on
         {"action": "read_file", "path": "tests/test_app.py"},
         {"action": "git_diff"},
         {"action": "run_command", "command": "python -m pytest -q"},
-        {"action": "delete_file", "path": "todos.db"},
+        {"action": "read_file", "path": "app.py"},
         {"action": "run_command", "command": "python -m pytest -q"},
         {
             "action": "replace_text",
@@ -380,7 +380,8 @@ async def test_task_53_real_developer_loop_repairs_tool_failures_then_reviews_on
     traces = [json.loads(a.content) for a in await db.artifacts(task.id) if a.kind == "developer_trace"]
     assert len(traces) == 24
     assert "matches=0" in traces[3]["record"][:600]
-    assert "Remove generated/runtime artifact" in traces[10]["record"][:600]
+    assert "Deleted todos.db" in traces[1]["record"][:600]
+    assert "async def functions are not natively supported" in traces[10]["record"][:600]
     assert "async def functions are not natively supported" in traces[12]["record"][:600]
     assert any("use a smaller unique exact anchor" in prompt for prompt in seen)
     assert not (workspace.path / "todos.db").exists()
@@ -905,3 +906,110 @@ async def test_task_61_stale_replace_rolls_into_repair_iteration_then_publishes(
     stalls = [json.loads(item.content) for item in artifacts if item.kind == "developer_stall"]
     assert len(stalls) == 1 and stalls[0]["recoverable"] is True
     assert any("Recovery iteration required" in prompt for prompt in prompts[4:])
+
+
+async def test_task_62_budget_reserve_hands_safe_partial_diff_to_tests_and_review(
+    db, repo, engine_fakes, monkeypatch
+):
+    fixture = json.loads((Path(__file__).parent / "fixtures/task_62_budget.json").read_text())
+    workspace, git = repo
+    state, refs = engine_fakes
+    (workspace.path / "todos.db").write_text("disposable runtime state")
+    git("add", "-f", "todos.db")
+    git("commit", "-m", "Fixture with tracked runtime database")
+    workspace.base_sha = git("rev-parse", "HEAD")
+    refs["main"] = workspace.base_sha
+    monkeypatch.setattr(settings, "max_iterations", 1)
+    monkeypatch.setattr(orchestrator, "developer_loop", agents.developer_loop)
+
+    async def lead(*args):
+        return LeadPlan(
+            objective="Feature",
+            acceptance_criteria=["Returns the requested value"],
+            budget=fixture["budget"],
+        )
+
+    monkeypatch.setattr(orchestrator, "lead_plan", lead)
+
+    script = [
+        {"action": "read_file", "path": "app.py"},
+        {"action": "delete_file", "path": "todos.db"},
+        {
+            "action": "replace_text",
+            "path": "app.py",
+            "old_text": "return 1",
+            "content": (
+                "return 2\n"
+                "# ambiguous marker one\n"
+                "# ambiguous marker one\n"
+                "# ambiguous marker two\n"
+                "# ambiguous marker two"
+            ),
+        },
+        {
+            "action": "write_file",
+            "path": "tests/test_app.py",
+            "content": "from app import value\ndef test_value(): assert value() == 2\n",
+        },
+        {
+            "action": "write_file",
+            "path": "tests/test_app.py",
+            "content": (
+                "from app import value\n"
+                "def test_value(): assert value() == 2\n"
+                "def test_value(): assert value() == 3\n"
+            ),
+        },
+        {
+            "action": "replace_text",
+            "path": "app.py",
+            "old_text": "# ambiguous marker one",
+            "content": "replacement",
+        },
+        {"action": "read_file", "path": "app.py"},
+        {
+            "action": "replace_text",
+            "path": "app.py",
+            "old_text": "# ambiguous marker two",
+            "content": "replacement",
+        },
+    ]
+    developer_calls = 0
+
+    async def model(**kwargs):
+        nonlocal developer_calls
+        action = DeveloperAction.model_validate(script[developer_calls])
+        developer_calls += 1
+        if developer_calls == len(script):
+            task_id, owner = agents.run_context.get()
+            current = await db.get(task_id)
+            envelope = db.budget_envelope(current)
+            assert envelope["max_llm_calls"] == fixture["budget"]["max_llm_calls"] == 50
+            await db.update(task_id, owner, llm_calls=49)
+        return action
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    base_review = orchestrator.review_change
+
+    async def review(**kwargs):
+        current = await db.get(task.id)
+        assert current.llm_calls == 49
+        return await base_review(**kwargs)
+
+    monkeypatch.setattr(orchestrator, "review_change", review)
+    task = await db.create("Change the return value with bounded recovery")
+    result = await execute(db, task.id)
+
+    assert fixture["usage"]["calls"] == 49
+    assert fixture["failure_stage"] == "developing"
+    assert result.status == "pr_created" and result.iteration == 1, result.last_message
+    assert state["prs"] == state["pushes"] == 1
+    assert "return 2" in workspace.read_file("app.py")
+    assert workspace.read_file("tests/test_app.py").count("def test_value") == 1
+    assert not (workspace.path / "todos.db").exists()
+    artifacts = await db.artifacts(task.id)
+    stalls = [json.loads(item.content) for item in artifacts if item.kind == "developer_stall"]
+    assert stalls[-1]["reason"] == "budget_reserved" and stalls[-1]["recoverable"] is False
+    events = await db.events(task.id)
+    assert any(event.kind == "developer_budget_reserved" for event in events)
+    assert any(event.kind == "developer_handoff" for event in events)

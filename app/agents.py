@@ -6,6 +6,7 @@ from app.llm import json_completion, run_context
 from app.schemas import DeveloperAction, LeadPlan, PlanBudget, ReviewResult
 from app.skills import SKILLS, select_skills
 from app.store import BudgetExceeded, store
+from app.workspace import is_suspicious_artifact
 
 POST_PUBLICATION_MARKERS = (
     "pull request",
@@ -88,7 +89,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v8"
+PROMPT_VERSION_DEVELOPER = "developer-v9"
 PROMPT_VERSION_REVIEWER = "reviewer-v3"
 
 
@@ -164,6 +165,9 @@ that creates them: inspect the complete test suite for build_app()/default-stora
 tmp_path, :memory:, or a pytest monkeypatch fixture. If the artifact was tracked, keep its source deletion, but
 do not treat deletion alone as the fix; do not add ignores or claim a passing test report is clean while the
 sandbox `issues` list is nonempty. Make this targeted test mutation before repeating the suite.
+If a test command reports that a tracked runtime artifact must be removed, cleanup becomes the immediate blocker:
+delete every listed tracked artifact with delete_file before any further source mutation or test command, then
+repair the tests that recreate it. The controller rejects unrelated edits/tests until that explicit deletion.
 Dependencies are installed by the sandbox operator policy; declare them in requirements or lockfile.
 Persist user data using proper storage and named volumes, never a committed database file.
 Tests use tmp_path/in-memory storage; do not hide failures, skip required tests, or replace tests with stubs.
@@ -228,10 +232,14 @@ async def developer_loop(
     recovery_read_path = None
     last_failed_replace = None
     repeated_failed_replace = 0
+    ambiguous_replace_paths = {}
     mutations = {"write_file", "replace_text", "delete_file"}
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
     file_index = workspace.list_files()
     existing_paths = set(file_index.splitlines())
+    tracked_artifacts = {path for path in existing_paths if is_suspicious_artifact(path)}
+    artifact_cleanup_required = bool(tracked_artifacts)
+    artifact_policy_violations = 0
     system, context = developer_request(
         file_index=file_index,
         requirement=requirement,
@@ -269,18 +277,33 @@ async def developer_loop(
                     "unfinished work cannot be published. Inspect /report and /logs; lifetime usage is retained."
                 )
             attempts = min(3, available - 1)
+        turn_context = context
+        if artifact_cleanup_required and tracked_artifacts:
+            turn_context += (
+                "\nCONTROLLER BLOCKER: delete these tracked runtime artifacts now with delete_file before "
+                "any edit or test command; never read, restore, or ignore them: "
+                + ", ".join(sorted(tracked_artifacts))
+                + "\n"
+            )
         action = await json_completion(
             model=settings.model_for("developer"),
             role="developer",
             prompt_version=PROMPT_VERSION_DEVELOPER,
             system=system,
-            user=developer_turn(context, "\n".join(reversed(window)), step=step + 1, step_limit=limit),
+            user=developer_turn(turn_context, "\n".join(reversed(window)), step=step + 1, step_limit=limit),
             schema=DeveloperAction,
             max_attempts=attempts,
         )
         failed_replace = False
+        artifact_policy_block = False
         if action.action == "finish":
-            if reviewer_feedback and successful_mutations == 0:
+            if artifact_cleanup_required and tracked_artifacts:
+                artifact_policy_block = True
+                result = (
+                    "ERROR ValueError: Tracked runtime artifact cleanup required before finish. "
+                    "Use delete_file for: " + ", ".join(sorted(tracked_artifacts))
+                )
+            elif reviewer_feedback and successful_mutations == 0:
                 result = (
                     "Finish blocked: repair feedback requires at least one successful file mutation "
                     "in this iteration"
@@ -327,6 +350,20 @@ async def developer_loop(
                 }
                 if action.action in {"write_file", "replace_text", "delete_file"} and not inspected:
                     raise ValueError("Inspect existing repository files first")
+                if action.action == "read_file" and action.path in tracked_artifacts:
+                    raise ValueError(
+                        f"Runtime artifact contents are inaccessible; delete_file {action.path} instead"
+                    )
+                if (
+                    artifact_cleanup_required
+                    and tracked_artifacts
+                    and action.action in {"write_file", "replace_text", "run_command"}
+                ):
+                    artifact_policy_block = True
+                    raise ValueError(
+                        "Tracked runtime artifact cleanup required before edits/tests. Use delete_file for: "
+                        + ", ".join(sorted(tracked_artifacts))
+                    )
                 if (
                     action.action == "write_file"
                     and action.path in existing_paths
@@ -343,13 +380,17 @@ async def developer_loop(
                     read_paths.add(action.path)
                 if action.action in mutations:
                     diff_inspected = False
+                    if action.action == "delete_file" and action.path in tracked_artifacts:
+                        tracked_artifacts.remove(action.path)
+                        artifact_cleanup_required = bool(tracked_artifacts)
+                        artifact_policy_violations = 0
                 elif action.action == "git_diff":
                     diff_inspected = True
             except (ValueError, RuntimeError, OSError) as exc:
                 result = f"ERROR {type(exc).__name__}: {exc}"
                 if action.action in mutations and action.path:
                     recovery_read_path = action.path
-                if action.action == "replace_text" and action.path and "matches=0" in str(exc):
+                if action.action == "replace_text" and action.path and "matches=" in str(exc):
                     failed_replace = True
                     try:
                         current_file = await asyncio.to_thread(workspace.read_file, action.path)
@@ -374,7 +415,19 @@ async def developer_loop(
         history.append(record)
         if trace:
             await trace(step + 1, record)
+        if action.action == "run_command" and "Remove generated/runtime artifact:" in str(result):
+            artifact_cleanup_required = True
+        if artifact_policy_block:
+            artifact_policy_violations += 1
+            if artifact_policy_violations >= 2:
+                raise DeveloperStalled(
+                    "Developer stalled: tracked runtime artifact cleanup was not performed. "
+                    "Preserve partial work and delete the listed artifact first in the next iteration."
+                )
         if failed_replace:
+            ambiguous_replace = "matches=0" not in str(result)
+            if ambiguous_replace:
+                ambiguous_replace_paths[action.path] = ambiguous_replace_paths.get(action.path, 0) + 1
             failed_signature = (action.path, action.old_text)
             if failed_signature == last_failed_replace:
                 repeated_failed_replace += 1
@@ -385,6 +438,11 @@ async def developer_loop(
                 raise DeveloperStalled(
                     "Developer stalled: repeated the same stale replace_text anchor on "
                     f"{action.path}. Preserve current partial changes and continue in a repair iteration."
+                )
+            if ambiguous_replace_paths.get(action.path, 0) >= 2:
+                raise DeveloperStalled(
+                    "Developer stalled: repeated ambiguous or stale replace_text anchors on "
+                    f"{action.path}. Preserve current partial changes and rewrite from a fresh explicit read."
                 )
         successful_mutation = action.action in mutations and not str(result).startswith("ERROR")
         recovery_read = (
@@ -400,6 +458,7 @@ async def developer_loop(
             recovery_read_path = None
             last_failed_replace = None
             repeated_failed_replace = 0
+            ambiguous_replace_paths.pop(action.path, None)
         elif recovery_read:
             # A fresh read of the exact file whose mutation failed is corrective
             # progress: it invalidates stale replacement anchors. It is allowed
@@ -410,6 +469,7 @@ async def developer_loop(
             recovery_read_path = None
             last_failed_replace = None
             repeated_failed_replace = 0
+            ambiguous_replace_paths.pop(action.path, None)
         else:
             non_mutation_steps += 1
             signature = f"{action.action}|{action.path or ''}|{str(result)[:500]}"
