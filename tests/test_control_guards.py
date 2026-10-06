@@ -706,7 +706,7 @@ async def test_different_ambiguous_replacements_roll_over_on_the_same_path(monke
     assert "CURRENT FILE AFTER FAILED REPLACEMENT:\n# Demo" in prompts[-1]
 
 
-async def test_runtime_artifact_error_forces_explicit_cleanup_before_more_edits(monkeypatch):
+async def test_tracked_runtime_artifact_forces_cleanup_before_edits_or_tests(monkeypatch):
     class Workspace(FakeDeveloperWorkspace):
         writes = 0
 
@@ -723,7 +723,6 @@ async def test_runtime_artifact_error_forces_explicit_cleanup_before_more_edits(
     script = iter(
         [
             DeveloperAction(action="read_file", path="README.md"),
-            DeveloperAction(action="run_command", command="python -m pytest -q"),
             DeveloperAction(action="replace_text", path="README.md", old_text="# Demo", content="# Changed"),
             DeveloperAction(action="run_command", command="python -m pytest -q"),
         ]
@@ -785,7 +784,6 @@ async def test_explicit_runtime_artifact_cleanup_unblocks_repair(monkeypatch):
     script = iter(
         [
             DeveloperAction(action="read_file", path="README.md"),
-            DeveloperAction(action="run_command", command="python -m pytest -q"),
             DeveloperAction(action="delete_file", path="todos.db"),
             DeveloperAction(
                 action="replace_text",
