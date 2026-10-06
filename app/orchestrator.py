@@ -8,12 +8,13 @@ from app.agents import developer_loop, lead_plan, normalize_lead_plan, review_ch
 from app.audit_scope import referenced_tasks, repository_audit, target_project, validate_sha
 from app.config import Project, settings
 from app.contracts import context_slice
+from app.engineering_budget import engineering_budget_admission
 from app.gates import deployment_issues, post_publication_issues, quality_issues
 from app.github_api import GitHubAPI
 from app.llm import run_context
 from app.schemas import LeadPlan
 from app.security import redact
-from app.store import TaskStopped, plan_hash, store
+from app.store import BudgetExceeded, TaskStopped, plan_hash, store
 from app.workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -275,6 +276,7 @@ async def run_task(task_id, notify=None, owner=None):
         stage = "context_gathering"
         context, baseline = await repository_context(workspace, task)
         await store.artifact(task_id, "baseline", baseline)
+        fresh_plan = not bool(task.plan_json)
         if task.plan_json:
             raw_plan = task.plan_json
             plan = normalize_lead_plan(LeadPlan.model_validate_json(raw_plan), task.requirement)
@@ -288,9 +290,47 @@ async def run_task(task_id, notify=None, owner=None):
             plan = await lead_plan(task.requirement, context)
             plan.deployment_required = plan.deployment_required or policy.require_deployment
             plan = normalize_lead_plan(plan, task.requirement)
+            if not plan.questions and not plan.review_only:
+                stage = "plan_budget_admission"
+                current = await store.get(task_id)
+                plan, accounting = engineering_budget_admission(
+                    plan,
+                    requirement=task.requirement,
+                    file_index=workspace.list_files(),
+                    context=context,
+                    used_calls=current.llm_calls,
+                    used_tokens=current.tokens,
+                    used_cost=current.cost_usd,
+                    fresh=True,
+                    reviewer_feedback=json.loads(task.feedback_json),
+                )
+                await store.artifact(task_id, "plan_budget_accounting", json.dumps(accounting))
             task.plan_json = plan.model_dump_json()
             await store.update(task_id, owner, plan_json=task.plan_json)
             await store.artifact(task_id, "plan", task.plan_json)
+        if not plan.questions and not plan.review_only:
+            stage = "plan_budget_admission"
+            if not fresh_plan:
+                current = await store.get(task_id)
+                _, accounting = engineering_budget_admission(
+                    plan,
+                    requirement=task.requirement,
+                    file_index=workspace.list_files(),
+                    context=context,
+                    used_calls=current.llm_calls,
+                    used_tokens=current.tokens,
+                    used_cost=current.cost_usd,
+                    fresh=False,
+                    reviewer_feedback=json.loads(task.feedback_json),
+                )
+                await store.artifact(task_id, "plan_budget_accounting", json.dumps(accounting))
+            if accounting["issues"]:
+                raise BudgetExceeded(
+                    "Engineering plan cannot fund baseline implementation and independent review ("
+                    + "; ".join(accounting["issues"])
+                    + "). Inspect /plan, /report and /logs; create a new adequately funded task "
+                    "or obtain an approved policy change. Saved budgets and lifetime usage are not reset."
+                )
         if plan.questions:
             await transition(
                 "waiting_input",

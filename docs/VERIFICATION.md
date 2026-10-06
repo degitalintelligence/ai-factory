@@ -30,6 +30,24 @@ Local tests do not consume real provider tokens or contact Telegram, GitHub or C
 
 A passing unit suite or generated Compose file does not establish live model quality, ARM image build compatibility, target application behavior or a successful production deployment. Record those results on the actual staging installation.
 
+## Task #52 Engineering budget regression
+
+The anonymized Task #52 fixture retains the real Lead plan (20 calls, 30,000
+tokens, $0.50), requirement, bounded source context and locked lab SHA. Regression
+replays its exact `used=13088, next_reserve=22402, limit=30000` store rejection.
+Fresh plan admission allocates implementation and independent review within
+operator ceilings before saving the plan. A real Git/SQL orchestration regression
+then traverses Developer, sandbox test evidence, independent review, deterministic
+gates and one PR using mocked external boundaries. It verifies budget flow, not
+the implementation of `/todo count` itself.
+
+Negative tests retain explicit budgets, saved plan bytes/lifetime usage, low
+operator limits and exhausted reported cost. High-risk approval binds the
+admitted plan hash and resume preserves that exact plan. UTF-8 and output
+allowances affect admission through the same reservation helper used by actual
+gateway calls. Real provider completion still requires a new bounded lab task
+after deployment; historical #52 must not be retried expecting a budget reset.
+
 ## Task #47 audit quality regression
 
 `tests/test_repository_audit_evidence.py` exercises pinned source reads, active

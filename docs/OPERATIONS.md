@@ -52,6 +52,35 @@ Defaults: one worker, four review iterations, 36 developer steps per iteration, 
 
 Each malformed-output retry consumes a call and records returned usage. Network failures can be billed by the provider without returned usage. Reported cost can therefore be partial. Use a provider-level credit limit for a strict dollar ceiling. `/retry` retains call/token/cost totals; reaching the budget requires a deliberately new bounded task or an operator policy change, not an automatic budget reset.
 
+### Engineering plan admission (task #52)
+
+The task budget is the smaller of the operator ceilings and the Lead plan's
+budget. Raising the tenant daily limits alone cannot fund a task whose plan
+requests only 30,000 tokens. Before the first Developer iteration, Engineering
+now renders its initial Developer and Reviewer prompts with the same schema,
+UTF-8 byte reservation, configured output allowance and overhead used by the
+model gateway. Admission includes already consumed lifetime usage and a baseline
+of seven Developer actions (inspect source/tests, change source/tests, test,
+inspect diff, finish) plus one independent review.
+
+For a fresh plan without user budget constraints, the model's call/token estimate
+is allocated before persistence and approval: calls cover the baseline, and tokens
+cover the admitted call allowance at initial prompt size, with a 120,000-token
+planning floor, rounded up to the next 1,000 tokens. Allocation remains capped by
+the existing operator ceilings; cost limits are not increased. Saved/approved
+plans and requests mentioning budget/call/token/currency constraints are never
+enlarged. Insufficient baseline allowance stops at `plan_budget_admission` before
+Developer execution. `/report` retains `plan_budget_accounting` with original
+estimate, admitted budget, used counters, prompt reserves and blocking dimensions.
+
+This baseline is not a prediction of exact billed usage or guaranteed completion:
+tool history, diffs, test output, corrections and later iterations may need more.
+Runtime task/subtask/daily reservations and all test/review/publication gates stay
+active. Read-only and clarification plans keep their existing path. No model,
+operator/daily hard limit, database schema or production settings are changed.
+After releasing the reviewed fix, create a fresh `/todo count` lab task; retrying
+#52 retains its 30,000-token plan and lifetime usage and cannot silently fund it.
+
 `/cancel` is cooperative; a running model/sandbox request may finish and consume cost. Cancellation does not undo a completed Git push/PR or a deployment. Check the terminal task status. Restart recovery is bounded; after repeated failures inspect logs instead of repeatedly restarting the container.
 
 Keep a single Telegram polling replica. If scaling the worker code into additional processes, disable Telegram in additional control instances; use PostgreSQL (not SQLite), retain shared task workspace storage, and provision enough sandbox capacity. The default sandbox accepts one job at a time; unsupported concurrency receives HTTP 429.

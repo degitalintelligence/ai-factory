@@ -17,6 +17,24 @@ run_context: ContextVar[tuple[int, str] | None] = ContextVar("run_context", defa
 subtask_context: ContextVar[tuple[int, int] | None] = ContextVar("subtask_context", default=None)
 
 
+def completion_messages(system: str, user: str, schema: type[BaseModel]) -> list[dict[str, str]]:
+    """Render the same schema-bearing messages for admission and provider calls."""
+    return [
+        {
+            "role": "system",
+            "content": system
+            + "\nReturn one JSON object matching this schema:\n"
+            + json.dumps(schema.model_json_schema()),
+        },
+        {"role": "user", "content": user},
+    ]
+
+
+def completion_token_reserve(messages: list[dict[str, str]]) -> int:
+    """Conservative byte reservation, not a tokenizer or billing estimate."""
+    return sum(len(message["content"].encode()) for message in messages) + settings.max_output_tokens + 100
+
+
 def prompt_digest(messages) -> str:
     """Identify the exact rendered prompt without storing any of its content.
 
@@ -97,15 +115,7 @@ async def json_completion(
         raise RuntimeError("Context budget exceeded; split the task")
     context = run_context.get()
     alias = settings.configured_model(role) if role else ""
-    messages = [
-        {
-            "role": "system",
-            "content": system
-            + "\nReturn one JSON object matching this schema:\n"
-            + json.dumps(schema.model_json_schema()),
-        },
-        {"role": "user", "content": user},
-    ]
+    messages = completion_messages(system, user, schema)
 
     async def audit(attempt, outcome, detail="", tokens=0, cost=None, latency_ms=0, digest=""):
         if not context:
@@ -145,9 +155,7 @@ async def json_completion(
                 await store.reserve_call(
                     *context,
                     subtask=subtask_context.get(),
-                    token_reserve=sum(len(m["content"].encode()) for m in messages)
-                    + settings.max_output_tokens
-                    + 100,
+                    token_reserve=completion_token_reserve(messages),
                 )
             digest = prompt_digest(messages)
             started = time.monotonic()
