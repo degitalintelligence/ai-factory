@@ -835,6 +835,31 @@ async def test_publish_checkpoint_recovers_without_recoding_or_duplicate_push(db
     assert state["pushes"] == state["develop"] == 1
 
 
+async def test_retry_warns_the_developer_about_resumed_workspace_state(db, engine_fakes, monkeypatch):
+    """Readmitted workspaces (retry) carry uncommitted edits from the previous
+    attempt: the developer prompt must say so instead of assuming baseline
+    content (Task 66 inherited a corrupted test file silently)."""
+    state, refs = engine_fakes
+    wrapped = orchestrator.developer_loop
+
+    async def develop(**kwargs):
+        state.setdefault("resume_notes", []).append(kwargs.get("resume_note", ""))
+        return await wrapped(**kwargs)
+
+    monkeypatch.setattr(orchestrator, "developer_loop", develop)
+    state["test_exit"] = 5  # pytest: no tests collected
+    task = await execute(db, (await db.create("Feature with a resumed workspace warning")).id)
+    assert task.status == "failed" and state["develop"] == 1
+    await db.resume(task.id, "retry")
+    state["test_exit"] = 0
+    task = await execute(db, task.id, "second")
+    assert task.status == "pr_created" and state["prs"] == 1
+    notes = state["resume_notes"]
+    assert len(notes) == 2
+    assert notes[0] == ""
+    assert "WORKSPACE RESUME WARNING" in notes[1]
+
+
 async def test_feedback_updates_the_existing_pr(db, engine_fakes):
     state, refs = engine_fakes
     task = await execute(db, (await db.create("Add a tested feature")).id)

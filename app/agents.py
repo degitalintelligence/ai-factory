@@ -89,7 +89,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v12"
+PROMPT_VERSION_DEVELOPER = "developer-v13"
 PROMPT_VERSION_REVIEWER = "reviewer-v4"
 
 
@@ -130,7 +130,7 @@ Return a plan that keeps authority separate from confidence. The operator-config
 
 
 def developer_request(
-    *, file_index: str, requirement: str, plan: LeadPlan, reviewer_feedback=None
+    *, file_index: str, requirement: str, plan: LeadPlan, reviewer_feedback=None, resume_note: str = ""
 ) -> tuple[str, str]:
     """Render the initial Developer prompt for execution and budget admission."""
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
@@ -143,11 +143,14 @@ Examples: {"action":"list_files"}, {"action":"read_file","path":"README.md"},
 {"action":"search","content":"handler"}, {"action":"run_command","command":"python -m pytest -q"}.
 read_file/write_file/replace_text/delete_file require path. write_file/replace_text/search require content.
 replace_text also requires non-empty old_text; run_command requires command. Optional fields may be omitted.
-Use a small unique exact anchor for replace_text. If it fails, use the current-file excerpt attached to the
+Use a small unique exact anchor for replace_text. If it fails, use the current-file tail excerpt attached to the
 error (or read the file once when no excerpt is available), then change to a smaller current anchor. Do not
 repeat a whole-function replacement with stale text. After any matches=0 failure, do not submit the same
 old_text again. Read the current path explicitly and use a small current anchor, or use write_file only after
 that exact existing path has been read. Preserve existing tests when adding new cases.
+Do not read a file you have just written in the same iteration: compose the next anchor from the content you
+wrote and reserve read_file for files you have not inspected yet. Repeated whole-file writes and re-reads of
+large files burn the task budget; prefer many small targeted replace_text edits.
 Use content for search text and replacement text; do not invent query, args, parameters or new_text fields.
 write_file replaces the WHOLE file. The controller blocks whole-file replacement of an existing file until
 that exact path has been read in the current iteration. Prefer replace_text for targeted edits. Never replace
@@ -173,6 +176,10 @@ do not treat deletion alone as the fix; do not add ignores or claim a passing te
 sandbox `issues` list is nonempty. Make this targeted test mutation before repeating the suite.
 finish is blocked while your most recent run_command result still has a nonempty issues list; rerun the
 suite until that list is empty, then finish.
+A blocked finish is not a signal to rewrite the file you already edited. While the issues list stays
+identical across reruns, the creator is still unaddressed: run list_files, read every test file you have
+not inspected yet, and repair the exact file that creates the issues. Do not cycle write/run/finish
+against a test file whose standalone run is clean.
 Never finish while your last action after the most recent test command was a file mutation: rerun the full
 suite immediately after the final mutation and only then finish.
 If a test command reports that a tracked runtime artifact must be removed, cleanup becomes the immediate blocker:
@@ -183,6 +190,8 @@ Persist user data using proper storage and named volumes, never a committed data
 Tests use tmp_path/in-memory storage; do not hide failures, skip required tests, or replace tests with stubs.
 Check repository dependencies and existing tests before choosing a test pattern. Without a declared async pytest
 plugin, use a synchronous test with asyncio.run, as existing tests may do; bare async def tests will fail.
+Never import a test dependency the repository does not declare (for example pytest-asyncio); check the
+requirements/lockfile first and keep the existing test file's runner conventions and test names.
 Check source hygiene before tests: tracked runtime databases cannot enter the sandbox snapshot. Never read
 database contents or ignore this gate; use temporary database paths in tests and report unsafe data blockers.
 An exit_code of zero is not sufficient: sandbox issues (including generated todos.db) mean checks failed.
@@ -201,7 +210,9 @@ If requirements cannot be met within the environment, report the limitation in n
     context_prefix = (
         f"REQUIREMENT:\n{requirement}\nPLAN:\n{plan.model_dump_json()}\n"
         f"FEEDBACK (deterministic issues are binding repair instructions; fix them before rerunning):\n"
-        f"{json.dumps(reviewer_feedback or [])}\nFILE INDEX:\n"
+        f"{json.dumps(reviewer_feedback or [])}\n"
+        + (f"{resume_note}\n" if resume_note else "")
+        + "FILE INDEX:\n"
     )
     index_budget = max(0, developer_context_chars - len(context_prefix))
     context = context_prefix + file_index[:index_budget]
@@ -230,6 +241,7 @@ async def developer_loop(
     checkpoint=None,
     trace=None,
     step_limit=None,
+    resume_note: str = "",
 ):
     history = []
     inspected = False
@@ -244,6 +256,9 @@ async def developer_loop(
     repeated_failed_replace = 0
     ambiguous_replace_paths = {}
     last_command_issues: list[str] = []
+    last_blocked_issues = None
+    blocked_finish_repeats = 0
+    blocked_finish_stall = False
     mutations = {"write_file", "replace_text", "delete_file"}
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
     file_index = workspace.list_files()
@@ -256,6 +271,7 @@ async def developer_loop(
         requirement=requirement,
         plan=plan,
         reviewer_feedback=reviewer_feedback,
+        resume_note=resume_note,
     )
     schema_chars = len(json.dumps(DeveloperAction.model_json_schema()))
     limit = settings.max_dev_steps if step_limit is None else min(settings.max_dev_steps, step_limit)
@@ -315,12 +331,27 @@ async def developer_loop(
                     "Use delete_file for: " + ", ".join(sorted(tracked_artifacts))
                 )
             elif last_command_issues:
+                # Repeating a blocked finish without changing the issues list is
+                # churn against the wrong file (Task 66: the developer cycled
+                # write/run/finish against a test file whose standalone run was
+                # clean while a different test created the artifact). Bound it
+                # deterministically and force a repair iteration.
+                issues_signature = tuple(last_command_issues)
+                if issues_signature == last_blocked_issues:
+                    blocked_finish_repeats += 1
+                else:
+                    last_blocked_issues = issues_signature
+                    blocked_finish_repeats = 1
                 result = (
                     "Finish blocked: the most recent test command still reported sandbox issues: "
                     + "; ".join(last_command_issues)
-                    + ". Fix the tests that create them (route storage through tmp_path/:memory:), "
-                    "rerun the suite until its issues list is empty, then finish."
+                    + ". Fix the tests that create them (route storage through tmp_path/:memory:): "
+                    "list_files, read every test file you have not inspected yet, and repair the "
+                    "exact creator file instead of mutating the file you already edited; rerun the "
+                    "suite until its issues list is empty, then finish."
                 )
+                if blocked_finish_repeats >= 2:
+                    blocked_finish_stall = True
             elif reviewer_feedback and successful_mutations == 0:
                 result = (
                     "Finish blocked: repair feedback requires at least one successful file mutation "
@@ -431,7 +462,12 @@ async def developer_loop(
                         pass
                     else:
                         read_paths.add(action.path)
-                        result += "\nCURRENT FILE AFTER FAILED REPLACEMENT:\n" + str(current_file)[:5000]
+                        # Re-echoing a 5-6k char file on every failed replacement
+                        # burned the token budget (Task 66). Cap to a tail excerpt.
+                        excerpt = str(current_file)
+                        if len(excerpt) > 800:
+                            excerpt = excerpt[-800:]
+                        result += "\nCURRENT FILE AFTER FAILED REPLACEMENT:\n" + excerpt
         # Do not replay full write payloads; the resulting diff is separately reviewed.
         compact = action.model_copy(
             update={
@@ -448,6 +484,13 @@ async def developer_loop(
         history.append(record)
         if trace:
             await trace(step + 1, record)
+        if blocked_finish_stall:
+            raise DeveloperStalled(
+                "Developer stalled: repeated blocked finishes for the same sandbox issues; the "
+                "artifact creator test file was not addressed. Preserve partial work and hunt the "
+                "creator test file (list_files plus read_file of uninspected test files) in the "
+                "repair iteration."
+            )
         if action.action == "run_command" and "Remove generated/runtime artifact:" in str(result):
             artifact_cleanup_required = True
         if artifact_policy_block:

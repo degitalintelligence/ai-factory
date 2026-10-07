@@ -358,6 +358,7 @@ async def run_task(task_id, notify=None, owner=None):
         context, baseline = await repository_context(workspace, task)
         await store.artifact(task_id, "baseline", baseline)
         fresh_plan = not bool(task.plan_json)
+        readmit = False
         if task.plan_json:
             raw_plan = task.plan_json
             plan = normalize_lead_plan(LeadPlan.model_validate_json(raw_plan), task.requirement)
@@ -574,6 +575,17 @@ async def run_task(task_id, notify=None, owner=None):
                     }
                 ),
             )
+            # A resumed workspace (retry after failure or a repair iteration) may
+            # carry incomplete or duplicated edits from the previous attempt; the
+            # model must verify actual file content instead of assuming baseline.
+            resume_note = (
+                "WORKSPACE RESUME WARNING: this checkout may already contain uncommitted changes "
+                "from a previous attempt. Inspect actual file content with list_files/read_file "
+                "before editing; earlier edits may be incomplete, duplicated or corrupted. Do not "
+                "assume baseline content."
+                if (iteration > 1 or readmit)
+                else ""
+            )
             try:
                 await developer_loop(
                     workspace=workspace,
@@ -583,6 +595,7 @@ async def run_task(task_id, notify=None, owner=None):
                     checkpoint=check,
                     trace=trace,
                     step_limit=step_limit,
+                    resume_note=resume_note,
                 )
             except (DeveloperStalled, BudgetExceeded) as exc:
                 budget_reserved = isinstance(exc, BudgetExceeded) and (
