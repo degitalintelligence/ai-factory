@@ -59,8 +59,9 @@ def engineering_budget_admission(
     """Correct fresh model estimates and re-fund retry/recovery plans inside operator ceilings.
 
     Explicit user budget constraints remain binding. Readmission (readmit=True on an
-    unapproved saved plan, as on retry or recovery) re-funds the remaining calls/tokens
-    for the lifetime usage already spent, never above operator ceilings; an approved
+    unapproved saved plan, as on retry or recovery) re-funds the remaining
+    calls/tokens/cost for the lifetime usage already spent, never above operator
+    ceilings; an approved
     plan keeps its exact binding. The initial prompts provide an explainable
     baseline; future reads/diffs/retries can still consume more, and all runtime
     reservations remain enforced by the store. Lifetime usage is never reset.
@@ -83,6 +84,13 @@ def engineering_budget_admission(
     if adjustable:
         admitted.budget.max_llm_calls = min(
             settings.max_llm_calls, max(estimate["max_llm_calls"], minimum_calls, execution_calls)
+        )
+        # Re-fund cost like calls/tokens: a Lead's dollar guess must not become
+        # the binding ceiling when operator policy is higher (regression: tasks
+        # #83/#84/#85 died at $0.2/$0.1/$0.05 estimates). Floor is the default
+        # PlanBudget cost; explicit budgets stay binding; ceilings never rise.
+        admitted.budget.max_cost_usd = min(
+            settings.max_cost_usd, max(estimate["max_cost_usd"], PlanBudget().max_cost_usd)
         )
 
     # Re-render once after allocation: the budget itself appears in both prompts.
@@ -154,6 +162,6 @@ def engineering_budget_admission(
         "minimum_tokens": minimum_tokens,
         "planned_allocation_tokens": allocation,
         "issues": issues,
-        "note": "Initial prompt byte reserves plus output allowance; not billed tokens or guaranteed completion. Operator ceilings are never raised; lifetime usage is retained. Readmission on retry/recovery re-funds the remaining calls/tokens within those ceilings unless the requirement sets an explicit budget or the plan was already approved.",
+        "note": "Initial prompt byte reserves plus output allowance; not billed tokens or guaranteed completion. Operator ceilings are never raised; lifetime usage is retained. Readmission on retry/recovery re-funds the remaining calls/tokens/cost within those ceilings unless the requirement sets an explicit budget or the plan was already approved.",
     }
     return admitted, diagnostic

@@ -209,7 +209,19 @@ Outstanding at acceptance time (tracked, not silently dropped):
   `self` -> `degitalintelligence/ai-factory` with operator defaults and
   `SELF_PROJECT=self`, so a demonstration self-improvement task can be created once the
   updated Coolify environment is active. Until then this record covers the gates that do
-  not require self-editing.
+  not require self-editing. After the redeploy the scanner gate cleared and three
+  consecutive self-improvement attempts ran (#83 user-created via Telegram, #84/#85 via
+  the operator API, each approved by Dedi with the exact plan hash) but all failed
+  deterministically at the task cost ceiling: admission re-funded calls/tokens yet passed
+  the Lead's shrinking dollar estimates ($0.2/$0.1/$0.05) through as the binding cost
+  limit. Fixed 2026-10-08 per Dedi's "fix + fourth attempt" decision (AGENTS.md §19,
+  budget admission cost re-fund): adjustable admission now funds cost like calls/tokens —
+  floor = max(Lead estimate, default PlanBudget $1.0), capped at the operator ceiling;
+  explicit budgets stay binding and lifetime spend above the funded floor still blocks.
+  Regression tests added in `tests/test_engineering_budget.py`; effective after the next
+  redeploy, after which a fourth demonstration attempt targets PR publication. Total
+  provider spend across the three failed attempts stayed under $0.26 and nothing was
+  published.
 - Live channel parity was exercised for clarification, plan approval and the budget
   stop. Revision, rejection, defer and memory correction/lock in both live channels
   remain covered by the mocked contract suites only.

@@ -11,7 +11,7 @@ from app.engineering_budget import (
     engineering_budget_admission,
     engineering_iteration_step_limit,
 )
-from app.schemas import LeadPlan
+from app.schemas import LeadPlan, PlanBudget
 from app.store import BudgetExceeded
 
 
@@ -205,7 +205,46 @@ def test_utf8_and_output_allowance_contribute_to_admission(monkeypatch):
     assert larger["minimum_tokens"] >= normal["minimum_tokens"] + 8 * 1024
 
 
-def test_already_exhausted_cost_is_blocked_without_new_dollar_authority():
+@pytest.mark.parametrize(
+    "estimate,expected",
+    [
+        (0.05, PlanBudget().max_cost_usd),  # Floor: a shrinking guess never binds.
+        (2.0, 2.0),  # A higher Lead estimate is preserved.
+        (9.0, None),  # None -> operator ceiling, policy never raised.
+    ],
+)
+def test_adjustable_cost_is_refunded_not_bound_to_lead_guess(estimate, expected):
+    """Regression (tasks #83/#84/#85): admission re-funded calls/tokens but passed
+    the Lead's dollar guess through unclamped, so shrinking estimates ($0.2 ->
+    $0.1 -> $0.05) became the binding cost ceiling and every self-improvement
+    task died with BudgetExceeded before the Developer could act. Adjustable
+    admission must fund cost to at least the default PlanBudget floor inside
+    operator ceilings, on fresh admission and on retry readmission alike."""
+    fixture = task_52()
+    fixture["plan"]["budget"]["max_cost_usd"] = estimate
+    plan, accounting = admit(fixture)
+    assert plan.budget.max_cost_usd == accounting["admitted"]["max_cost_usd"]
+    if expected is None:
+        assert plan.budget.max_cost_usd == settings.max_cost_usd
+    else:
+        assert plan.budget.max_cost_usd == expected
+    assert not any("reported_cost" in issue for issue in accounting["issues"])
+    retried, _ = admit(fixture, fresh=False, readmit=True)
+    assert retried.budget.max_cost_usd == plan.budget.max_cost_usd
+
+
+def test_explicit_cost_budget_stays_binding():
+    fixture = task_52()
+    fixture["plan"]["budget"]["max_cost_usd"] = 0.05
+    plan, accounting = admit(fixture, requirement=fixture["requirement"] + " Budget maksimal $0.05.")
+    assert accounting["explicit_budget"] is True
+    assert plan.budget.model_dump() == fixture["plan"]["budget"]
+
+
+def test_lifetime_cost_above_funded_floor_stays_blocked():
+    """Admission may re-fund adjustable cost to the default PlanBudget floor, but
+    lifetime spend already above that floor still blocks without new dollar
+    authority, and operator ceilings are never raised."""
     fixture = task_52()
     _, accounting = engineering_budget_admission(
         LeadPlan.model_validate(fixture["plan"]),
@@ -214,12 +253,13 @@ def test_already_exhausted_cost_is_blocked_without_new_dollar_authority():
         context=fixture["context"],
         used_calls=1,
         used_tokens=13088,
-        used_cost=0.5,
+        used_cost=1.25,
         fresh=True,
         reviewer_feedback=[],
     )
     assert any("reported_cost" in issue for issue in accounting["issues"])
-    assert accounting["admitted"]["max_cost_usd"] == 0.5
+    assert accounting["admitted"]["max_cost_usd"] == PlanBudget().max_cost_usd
+    assert accounting["effective_limits"]["max_cost_usd"] == PlanBudget().max_cost_usd
 
 
 async def test_task_53_exact_call_failure_and_fresh_iteration_allowance(db):
