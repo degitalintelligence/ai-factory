@@ -161,3 +161,55 @@ To claim v0.3 done, require all of these release gates on the same candidate:
 No live provider key, staging endpoint, Telegram session or production credentials were
 available in the implementation workspace. Until real-provider/staging/business acceptance
 is recorded, this is an implementation candidate, not a claim of production v0.3 completion.
+
+## Release acceptance record — 2026-10-08 (operator-accepted)
+
+Candidate: main at commit 6e64fae, deployed staging build at https://liobot.kreasheet.com
+(`GET /v1/health` → `0.3.0`), configured model alias `bunny-alpha`. Operator credentials
+lived outside git; all evidence below is durable server-side at the cited task endpoints.
+
+1. Golden acceptance: `scripts/v03_acceptance.py` with `FACTORY_PROJECT=self` produced
+   intent #77, `completed` with 5 model runs / 41,432 tokens; three distinct
+   source-backed findings (every `evidence_refs` subset of the persisted context
+   artifact) and three durable `recommendation` decision cards. The gate-script GOAL was
+   realigned to the engine's `evidence_audit_request` trigger with an anti-drift test
+   (commit 6e64fae; regression evidence: intent #76).
+2. Clarification fail-closed: "Rencanakan penghematan biaya LioBot untuk bulan depan"
+   (intent #78) entered `waiting_input` with a real blocking question and no plan; cost
+   USD 0.0033, 1 model run.
+3. Idempotency: three identical `POST /v1/chat` requests sharing one idempotency key all
+   returned intent #79; exactly one task row was created.
+4. Channel parity: a free-text Telegram chat message created intent #80 with the
+   identical requirement text in the same core state; the server Telegram poller is
+   active (an independent read-only `getUpdates` call returns 409 Conflict); the
+   dashboard overview and decision rows come from the same store.
+5. Approval path: a generic staff plan gated at `awaiting_approval` with
+   APPROVAL_REQUIRED decision card #72 bound to
+   `plan_sha256=25eee4ee3da01630e46fb1b67e29a8821dea8463528148f4ba1c4675e13188f7`.
+   Approval issued via the operator API under Dedi's explicit cleanup instruction
+   (audit `decided_by=7596044503`) resumed the task. The deterministic anti-hallucination
+   evaluator then rejected the model draft (findings claiming confidence 0.9–0.95 on
+   `unverified` evidence, maximum 0.5, plus one unauthorized evidence ref) and the task
+   failed closed — no overstated summary was published.
+6. Budget fail-closed: intent #80 stopped at `skill_review` with the task token budget
+   exhausted (used 77,264; next reserve 50,417; limit 120,000). Lifetime usage was
+   preserved and evidence recorded (`/report 80`, `/logs 80`).
+7. Persistence: after an operator Coolify restart, tasks #77/#78/#79, the 13 evidence
+   artifacts of #77, its three decision cards and `/v1/health` all remained intact.
+8. Operator release approval: Dedi accepted the release on 2026-10-08 ("bisa release").
+
+Outstanding at acceptance time (tracked, not silently dropped):
+
+- Release gate 5 — one approved sandbox self-improvement end to end — is not yet
+  demonstrated. It is blocked on the OPEN operator decision to register the ai-factory
+  self-target alias (AGENTS.md §19). Until then this record covers the gates that do
+  not require self-editing.
+- Live channel parity was exercised for clarification, plan approval and the budget
+  stop. Revision, rejection, defer and memory correction/lock in both live channels
+  remain covered by the mocked contract suites only.
+- Hardening backlog observed during acceptance, not accepted behaviour: the budget
+  estimator omits workflow/retry calls (`plan_budget_accounting`, intent #80);
+  `CompactStaffOutput` caps `evidence_refs` at 4 and caused a validation retry
+  (intent #80); `waiting_input` tasks may set `decision_required` without a matching
+  decision card (intent #78); generic staff drafts overstate confidence on unverified
+  refs (intent #79).
