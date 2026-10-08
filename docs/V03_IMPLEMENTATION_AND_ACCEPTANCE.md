@@ -205,8 +205,10 @@ Outstanding at acceptance time (tracked, not silently dropped):
   task (budget prose without an amount in `engineering_budget.py`; fixture credentials
   in test files) were remediated directly on 2026-10-08 per Dedi's decision to fix both
   gates in the repo instead of dogfooding; the fixes take effect on the next redeploy.
-  Gate 5 also depends on the OPEN operator decision to register the ai-factory
-  self-target alias (AGENTS.md §19). Until then this record covers the gates that do
+  Dedi also resolved the OPEN self-target decision on 2026-10-08 (AGENTS.md §19): alias
+  `self` -> `degitalintelligence/ai-factory` with operator defaults and
+  `SELF_PROJECT=self`, so a demonstration self-improvement task can be created once the
+  updated Coolify environment is active. Until then this record covers the gates that do
   not require self-editing.
 - Live channel parity was exercised for clarification, plan approval and the budget
   stop. Revision, rejection, defer and memory correction/lock in both live channels
