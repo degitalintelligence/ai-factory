@@ -558,6 +558,19 @@ async def test_failed_replacement_echo_is_capped_to_a_tail_excerpt(monkeypatch):
     assert head_marker not in traces[1]
 
 
+def test_developer_prompt_requires_early_mutation_discipline():
+    """Task #92: the developer spent 24 consecutive read/search steps without a single
+    mutation and stalled three iterations in a row; the system prompt must demand an
+    early first mutation and forbid restarting reconnaissance on recovery iterations."""
+    system, _context = agents.developer_request(
+        file_index="README.md\n",
+        requirement="Small edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+    )
+    assert "first write_file or replace_text within about five steps" in system
+    assert "do not restart full reconnaissance" in system
+
+
 async def test_resume_warning_reaches_the_developer_prompt_on_resumed_workspaces(monkeypatch):
     """Retries and repair iterations inherit uncommitted edits: the prompt must
     warn the model to verify actual file content instead of assuming baseline."""

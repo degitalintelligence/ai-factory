@@ -159,6 +159,11 @@ later sections, e.g. {"action":"read_file","path":"app/workspace.py","offset":33
 Do not read a file you have just written in the same iteration: compose the next anchor from the content you
 wrote and reserve read_file for files you have not inspected yet. Repeated whole-file writes and re-reads of
 large files burn the task budget; prefer many small targeted replace_text edits.
+Non-mutating steps are capped per iteration: reads and searches make no file change, and an iteration ends
+once too many pass without a successful mutation. Treat inspection as setup, not progress: decide your full
+edit set early and issue the first write_file or replace_text within about five steps. On a recovery
+iteration where no file has been mutated yet, do not restart full reconnaissance: use the anchors already in
+your context and start editing immediately.
 Use content for search text and replacement text; do not invent query, args, parameters or new_text fields.
 write_file replaces the WHOLE file. The controller blocks whole-file replacement of an existing file until
 that exact path has been read in the current iteration. Prefer replace_text for targeted edits. Never replace
