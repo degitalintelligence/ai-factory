@@ -226,6 +226,29 @@ async def brief_scope_paths(task) -> frozenset[str]:
     return frozenset()
 
 
+async def lead_requirement(task) -> str:
+    """Requirement text the Lead plans against.
+
+    A self-improvement brief with a deterministic scope_paths allowlist must be
+    visible to Lead during planning so every acceptance criterion stays
+    achievable within the bounded mutation scope; otherwise planning invents
+    criteria the scope guard can never satisfy. Non-self-improvement tasks and
+    legacy briefs without scope_paths keep the stored requirement verbatim.
+    """
+    scope_paths = sorted(await brief_scope_paths(task))
+    if not scope_paths:
+        return task.requirement
+    return (
+        task.requirement
+        + "\n\nDETERMINISTIC MUTATION SCOPE: the developer may only mutate these "
+        + "paths: "
+        + ", ".join(scope_paths)
+        + ". Every acceptance criterion, suggested test, and documentation step "
+        + "must be achievable with mutations limited to those paths; do not require "
+        + "changes to files outside them."
+    )
+
+
 async def run_task(task_id, notify=None, owner=None):
     task = await store.get(task_id)
     if not task or not owner:
@@ -384,7 +407,7 @@ async def run_task(task_id, notify=None, owner=None):
         else:
             stage = "lead_planning"
             await transition("planning", "Lead is analysing requirements and repository context")
-            plan = await lead_plan(task.requirement, context)
+            plan = await lead_plan(await lead_requirement(task), context)
             plan.deployment_required = plan.deployment_required or policy.require_deployment
             plan = normalize_lead_plan(plan, task.requirement)
             if not plan.questions and not plan.review_only:

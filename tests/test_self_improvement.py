@@ -145,6 +145,27 @@ async def test_brief_scope_paths_allowlist_comes_from_the_stored_brief(db):
     assert await orchestrator.brief_scope_paths(engineering) == frozenset()
 
 
+async def test_lead_requirement_surfaces_the_deterministic_scope(db):
+    scoped = await db.create(
+        "Improve the parser",
+        "self",
+        kind="self_improvement",
+        brief=brief(scope_paths=["tests/test_x.py", "app/agents.py"]),
+    )
+    requirement = await orchestrator.lead_requirement(scoped)
+    assert requirement.startswith("Improve the parser")
+    assert "DETERMINISTIC MUTATION SCOPE" in requirement
+    assert "app/agents.py, tests/test_x.py" in requirement
+    # Planning text is deterministic, so the approval hash never moves between runs.
+    assert await orchestrator.lead_requirement(scoped) == requirement
+    await db.update(scoped.id, status="completed")
+    legacy = await db.create("Improve the parser", "self", kind="self_improvement", brief=brief())
+    assert await orchestrator.lead_requirement(legacy) == "Improve the parser"
+    await db.update(legacy.id, status="completed")
+    engineering = await db.create("Normal engineering work")
+    assert await orchestrator.lead_requirement(engineering) == "Normal engineering work"
+
+
 async def test_sensitive_self_improvement_reports_that_approval_is_required(db):
     task, needs_approval, areas = await create_self_improvement(brief(touched_areas=["app/gates.py"]), "self")
     assert needs_approval is True
