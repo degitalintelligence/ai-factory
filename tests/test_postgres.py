@@ -148,7 +148,7 @@ async def test_postgres_v04_duplicate_intake_and_atomic_clarification(monkeypatc
         answers = await asyncio.gather(
             *(store.answer_clarification(cards[0].id, "Startup founders", 7) for _ in range(5))
         )
-        assert all(answer.status == "queued" for answer in answers)
+        assert all(answer.status == "received" for answer in answers)
         fresh = await store.get(task_id)
         assert fresh.requirement.count("Startup founders") == 1
         assert fresh.approved_plan_hash is None
