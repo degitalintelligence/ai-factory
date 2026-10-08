@@ -92,6 +92,7 @@ jobs:
         env:
           NODE_PATH: /tmp/dashboard-tests/node_modules
           DASHBOARD_SCREENSHOT_DIR: /tmp/dashboard-preview
+          DASHBOARD_LOG_PREVIEW: "true"
         run: node scripts/dashboard_smoke.cjs
       - name: Save dashboard preview evidence
         if: always()

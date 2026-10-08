@@ -302,6 +302,13 @@ async function main() {
         fullPage: true,
       });
     }
+    if (process.env.DASHBOARD_LOG_PREVIEW === "true")
+      console.log(
+        "DASHBOARD_DESKTOP_JPEG=" +
+          (await page.screenshot({ type: "jpeg", quality: 50 })).toString(
+            "base64",
+          ),
+      );
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(
       await page.evaluate(
@@ -318,6 +325,13 @@ async function main() {
         ),
         fullPage: true,
       });
+    if (process.env.DASHBOARD_LOG_PREVIEW === "true")
+      console.log(
+        "DASHBOARD_MOBILE_JPEG=" +
+          (await page.screenshot({ type: "jpeg", quality: 50 })).toString(
+            "base64",
+          ),
+      );
     await page.locator("#disconnect").click();
     assert.equal(await page.locator("#workspace").isVisible(), false);
     assert.equal(await page.locator("#conversation").innerText(), "");

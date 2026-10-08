@@ -652,6 +652,11 @@ function initDashboard() {
     loadError = "",
   ) {
     const root = el("task-detail");
+    const openSections = new Set(
+      [...root.querySelectorAll("details[open]")].map(
+        (node) => node.querySelector("summary").textContent,
+      ),
+    );
     root.replaceChildren();
     text("h3", `#${task.id} · ${task.project || "Lintas proyek"}`, root);
     text("p", task.requirement, root);
@@ -819,13 +824,17 @@ function initDashboard() {
     const publicArtifacts = { ...artifacts };
     delete publicArtifacts.__task;
     text("pre", JSON.stringify(publicArtifacts, null, 2), raw);
+    for (const section of root.querySelectorAll("details"))
+      section.open = openSections.has(
+        section.querySelector("summary").textContent,
+      );
   }
   async function loadDetail() {
     const task = activeTask();
     if (!task) return;
     const seq = ++detailSequence;
     const id = task.handoff_task_id || task.id;
-    renderDetail(task);
+    if (!detailCache || detailCache.taskId !== task.id) renderDetail(task);
     const requests = await Promise.allSettled([
       api(`/v1/tasks/${id}/evidence`),
       api(`/tasks/${id}/events`),
