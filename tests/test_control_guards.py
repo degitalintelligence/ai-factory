@@ -1199,3 +1199,203 @@ async def test_explicit_runtime_artifact_cleanup_unblocks_repair(monkeypatch):
     assert result == "Implementation completed"
     assert workspace.artifact_exists is False
     assert workspace.source == "# Repaired\n"
+
+
+# --- Deterministic scope guard from self-improvement briefs ---------------------
+
+
+def test_developer_prompt_declares_deterministic_scope_paths():
+    system, context = agents.developer_request(
+        file_index="README.md\n",
+        requirement="Small edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        scope_paths=["README.md"],
+    )
+    assert "SCOPE GUARD: file mutations" in context
+    assert "README.md" in context
+
+    _legacy_system, legacy_context = agents.developer_request(
+        file_index="README.md\n",
+        requirement="Small edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+    )
+    assert "SCOPE GUARD" not in legacy_context
+
+
+async def test_scope_guard_rejects_out_of_scope_mutations(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.written = {}
+
+        def write_file(self, path, content):
+            self.written[path] = content
+            return f"Wrote {path}"
+
+        def diff(self):
+            return "diff --git a/README.md b/README.md\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="write_file", path="app/agents.py", content="out of scope"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+    traces = []
+
+    async def model(**_kwargs):
+        return next(script)
+
+    async def trace(_step, record):
+        traces.append(record)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+    result = await agents.developer_loop(
+        workspace=workspace,
+        requirement="Small edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        scope_paths=["tests/test_new.py"],
+        trace=trace,
+    )
+
+    # The violation never reaches the workspace; the developer receives the
+    # deterministic error and finishes within scope instead.
+    assert result == "Implementation completed"
+    assert workspace.written == {}
+    blocked = next(item for item in traces if "Scope guard" in item)
+    assert "ERROR ValueError: Scope guard: mutations are limited to the brief scope_paths" in blocked
+    assert "tests/test_new.py" in blocked
+    # The rejection message names only the allowed scope, never the violated path.
+    assert "app/agents.py" not in blocked.split("RESULT:")[1].split("DETAILS:")[0]
+
+
+async def test_scope_guard_allows_in_scope_mutations(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.written = {}
+
+        def write_file(self, path, content):
+            self.written[path] = content
+            return f"Wrote {path}"
+
+        def diff(self):
+            return "diff --git a/tests/test_new.py b/tests/test_new.py\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="write_file", path="tests/test_new.py", content="new tests\n"),
+            DeveloperAction(action="git_diff"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+
+    async def model(**_kwargs):
+        return next(script)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+    result = await agents.developer_loop(
+        workspace=workspace,
+        requirement="Small edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        scope_paths=["tests/test_new.py"],
+    )
+
+    assert result == "Implementation completed"
+    assert workspace.written == {"tests/test_new.py": "new tests\n"}
+
+
+async def test_scope_guard_still_allows_tracked_artifact_cleanup(monkeypatch):
+    # Artifact cleanup policy outranks the scope allowlist (AGENTS.md §5.3).
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.source = "# Demo\n"
+            self.artifact_exists = True
+
+        def list_files(self):
+            return "README.md\ntodos.db\n" if self.artifact_exists else "README.md\n"
+
+        def read_file(self, path):
+            assert path == "README.md"
+            return self.source
+
+        def delete_file(self, path):
+            assert path == "todos.db"
+            self.artifact_exists = False
+            return "Deleted todos.db"
+
+        def replace_text(self, path, old_text, content):
+            self.source = self.source.replace(old_text, content)
+            return "Wrote README.md"
+
+        def diff(self):
+            return "diff --git a/README.md b/README.md\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="delete_file", path="todos.db"),
+            DeveloperAction(
+                action="replace_text",
+                path="README.md",
+                old_text="# Demo",
+                content="# Fixed",
+            ),
+            DeveloperAction(action="git_diff"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+
+    async def model(**_kwargs):
+        return next(script)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+    result = await agents.developer_loop(
+        workspace=workspace,
+        requirement="Repair tests",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+        scope_paths=["README.md"],
+    )
+
+    assert result == "Implementation completed"
+    assert workspace.artifact_exists is False
+    assert workspace.source == "# Fixed\n"
+
+
+async def test_empty_scope_paths_keep_legacy_unbounded_behaviour(monkeypatch):
+    class Workspace(FakeDeveloperWorkspace):
+        def __init__(self):
+            self.written = {}
+
+        def write_file(self, path, content):
+            self.written[path] = content
+            return f"Wrote {path}"
+
+        def diff(self):
+            return "diff --git a/app/agents.py b/app/agents.py\n"
+
+    script = iter(
+        [
+            DeveloperAction(action="read_file", path="README.md"),
+            DeveloperAction(action="write_file", path="app/agents.py", content="legacy edit"),
+            DeveloperAction(action="git_diff"),
+            DeveloperAction(action="finish"),
+        ]
+    )
+
+    async def model(**_kwargs):
+        return next(script)
+
+    monkeypatch.setattr(agents, "json_completion", model)
+    workspace = Workspace()
+    result = await agents.developer_loop(
+        workspace=workspace,
+        requirement="Small edit",
+        plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
+    )
+
+    assert result == "Implementation completed"
+    assert workspace.written == {"app/agents.py": "legacy edit"}

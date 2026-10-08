@@ -18,7 +18,7 @@ from app.engineering_budget import engineering_budget_admission, engineering_ite
 from app.gates import deployment_issues, post_publication_issues, quality_issues
 from app.github_api import GitHubAPI
 from app.llm import run_context
-from app.schemas import LeadPlan
+from app.schemas import LeadPlan, SelfImprovementBrief
 from app.security import redact
 from app.store import BudgetExceeded, TaskStopped, plan_hash, store
 from app.workspace import Workspace, is_suspicious_artifact
@@ -209,6 +209,21 @@ async def repository_context(workspace, task):
         sort_keys=True,
     )
     return context, baseline
+
+
+async def brief_scope_paths(task) -> frozenset[str]:
+    """Deterministic developer mutation allowlist from the stored self-improvement brief.
+
+    An empty frozenset keeps legacy behaviour for briefs that name no scope_paths;
+    a nonempty allowlist is enforced by the developer loop scope guard.
+    """
+    if str(getattr(task, "kind", "")) != "self_improvement":
+        return frozenset()
+    for row in await store.artifacts(task.id):
+        if row.kind == "self_improvement_brief":
+            brief = SelfImprovementBrief.model_validate_json(row.content)
+            return frozenset(brief.scope_paths)
+    return frozenset()
 
 
 async def run_task(task_id, notify=None, owner=None):
@@ -537,6 +552,7 @@ async def run_task(task_id, notify=None, owner=None):
         if initial_feedback != feedback:
             feedback = initial_feedback
             await store.update(task_id, owner, feedback_json=json.dumps(feedback))
+        scope_paths = await brief_scope_paths(task)
         for iteration in range(task.iteration + 1, settings.max_iterations + 1):
             await transition(
                 "developing",
@@ -596,6 +612,7 @@ async def run_task(task_id, notify=None, owner=None):
                     trace=trace,
                     step_limit=step_limit,
                     resume_note=resume_note,
+                    scope_paths=scope_paths,
                 )
             except (DeveloperStalled, BudgetExceeded) as exc:
                 budget_reserved = isinstance(exc, BudgetExceeded) and (

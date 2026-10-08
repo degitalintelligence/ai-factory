@@ -167,6 +167,9 @@ class SelfImprovementBrief(BaseModel):
     evidence: list[str] = Field(min_length=1)
     hypothesis: str = Field(min_length=1, max_length=2000)
     scope: str = Field(min_length=1, max_length=2000)
+    # Deterministic developer mutation allowlist. Empty keeps legacy behaviour;
+    # a nonempty list is enforced by the developer loop scope guard.
+    scope_paths: list[str] = Field(default_factory=list, max_length=20)
     baseline: str = Field(min_length=1, max_length=4000)
     touched_areas: list[str] = Field(default_factory=list)
     rollback_plan: str = Field(min_length=1, max_length=2000)
@@ -176,6 +179,26 @@ class SelfImprovementBrief(BaseModel):
     budget: PlanBudget = Field(default_factory=PlanBudget)
     blast_radius: str = Field(default="", max_length=1000)
     review_date: datetime | None = None
+
+    @model_validator(mode="after")
+    def valid_scope_paths(self):
+        cleaned: list[str] = []
+        for raw in self.scope_paths:
+            path = raw.strip().replace("\\", "/")
+            if (
+                not path
+                or len(path) > 200
+                or ":" in path
+                or path.startswith(("/", "~"))
+                or ".." in path.split("/")
+            ):
+                raise ValueError(
+                    "scope_paths entries must be relative repository paths without drive, "
+                    "absolute, or traversal segments"
+                )
+            cleaned.append(path)
+        self.scope_paths = list(dict.fromkeys(cleaned))
+        return self
 
     @property
     def sensitive_areas(self) -> list[str]:

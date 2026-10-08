@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+from app import orchestrator
 from app.config import settings
 from app.contracts import create_self_improvement
 from app.schemas import ImprovementOutcome, SelfImprovementBrief, TaskKind, TaskRequest
@@ -36,6 +37,37 @@ def test_brief_rejects_every_missing_mandatory_field():
     for field in ("problem", "evidence", "hypothesis", "scope", "baseline", "rollback_plan"):
         with pytest.raises(ValidationError):
             brief(**{field: "" if field != "evidence" else []})
+
+
+# --- Deterministic scope_paths allowlist (developer loop scope guard) ------------
+
+
+def test_brief_scope_paths_default_to_legacy_empty():
+    # Briefs without scope_paths keep the legacy unbounded developer behaviour.
+    assert brief().scope_paths == []
+
+
+def test_brief_scope_paths_are_sanitized_and_deduped():
+    result = brief(scope_paths=[" app/agents.py ", "app\\agents.py", "tests/test_x.py", "app/agents.py"])
+    assert result.scope_paths == ["app/agents.py", "tests/test_x.py"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/app/agents.py",
+        "~/secrets.py",
+        "../app/agents.py",
+        "app/../secrets.py",
+        "C:/app/agents.py",
+        "",
+        "   ",
+        "a" * 201,
+    ],
+)
+def test_brief_rejects_unsafe_scope_paths(bad):
+    with pytest.raises(ValidationError):
+        brief(scope_paths=[bad])
 
 
 def test_task_request_requires_a_brief_for_self_improvement():
@@ -95,6 +127,22 @@ async def test_self_improvement_task_is_created_isolated_with_durable_brief(db):
     # Self-improvement is always gated: even an ordinary brief stops for approval,
     # because the worker approves no self_improvement task without Dedi.
     assert needs_approval is True and areas == []
+
+
+async def test_brief_scope_paths_allowlist_comes_from_the_stored_brief(db):
+    scoped = await db.create(
+        "Improve the parser",
+        "self",
+        kind="self_improvement",
+        brief=brief(scope_paths=["tests/test_x.py"]),
+    )
+    assert await orchestrator.brief_scope_paths(scoped) == frozenset({"tests/test_x.py"})
+    await db.update(scoped.id, status="completed")
+    legacy = await db.create("Improve the parser", "self", kind="self_improvement", brief=brief())
+    assert await orchestrator.brief_scope_paths(legacy) == frozenset()
+    await db.update(legacy.id, status="completed")
+    engineering = await db.create("Normal engineering work")
+    assert await orchestrator.brief_scope_paths(engineering) == frozenset()
 
 
 async def test_sensitive_self_improvement_reports_that_approval_is_required(db):

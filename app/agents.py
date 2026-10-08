@@ -130,7 +130,13 @@ Return a plan that keeps authority separate from confidence. The operator-config
 
 
 def developer_request(
-    *, file_index: str, requirement: str, plan: LeadPlan, reviewer_feedback=None, resume_note: str = ""
+    *,
+    file_index: str,
+    requirement: str,
+    plan: LeadPlan,
+    reviewer_feedback=None,
+    resume_note: str = "",
+    scope_paths=None,
 ) -> tuple[str, str]:
     """Render the initial Developer prompt for execution and budget admission."""
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
@@ -212,6 +218,15 @@ If requirements cannot be met within the environment, report the limitation in n
         f"FEEDBACK (deterministic issues are binding repair instructions; fix them before rerunning):\n"
         f"{json.dumps(reviewer_feedback or [])}\n"
         + (f"{resume_note}\n" if resume_note else "")
+        + (
+            "SCOPE GUARD: file mutations (write_file/replace_text/delete_file) are deterministically "
+            "limited to: "
+            + ", ".join(sorted(scope_paths))
+            + ". Mutations on any other path are rejected by the controller; if a needed change lies "
+            "outside these paths, run finish and describe it in the note.\n"
+            if scope_paths
+            else ""
+        )
         + "FILE INDEX:\n"
     )
     index_budget = max(0, developer_context_chars - len(context_prefix))
@@ -242,6 +257,7 @@ async def developer_loop(
     trace=None,
     step_limit=None,
     resume_note: str = "",
+    scope_paths=None,
 ):
     history = []
     inspected = False
@@ -260,6 +276,7 @@ async def developer_loop(
     blocked_finish_repeats = 0
     blocked_finish_stall = False
     mutations = {"write_file", "replace_text", "delete_file"}
+    allowed_scope = frozenset(scope_paths) if scope_paths else None
     developer_context_chars = min(settings.max_prompt_chars, settings.max_developer_context_chars)
     file_index = workspace.list_files()
     existing_paths = set(file_index.splitlines())
@@ -272,6 +289,7 @@ async def developer_loop(
         plan=plan,
         reviewer_feedback=reviewer_feedback,
         resume_note=resume_note,
+        scope_paths=allowed_scope,
     )
     schema_chars = len(json.dumps(DeveloperAction.model_json_schema()))
     limit = settings.max_dev_steps if step_limit is None else min(settings.max_dev_steps, step_limit)
@@ -399,6 +417,20 @@ async def developer_loop(
                 }
                 if action.action in {"write_file", "replace_text", "delete_file"} and not inspected:
                     raise ValueError("Inspect existing repository files first")
+                if allowed_scope and action.action in mutations:
+                    # Deterministic scope enforcement: a self-improvement brief's
+                    # scope_paths bound every mutation; violations never reach the
+                    # workspace, so out-of-scope edits cannot corrupt existing files.
+                    scope_allowed = action.path in allowed_scope or (
+                        action.action == "delete_file" and action.path in tracked_artifacts
+                    )
+                    if not scope_allowed:
+                        raise ValueError(
+                            "Scope guard: mutations are limited to the brief scope_paths: "
+                            + ", ".join(sorted(allowed_scope))
+                            + ". Mutate only those paths; run finish and describe any issue "
+                            "outside scope in the note."
+                        )
                 if action.action == "read_file" and action.path in tracked_artifacts:
                     raise ValueError(
                         f"Runtime artifact contents are inaccessible; delete_file {action.path} instead"
