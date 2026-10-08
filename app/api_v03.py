@@ -14,6 +14,8 @@ from app.conversations import _effective_task, history
 from app.db import (
     Artifact,
     AuditLog,
+    ChatTurn,
+    Conversation,
     Decision,
     ImprovementProposal,
     MemoryConflict,
@@ -127,9 +129,21 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
             if project:
                 dq = dq.where(Decision.project == project)
             decisions = list(await s.scalars(dq.order_by(Decision.id.desc()).limit(100)))
+            receipts = await s.execute(
+                select(ChatTurn.task_id, ChatTurn.conversation_id)
+                .join(Conversation, ChatTurn.conversation_id == Conversation.id)
+                .where(
+                    Conversation.tenant == settings.tenant_id,
+                    Conversation.owner == actor,
+                    ChatTurn.task_id.in_([task.id for task in tasks]),
+                )
+                .order_by(ChatTurn.id)
+            )
+            threads = {task_id: thread_id for task_id, thread_id in receipts}
             views = []
             for task in tasks:
                 view = task_view(task)
+                view["conversation_id"] = threads.get(task.id)
                 try:
                     effective = await _effective_task(s, task, actor)
                 except ValueError:

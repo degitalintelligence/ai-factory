@@ -117,3 +117,28 @@ The ten live results, live persistence/rollback, measured outcome and product pi
 are therefore pending. No runtime merge, deployment, budget increase or provider
 change was performed. This candidate is reviewable for staging, not fully accepted
 v0.4 production readiness and not the complete autonomous cross-domain vision.
+
+## Conversation-first dashboard
+
+The operator dashboard now centers on selecting a task and continuing its scoped
+conversation, with recorded state/cause, next action, structured results/evidence,
+actual usage, plan and timeline alongside the chat. The task list can be searched
+or filtered by attention, active work and available results. Overview exposes only
+owned/tenant-scoped conversation references so selecting a task can reopen its history.
+
+Decision/clarification forms are inline dialogs with an exact card target and explicit
+submit. Retry on a failed task and PR feedback use existing guarded actions. Suggestions
+fill the composer; they do not execute automatically. Approval does not merge/deploy.
+Multiple-task ambiguity remains explicit in the conversation. Failure explanations
+come from persisted messages/artifacts; no extra model call or invented reasoning is
+used. No percentage is guessed. Technical JSON stays in expandable evidence sections.
+
+Lost-response sends reuse the same idempotency key for an unchanged message/target.
+Refresh errors retain the last known task view. Tokens stay in page memory; disconnect
+clears rendered operator state. Model/source text is rendered as text, and external
+links accept HTTP(S) only. Knowledge/proposal/audit features remain in expandable panels.
+
+The browser CI gate (`scripts/dashboard_smoke.cjs`) uses local fixtures to exercise
+scoped follow-up, exact clarification, lost-response duplicate protection, structured
+results, escaping, selection races, refresh failure, mobile width and disconnect.
+This verifies UI behavior, not live runtime/channel acceptance.
