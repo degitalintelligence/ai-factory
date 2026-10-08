@@ -310,6 +310,17 @@ async function main() {
           ),
       );
     await page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await page.locator("#mobile-tasks").isVisible(), true);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    assert.equal(
+      await page.evaluate(
+        () =>
+          document.querySelector(".chat-panel").getBoundingClientRect().top <
+          document.querySelector(".work-panel").getBoundingClientRect().top,
+      ),
+      true,
+      "Mobile prioritizes the conversation",
+    );
     assert.equal(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

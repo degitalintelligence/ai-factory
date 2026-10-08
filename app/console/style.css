@@ -629,3 +629,38 @@ dialog::backdrop {
     margin-top: 24px;
   }
 }
+
+.mobile-tools {
+  display: none;
+}
+@media (max-width: 700px) {
+  .mobile-tools {
+    display: flex;
+    gap: 6px;
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    background: #f5f6f3;
+    padding: 9px 0;
+    margin-bottom: 12px;
+  }
+  .mobile-tools button {
+    flex: 1;
+    font-size: 11px;
+    padding: 9px 6px;
+  }
+  .chat-panel {
+    order: 1;
+  }
+  .context-panel {
+    order: 2;
+  }
+  .work-panel {
+    order: 3;
+  }
+  .chat-panel,
+  .context-panel,
+  .work-panel {
+    scroll-margin-top: 60px;
+  }
+}

@@ -636,7 +636,16 @@ function initDashboard() {
         "empty",
       );
     }
-    if (sequence === selectionSequence) await loadDetail();
+    if (sequence === selectionSequence) {
+      await loadDetail();
+      if (
+        sequence === selectionSequence &&
+        matchMedia("(max-width:700px)").matches
+      )
+        document
+          .querySelector(".chat-panel")
+          .scrollIntoView({ behavior: "smooth", block: "start" });
+    }
   }
   function contextBlock(parent, title, value) {
     const block = text("div", "", parent, "context-block");
@@ -1044,6 +1053,15 @@ function initDashboard() {
   el("disconnect").onclick = sessionReset;
   el("refresh").onclick = () => refresh().catch(() => {});
   el("new-thread").onclick = newThread;
+  el("mobile-new").onclick = newThread;
+  el("mobile-tasks").onclick = () =>
+    document
+      .querySelector(".work-panel")
+      .scrollIntoView({ behavior: "smooth", block: "start" });
+  el("mobile-context").onclick = () =>
+    document
+      .querySelector(".context-panel")
+      .scrollIntoView({ behavior: "smooth", block: "start" });
   el("project").onchange = newThread;
   el("task-search").oninput = renderTasks;
   el("task-filter").onchange = renderTasks;
