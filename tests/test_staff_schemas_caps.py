@@ -124,8 +124,7 @@ def test_compact_finding_rejects_overflow_evidence_refs(overflow):
 def test_evidence_refs_constraint_metadata_is_max_four():
     field = CompactFinding.model_fields["evidence_refs"]
     assert _declared_max_length(field) == 4, (
-        f"expected a declared maximum list length of 4, saw {_declared_max_length(field)} "
-        f"in {field.metadata}"
+        f"expected a declared maximum list length of 4, saw {_declared_max_length(field)} in {field.metadata}"
     )
 
 
