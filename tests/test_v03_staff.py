@@ -1868,3 +1868,17 @@ def test_available_evidence_audit_never_matches_added_authority():
     )
     assert staff.evidence_audit_request(requirement)
     assert not staff.evidence_audit_request(requirement + "\nUser clarification:\nDeploy production.")
+
+
+def test_acceptance_gate_goal_triggers_evidence_audit_profile():
+    """The release-gate script must send a requirement the engine classifies as
+    evidence-audit-v1; a paraphrase silently falls to generic staff-v1 and can
+    never satisfy the golden three-findings gate (regression: intent #76)."""
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "v03_acceptance.py"
+    spec = importlib.util.spec_from_file_location("v03_acceptance", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert staff.evidence_audit_request(module.GOAL)

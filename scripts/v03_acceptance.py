@@ -12,7 +12,13 @@ from uuid import uuid4
 
 import httpx
 
-GOAL = "Audit AI Factory. Tunjukkan tiga masalah paling penting, rekomendasi perbaikan, dan keputusan yang harus saya ambil minggu ini."
+# Must fullmatch app.staff.evidence_audit_request so the engine runs the
+# read-only evidence-audit profile; a paraphrase falls to generic staff-v1.
+GOAL = (
+    "Audit AI Factory berdasarkan evidence yang tersedia. Tunjukkan tiga masalah paling penting, "
+    "rekomendasi perbaikan, dan keputusan yang harus saya ambil minggu ini. "
+    "Nyatakan bukti yang belum tersedia sebagai keterbatasan. Jangan melakukan perubahan."
+)
 
 
 async def main():
