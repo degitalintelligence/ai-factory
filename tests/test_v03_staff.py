@@ -13,7 +13,7 @@ from app.config import settings
 from app.db import Artifact, AuditLog, DailyBudget, Decision, Deployment, Event, ModelRun, Subtask
 from app.deployment import DeploymentService
 from app.llm import run_context, subtask_context
-from app.main import app
+from app.main import app, decision_view
 from app.schemas import DecisionRequest, ImprovementOutcome, MemoryWrite, SelfImprovementBrief
 from app.staff_schemas import (
     ChatRequest,
@@ -206,6 +206,85 @@ async def test_chat_api_dashboard_and_decisions_share_durable_state(db, monkeypa
         overview = (await client.get("/v1/overview", headers=headers)).json()
         assert overview["decisions"][0]["state"] == "approved"
         assert len(overview["tasks"]) == 1
+
+
+async def test_decision_view_exposes_every_required_v03_card_field(db):
+    decision = await db.create_decision(
+        DecisionRequest(
+            title="Prioritize reliability",
+            situation="Failure recorded",
+            why_now="Repeated failures",
+            options=[
+                {
+                    "id": "fix",
+                    "label": "Investigate",
+                    "impact": "Failing work stops recurring",
+                    "risk": "Investigation cost",
+                }
+            ],
+            recommendation="fix",
+            evidence=["task:1"],
+            missing_information="Failing test link",
+            rollback="No action taken yet",
+            required_action="Approve the investigation",
+            priority="high",
+        ),
+        owner=7,
+    )
+    view = decision_view(decision)
+    for field in (
+        "id",
+        "title",
+        "situation",
+        "why_now",
+        "options",
+        "impact",
+        "risk",
+        "recommendation",
+        "evidence",
+        "missing_information",
+        "rollback",
+        "required_action",
+        "priority",
+        "risk_level",
+        "state",
+        "expires_at",
+        "category",
+        "actions",
+    ):
+        assert field in view
+    assert view["why_now"] == "Repeated failures"
+    assert view["required_action"] == "Approve the investigation"
+    assert view["impact"] == ["Failing work stops recurring"]
+    assert view["risk"] == ["Investigation cost"]
+    assert view["priority"] == "high"
+
+
+async def test_dashboard_console_renders_every_required_card_field():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
+        assert (await client.get("/dashboard")).status_code == 200
+        js = (await client.get("/dashboard/app.js")).text
+    for label in (
+        "Mengapa sekarang",
+        "Dampak",
+        "Risiko",
+        "Informasi kurang",
+        "Rollback",
+        "Keputusan yang diminta",
+        "Tenggat",
+    ):
+        assert label in js
+    for field in (
+        "why_now",
+        "impact",
+        "risk",
+        "missing_information",
+        "rollback",
+        "required_action",
+        "priority",
+        "expires_at",
+    ):
+        assert f"d.{field}" in js
 
 
 async def test_delegation_preserves_original_action_and_never_delegates_execution(db, monkeypatch):
