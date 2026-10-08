@@ -187,13 +187,31 @@ class Workspace:
     def list_files(self):
         return "\n".join(self.paths())[:30000]
 
-    def read_file(self, path):
+    def read_file(self, path, offset=None):
         target = self._safe_path(path)
         if not target.is_file():
             raise WorkspaceError("File not found")
         if target.stat().st_size > 100000:
             raise WorkspaceError("File too large; use search")
-        return redact(target.read_text(encoding="utf-8"))
+        content = target.read_text(encoding="utf-8")
+        if offset is None:
+            return redact(content)
+        # Line-window reads keep large-file edits possible: the developer prompt
+        # is capped, so an unwindowed read would hide everything past the cap.
+        lines = content.splitlines()
+        start = max(offset, 1)
+        if start > len(lines):
+            return f"[offset {start} beyond end of file; {len(lines)} lines total]"
+        window = []
+        used = 0
+        for line in lines[start - 1 : start + 199]:
+            if window and used + len(line) + 1 > 5500:
+                break
+            window.append(line)
+            used += len(line) + 1
+        end = start - 1 + len(window)
+        header = f"[lines {start}-{end} of {len(lines)}; use a larger offset to read the next window]"
+        return redact(header + "\n" + "\n".join(window))
 
     def _read_raw(self, path):
         """Read without redaction so edits operate on real bytes; writes stay fail-closed."""

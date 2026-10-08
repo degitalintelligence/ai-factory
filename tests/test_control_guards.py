@@ -24,7 +24,7 @@ class FakeContextWorkspace:
             ]
         )
 
-    def read_file(self, path):
+    def read_file(self, path, offset=None):
         content = {
             "README.md": "# LioBot\n",
             "AGENTS.md": "A" * 12000,
@@ -76,7 +76,7 @@ class FakeDeveloperWorkspace:
     def list_files(self):
         return "README.md\n"
 
-    def read_file(self, path):
+    def read_file(self, path, offset=None):
         assert path == "README.md"
         return "# Demo\n"
 
@@ -147,7 +147,7 @@ async def test_recovery_read_after_failed_replacements_prevents_false_stall(monk
         def __init__(self):
             self.source = "first edit\n"
 
-        def read_file(self, path):
+        def read_file(self, path, offset=None):
             if path == "README.md":
                 return self.source
             if path == "tests/test_todo.py":
@@ -520,7 +520,7 @@ async def test_failed_replacement_echo_is_capped_to_a_tail_excerpt(monkeypatch):
     tail_marker = "TAIL_MARKER_END"
 
     class Workspace(FakeDeveloperWorkspace):
-        def read_file(self, path):
+        def read_file(self, path, offset=None):
             if path == "README.md":
                 return f"{head_marker}\n{'x' * 3000}\n{tail_marker}\n"
             raise ValueError(path)
@@ -624,7 +624,7 @@ async def test_existing_file_whole_write_requires_reading_that_exact_path(monkey
         def list_files(self):
             return "README.md\ntests/test_todo.py\n"
 
-        def read_file(self, path):
+        def read_file(self, path, offset=None):
             if path == "README.md":
                 return "# Demo\n"
             if path == "tests/test_todo.py":
@@ -685,7 +685,7 @@ async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch
         def __init__(self):
             self.source = "old\n"
 
-        def read_file(self, path):
+        def read_file(self, path, offset=None):
             assert path == "README.md"
             return self.source
 
@@ -1007,7 +1007,7 @@ async def test_identical_stale_replacement_rolls_over_before_generic_stall(monke
         def __init__(self):
             self.source = "current source\n"
 
-        def read_file(self, path):
+        def read_file(self, path, offset=None):
             assert path == "README.md"
             return self.source
 
@@ -1145,7 +1145,7 @@ async def test_explicit_runtime_artifact_cleanup_unblocks_repair(monkeypatch):
         def list_files(self):
             return "README.md\ntodos.db\n" if self.artifact_exists else "README.md\n"
 
-        def read_file(self, path):
+        def read_file(self, path, offset=None):
             assert path == "README.md"
             return self.source
 
@@ -1317,7 +1317,7 @@ async def test_scope_guard_still_allows_tracked_artifact_cleanup(monkeypatch):
         def list_files(self):
             return "README.md\ntodos.db\n" if self.artifact_exists else "README.md\n"
 
-        def read_file(self, path):
+        def read_file(self, path, offset=None):
             assert path == "README.md"
             return self.source
 

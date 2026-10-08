@@ -3,6 +3,7 @@ import shutil
 import pytest
 
 from app.config import Project, Settings, settings
+from app.schemas import DeveloperAction
 from app.schemas import TestReport as Report
 from app.security import redact, secret_present, validate_path
 from app.workspace import WorkspaceError
@@ -96,6 +97,33 @@ def test_default_tests_does_not_pass_runner_specific_flags_to_node(repo, monkeyp
     monkeypatch.setattr(workspace, "run_commands", lambda commands: calls.append(commands) or Report())
     workspace.default_tests()
     assert calls[0][0] == ["npm", "test"]
+
+
+def test_read_file_offset_returns_line_window(repo):
+    workspace, _ = repo
+    workspace.write_file("big.py", "\n".join(f"line {n}" for n in range(1, 301)) + "\n")
+    assert "line 1" in workspace.read_file("big.py")
+    windowed = workspace.read_file("big.py", offset=280)
+    assert windowed.startswith("[lines 280-300 of 300")
+    assert "line 280" in windowed and "line 300" in windowed
+    assert "line 279" not in windowed
+    assert "beyond end of file" in workspace.read_file("big.py", offset=301)
+
+
+def test_read_file_offset_window_respects_char_budget(repo):
+    workspace, _ = repo
+    workspace.write_file("wide.py", ("x" * 200 + "\n") * 60)
+    windowed = workspace.read_file("wide.py", offset=1)
+    assert windowed.startswith("[lines 1-")
+    assert len(windowed) < 6000
+
+
+def test_developer_action_offset_is_read_file_only():
+    assert DeveloperAction(action="read_file", path="a.py", offset=5).offset == 5
+    with pytest.raises(ValueError, match="offset is only valid for read_file"):
+        DeveloperAction(action="list_files", offset=5)
+    with pytest.raises(ValueError):
+        DeveloperAction(action="read_file", path="a.py", offset=0)
 
 
 @pytest.mark.skipif(shutil.which("npm") is None, reason="npm is not installed")

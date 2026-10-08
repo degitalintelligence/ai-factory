@@ -62,9 +62,14 @@ class DeveloperAction(BaseModel):
     old_text: str | None = None
     command: str | None = None
     note: str | None = None
+    # 1-based start line for read_file windows; lets the developer page through
+    # large files instead of seeing only the first output-capped chunk.
+    offset: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def required_fields(self):
+        if self.offset is not None and self.action != "read_file":
+            raise ValueError("offset is only valid for read_file")
         if self.action in {"read_file", "write_file", "replace_text", "delete_file"} and not self.path:
             raise ValueError("path is required")
         if self.action in {"write_file", "replace_text", "search"} and self.content is None:

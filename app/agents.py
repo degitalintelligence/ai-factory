@@ -154,6 +154,8 @@ error (or read the file once when no excerpt is available), then change to a sma
 repeat a whole-function replacement with stale text. After any matches=0 failure, do not submit the same
 old_text again. Read the current path explicitly and use a small current anchor, or use write_file only after
 that exact existing path has been read. Preserve existing tests when adding new cases.
+read_file output is capped in the context: for large files pass offset (1-based start line) to page through
+later sections, e.g. {"action":"read_file","path":"app/workspace.py","offset":336}, before choosing anchors.
 Do not read a file you have just written in the same iteration: compose the next anchor from the content you
 wrote and reserve read_file for files you have not inspected yet. Repeated whole-file writes and re-reads of
 large files burn the task budget; prefer many small targeted replace_text edits.
@@ -405,7 +407,7 @@ async def developer_loop(
             try:
                 calls = {
                     "list_files": lambda: workspace.list_files(),
-                    "read_file": lambda: workspace.read_file(action.path),
+                    "read_file": lambda: workspace.read_file(action.path, action.offset),
                     "search": lambda: workspace.search(action.content),
                     "write_file": lambda: workspace.write_file(action.path, action.content),
                     "replace_text": lambda: workspace.replace_text(

@@ -17,7 +17,7 @@ class FakeWorkspace:
     def list_files(self):
         return self.files
 
-    def read_file(self, path):
+    def read_file(self, path, offset=None):
         if path == "README.md":
             return "# Demo\n"
         if path == "app/main.py":
@@ -150,7 +150,7 @@ async def test_standard_context_prioritizes_feature_specific_existing_tests(db, 
         def list_files(self):
             return self.files
 
-        def read_file(self, path):
+        def read_file(self, path, offset=None):
             content = {
                 "README.md": "# Telegram Lab\n",
                 "bot.py": "async def todo(): pass\n",
