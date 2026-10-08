@@ -58,11 +58,22 @@ def top_level_definition_counts(content):
     return counts
 
 
+CREDENTIAL_FIXTURE_MARKER = "credential-fixture"
+
+
 def credential_scan_content(path, content):
-    """Ignore only explicit local/CI fixture lines in the repository's own CI workflow."""
-    if path != ".github/workflows/ci.yml":
+    """Strip lines that explicitly declare themselves as credential fixtures.
+
+    The repository's own CI workflow keeps its historical ci-only markers; tests/ and
+    docs/ files opt in line-by-line with the explicit fixture marker. Any other path
+    stays fail-closed even when it carries the marker.
+    """
+    if path == ".github/workflows/ci.yml":
+        safe_markers = ("ci-only", "factory_ci")
+    elif path.startswith(("tests/", "docs/")):
+        safe_markers = (CREDENTIAL_FIXTURE_MARKER,)
+    else:
         return content
-    safe_markers = ("ci-only", "factory_ci")
     return "\n".join(
         line for line in content.splitlines() if not any(marker in line for marker in safe_markers)
     )
@@ -195,7 +206,7 @@ class Workspace:
 
     def write_file(self, path, content):
         target = self._safe_path(path)
-        if len(content.encode()) > 200000 or secret_present(content):
+        if len(content.encode()) > 200000 or secret_present(credential_scan_content(path, content)):
             raise WorkspaceError("File too large or contains credentials")
         if target.suffix == ".py":
             current_counts = {}

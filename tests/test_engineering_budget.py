@@ -82,6 +82,41 @@ def test_explicit_budget_stays_binding_on_retry_readmission(constraint):
     assert accounting["explicit_budget"] and accounting["readmit"] and accounting["issues"]
 
 
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Self-improvement: Repeated budget failure in 17 tasks",
+        "Budget untuk pengeluaran model harus dipantau.",
+        "Kurangi jumlah panggilan LLM tanpa menurunkan kualitas.",
+        "Pantau penggunaan token dan biaya USD pada setiap iterasi.",
+    ],
+)
+def test_budget_prose_without_amount_stays_adjustable(prose):
+    """Regression (tasks #81/#82): prose that merely mentions budget, panggilan, token,
+    or USD made the default envelope binding, so fresh admission could not re-fund the
+    plan inside operator ceilings and the task failed with BudgetExceeded. Explicit
+    budget detection now requires an amount bound to the budget vocabulary."""
+    fixture = task_52()
+    plan, accounting = admit(fixture, requirement=fixture["requirement"] + " " + prose)
+    assert accounting["explicit_budget"] is False
+    assert plan.budget.max_llm_calls == accounting["execution_calls"]
+    assert not accounting["issues"]
+
+
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        "Maksimal 20 panggilan, tidak lebih.",
+        "USD 500 untuk seluruh task.",
+        "50000 token total, jangan lebih.",
+    ],
+)
+def test_amount_bound_budget_forms_stay_explicit(constraint):
+    fixture = task_52()
+    _, accounting = admit(fixture, requirement=fixture["requirement"] + " " + constraint)
+    assert accounting["explicit_budget"] and accounting["issues"]
+
+
 def test_saved_plan_remains_exact_and_is_not_reallocated():
     fixture = task_52()
     original = LeadPlan.model_validate(fixture["plan"])

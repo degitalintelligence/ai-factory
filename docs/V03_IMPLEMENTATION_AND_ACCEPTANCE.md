@@ -201,7 +201,11 @@ lived outside git; all evidence below is durable server-side at the cited task e
 Outstanding at acceptance time (tracked, not silently dropped):
 
 - Release gate 5 — one approved sandbox self-improvement end to end — is not yet
-  demonstrated. It is blocked on the OPEN operator decision to register the ai-factory
+  demonstrated. The credential-scan false positives that blocked every self-improvement
+  task (budget prose without an amount in `engineering_budget.py`; fixture credentials
+  in test files) were remediated directly on 2026-10-08 per Dedi's decision to fix both
+  gates in the repo instead of dogfooding; the fixes take effect on the next redeploy.
+  Gate 5 also depends on the OPEN operator decision to register the ai-factory
   self-target alias (AGENTS.md §19). Until then this record covers the gates that do
   not require self-editing.
 - Live channel parity was exercised for clarification, plan approval and the budget

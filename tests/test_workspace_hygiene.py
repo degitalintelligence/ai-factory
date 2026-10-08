@@ -1,6 +1,6 @@
 import os
 
-os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/test")
+os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://user:pass@localhost/test")  # credential-fixture
 os.environ.setdefault("OPENROUTER_API_KEY", "test")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:test")
 os.environ.setdefault("GITHUB_TOKEN", "test")

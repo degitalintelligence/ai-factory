@@ -166,10 +166,10 @@ async def test_locked_memory_needs_an_owner_to_retract(db):
 
 async def test_secrets_never_enter_memory(db):
     with pytest.raises(ValueError, match="Remove credentials"):
-        await remember(item(value="token ghp_abcdefghijklmnopqrstuvwxyz0123456789"))
+        await remember(item(value="token ghp_abcdefghijklmnopqrstuvwxyz0123456789"))  # credential-fixture
     with pytest.raises(ValueError, match="Remove credentials"):
         stored = await remember(item(value="safe"))
-        await db.correct_memory(stored.id, "sk-proj-1234567890abcdef", source="leak")
+        await db.correct_memory(stored.id, "sk-proj-1234567890abcdef", source="leak")  # credential-fixture
     assert (await db.recall(role="lead"))[0][0].value == "safe"
 
 
@@ -347,9 +347,11 @@ async def test_another_tenant_cannot_correct_or_retract_a_memory(db):
 
 async def test_credentials_in_provenance_fields_are_refused(db):
     with pytest.raises(ValueError, match="Remove credentials"):
-        await remember(item(source="requirements section 17 api_key=abcd1234efgh5678"))
+        await remember(item(source="requirements section 17 api_key=abcd1234efgh5678"))  # credential-fixture
     with pytest.raises(ValueError, match="Remove credentials"):
-        await remember(item(evidence_ref="https://example.test/x?token=abcd1234efgh5678"))
+        await remember(
+            item(evidence_ref="https://example.test/x?token=abcd1234efgh5678")  # credential-fixture
+        )
 
 
 # --- Dedi's lock action ---------------------------------------------------------

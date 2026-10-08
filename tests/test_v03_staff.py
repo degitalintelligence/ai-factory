@@ -965,7 +965,7 @@ async def test_real_gateway_review_retry_is_funded_and_invalid_review_never_comp
         llm,
         "AsyncOpenAI",
         lambda **kwargs: AsyncOpenAI(
-            api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
         ),
     )
     monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")
@@ -1163,7 +1163,7 @@ async def test_factual_gateway_retries_invalid_json_without_planner(db, monkeypa
         llm,
         "AsyncOpenAI",
         lambda **kwargs: AsyncOpenAI(
-            api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
         ),
     )
     monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")
@@ -1375,7 +1375,7 @@ async def test_staff_audit_gateway_compact_output_and_truncation(db, monkeypatch
         llm,
         "AsyncOpenAI",
         lambda **kwargs: AsyncOpenAI(
-            api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
         ),
     )
     monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")

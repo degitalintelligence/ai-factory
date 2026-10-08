@@ -54,7 +54,7 @@ def test_tracked_db_and_secrets_block_snapshot(repo, monkeypatch):
     workspace.delete_file("data.db")
     monkeypatch.setattr(settings, "github_token", "my-private-github-credential")
     with pytest.raises(WorkspaceError, match="credentials"):
-        workspace.write_file("secret.py", 'TOKEN = "my-private-github-credential"')
+        workspace.write_file("secret.py", 'TOKEN = "my-private-github-credential"')  # credential-fixture
     assert "my-private-github-credential" not in redact("failed: my-private-github-credential")
 
 
@@ -146,9 +146,9 @@ def test_task_55_shell_environment_attempts_remain_blocked_with_actionable_feedb
 
 
 def test_url_embedded_credentials_are_redacted():
-    leaked = "postgres://operator:s3cret-password@db.internal:5432/prod"
+    leaked = "postgres://operator:s3cret-password@db.internal:5432/prod"  # credential-fixture
     assert "s3cret-password" not in redact(leaked)
-    assert secret_present("redis://cache:hunter2@cache.internal/0")
+    assert secret_present("redis://cache:hunter2@cache.internal/0")  # credential-fixture
     # Ordinary URLs without credentials stay untouched.
     assert redact("docs at https://example.com/guide") == "docs at https://example.com/guide"
 
@@ -158,7 +158,10 @@ def test_replace_text_edits_real_bytes_and_stays_fail_closed(repo, monkeypatch):
     workspace, _ = repo
     monkeypatch.setattr(settings, "github_token", "my-private-github-credential")
     target = workspace.path / "config.py"
-    target.write_text('TOKEN = "my-private-github-credential"\nANSWER = 1\n', encoding="utf-8")
+    target.write_text(
+        'TOKEN = "my-private-github-credential"\nANSWER = 1\n',  # credential-fixture
+        encoding="utf-8",
+    )
     # Model-facing reads stay redacted.
     assert "my-private-github-credential" not in workspace.read_file("config.py")
     # Editing a clean line must not silently write a redacted copy of the secret.
@@ -201,12 +204,12 @@ def test_project_repo_accepts_an_ordinary_owner_and_name():
 @pytest.mark.parametrize(
     "leaked",
     [
-        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
-        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij",
-        "password = hunter2hunter2",
-        "glpat-ABCDEFGHIJKLMNOPQRST",
-        "xoxb-1234567890-abcdefghijkl",
-        "AIzaSyA1234567890abcdefghijklmnopqrstuv",
+        "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",  # credential-fixture
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij",  # credential-fixture
+        "password = hunter2hunter2",  # credential-fixture
+        "glpat-ABCDEFGHIJKLMNOPQRST",  # credential-fixture
+        "xoxb-1234567890-abcdefghijkl",  # credential-fixture
+        "AIzaSyA1234567890abcdefghijklmnopqrstuv",  # credential-fixture
     ],
 )
 def test_common_credential_shapes_are_redacted(leaked):
@@ -255,6 +258,22 @@ def test_ci_fixture_lines_do_not_block_snapshot_but_real_credentials_still_do(re
     )
     with pytest.raises(WorkspaceError, match="Credential detected"):
         workspace.snapshot()
+
+
+def test_credential_fixture_marker_allows_tests_and_docs_but_stays_fail_closed_elsewhere(repo):
+    workspace, _ = repo
+    fixture = 'TOKEN = "my-private-github-credential"  # credential-fixture\n'
+    workspace.write_file("tests/sample_fixture.py", fixture)
+    workspace.write_file("docs/sample_fixture.txt", fixture)
+    workspace.snapshot()
+
+    # Without the marker the same content is still rejected in tests/.
+    bare = fixture.replace("  # credential-fixture", "")
+    with pytest.raises(WorkspaceError, match="credentials"):
+        workspace.write_file("tests/sample_other.py", bare)
+    # The marker never exempts paths outside tests/ and docs/.
+    with pytest.raises(WorkspaceError, match="credentials"):
+        workspace.write_file("app/sample_fixture.py", fixture)
 
 
 def test_python_mutation_rejects_new_duplicate_top_level_definitions(repo):

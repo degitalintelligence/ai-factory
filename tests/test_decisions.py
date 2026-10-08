@@ -153,13 +153,13 @@ async def test_inbox_filters_by_state_and_project_across_tasks(db):
 async def test_secrets_in_a_card_are_redacted_before_storage(db):
     await raise_decision(
         card(
-            situation="token ghp_abcdefghijklmnopqrstuvwxyz0123456789 leaked",
-            evidence=["key sk-proj-1234567890abcdef"],
+            situation="token ghp_abcdefghijklmnopqrstuvwxyz0123456789 leaked",  # credential-fixture
+            evidence=["key sk-proj-1234567890abcdef"],  # credential-fixture
         )
     )
     stored = (await decision_inbox())[0]
-    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in stored.situation
-    assert "sk-proj-1234567890abcdef" not in stored.evidence_json
+    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in stored.situation  # credential-fixture
+    assert "sk-proj-1234567890abcdef" not in stored.evidence_json  # credential-fixture
     assert "[REDACTED]" in stored.situation
 
 

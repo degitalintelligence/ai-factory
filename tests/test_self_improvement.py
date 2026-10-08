@@ -174,7 +174,7 @@ async def test_a_repeated_outcome_is_one_action_and_a_revised_one_is_refused(db)
 
 async def test_outcome_rejects_a_secret_in_the_measurement(db):
     task = await completed_self_improvement(db)
-    leak = outcome(after="token ghp_ABCDEFGHIJKLMNOPQRSTUVWX leaked into logs")
+    leak = outcome(after="token ghp_ABCDEFGHIJKLMNOPQRSTUVWX leaked into logs")  # credential-fixture
     with pytest.raises(ValueError, match="credentials"):
         await db.record_outcome(task.id, leak)
     # Nothing was recorded: no artifact, no event, no lesson.

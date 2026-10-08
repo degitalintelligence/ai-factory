@@ -598,7 +598,7 @@ async def test_rejected_audit_drafts_are_redacted_and_retained_for_diagnostics(d
     task = await goal(db)
     fake_github(monkeypatch)
     await db.claim("worker")
-    secret = "sk-or-v1-" + "a" * 64
+    secret = "sk-or-v1-" + "a" * 64  # credential-fixture
 
     async def complete(*, schema, **kwargs):
         if schema is ResolvedIntent:

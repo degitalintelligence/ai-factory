@@ -104,7 +104,7 @@ async def test_invalid_json_retry_charges_usage_and_returns_valid_plan(db, monke
         )
 
     client = AsyncOpenAI(
-        api_key="placeholder",
+        api_key="test",
         base_url="https://openrouter.ai/api/v1",
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
@@ -152,7 +152,7 @@ def mock_completions(monkeypatch, responses):
         )
 
     client = AsyncOpenAI(
-        api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
     )
     monkeypatch.setattr(llm, "AsyncOpenAI", lambda **kwargs: client)
     monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")

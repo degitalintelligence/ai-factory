@@ -32,7 +32,7 @@ def mock_completions(monkeypatch, responses):
         )
 
     client = AsyncOpenAI(
-        api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
     )
     monkeypatch.setattr(llm, "AsyncOpenAI", lambda **kwargs: client)
     monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")
@@ -90,7 +90,7 @@ async def test_provider_failure_is_recorded_without_response_body_or_credentials
         return httpx.Response(401, json={"error": {"message": "invalid api key sk-live-SECRETVALUE"}})
 
     client = AsyncOpenAI(
-        api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
     )
     monkeypatch.setattr(llm, "AsyncOpenAI", lambda **kwargs: client)
     monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")
@@ -161,7 +161,7 @@ async def test_unreported_cost_is_marked_incomplete_on_the_call_record(db, monke
         )
 
     client = AsyncOpenAI(
-        api_key="placeholder", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        api_key="test", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
     )
     monkeypatch.setattr(llm, "AsyncOpenAI", lambda **kwargs: client)
     monkeypatch.setattr(settings, "openrouter_api_key", "placeholder")

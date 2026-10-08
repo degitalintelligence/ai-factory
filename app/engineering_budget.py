@@ -13,6 +13,22 @@ DEVELOPER_BASELINE_CALLS = 7
 REVIEW_CALLS_PER_ITERATION = 1
 SCHEMA_RETRY_MARGIN_CALLS = 2
 
+# A budget constraint is explicit only when an amount is bound to budget vocabulary:
+# "Budget maksimal 30000 token", "At most 20 calls", "$0.50", "USD 500", "50000 token".
+# Prose that merely mentions budget/calls/tokens/USD without any amount (regression:
+# tasks #81/#82, "Repeated budget failure in 17 tasks") must stay adjustable so the
+# admission can re-fund fresh plans inside operator ceilings.
+_EXPLICIT_BUDGET_RE = re.compile(
+    r"\b(?:budget|anggaran)\b\s*(?:batas|maksimal|max|limit|total)?\s*[:=]?\s*\d[\d.,]*"
+    r"|(?:batas|maksimal|max|limit|total|at\s+most|up\s+to|no\s+more\s+than|<=|<)\s*[:=]?\s*"
+    r"[\d.,_ ]*?\d[\d.,]*\s*(?:k\b)?\s*(?:tokens?|calls?|panggilan|usd)\b"
+    r"|\$\s*\d[\d.,]*"
+    r"|\busd\b\s*[\d.,]*\d"
+    r"|\b\d[\d.,]*\s*(?:k\b)?\s*usd\b"
+    r"|\b\d\d[\d.,]*\s*(?:k\b)?\s*(?:tokens?|calls?|panggilan)\b",
+    re.I,
+)
+
 
 def engineering_iteration_step_limit(
     *, current_calls: int, max_calls: int, iteration: int, max_iterations: int
@@ -50,7 +66,7 @@ def engineering_budget_admission(
     reservations remain enforced by the store. Lifetime usage is never reset.
     """
     estimate = plan.budget.model_dump()
-    explicit = bool(re.search(r"\b(?:budget|anggaran|calls?|panggilan|tokens?|usd)\b|\$", requirement, re.I))
+    explicit = bool(_EXPLICIT_BUDGET_RE.search(requirement))
     adjustable = (fresh or readmit) and not explicit
     admitted = plan.model_copy(deep=True)
     minimum_calls = used_calls + DEVELOPER_BASELINE_CALLS + 1

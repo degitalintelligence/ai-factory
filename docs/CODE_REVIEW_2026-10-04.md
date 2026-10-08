@@ -459,7 +459,8 @@ aware of this class of bug and guarded one field but not the other. `policy.repo
 `app/store.py:601-620`.*
 
 `SECRET_PATTERNS` contains exactly five entries: PEM private keys, GitHub tokens, `sk-…`,
-Telegram bot tokens, and `scheme://user:pass@host`. There is **no** pattern for a generic
+Telegram bot tokens, and URL authority credentials (a `user:password` pair before the
+host in connection strings). There is **no** pattern for a generic
 `Authorization: Bearer …` header, AWS `AKIA…`, GCP JSON keys, Azure tokens, Slack
 `xoxb-…`, or Stripe `sk_live_…`. `AGENTS.md` §12 requires redacting "recognizable
 credential patterns"; no test asserts behaviour for any family outside the five.

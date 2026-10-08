@@ -25,7 +25,7 @@ SECRET_PATTERNS = [
     r"\bdop_v1_[a-f0-9]{64}\b",
     r"\b(?:eyJ[A-Za-z0-9_-]{10,}\.){2}[A-Za-z0-9_-]{10,}\b",  # JWT
     r"\b\d{8,12}:[A-Za-z0-9_-]{30,}\b",
-    # scheme://user:password@host — credentials embedded in connection strings.
+    # URL authority credentials — a user:password pair before the host (connection strings).
     r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@",
     # key=value pairs for any credential-bearing setting name. The value must look like a
     # literal credential: no whitespace, at least 8 characters, and not a code lookup.
