@@ -10,6 +10,7 @@ from sqlalchemy import or_, select
 
 from app.chat import converse
 from app.config import settings
+from app.conversations import _effective_task, history
 from app.db import (
     Artifact,
     AuditLog,
@@ -22,10 +23,12 @@ from app.db import (
 )
 from app.deployment import DeploymentService
 from app.github_api import GitHubAPI
-from app.schemas import ImprovementOutcome, MemoryWrite, SelfImprovementBrief
+from app.metrics import task_outcomes
+from app.schemas import ClarificationRequest, ImprovementOutcome, MemoryWrite, SelfImprovementBrief
 from app.staff import audit, detect_improvements
 from app.staff_schemas import ChatRequest, DeploymentReconciliation, RollbackConfirmation
 from app.store import store
+from app.version import VERSION
 
 
 class MemoryCorrection(BaseModel):
@@ -72,6 +75,41 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    @router.get("/v1/release-manifest")
+    async def release_manifest(actor=Depends(authorize)):
+        return {
+            "version": VERSION,
+            "release_sha": settings.release_sha or None,
+            "sha_authority": "Operator-configured attestation; not independent image verification.",
+            "tenant": settings.tenant_id,
+            "models": {
+                role: {"alias": settings.configured_model(role), "resolved": settings.model_for(role)}
+                for role in ("lead", "developer", "reviewer")
+            },
+            "projects": {alias: policy.model_dump() for alias, policy in settings.projects().items()},
+            "self_project": settings.self_project,
+            "self_improvement_enabled": settings.self_improvement_enabled,
+            "operator_budget": {
+                "calls": settings.max_llm_calls,
+                "tokens": settings.max_total_tokens,
+                "cost_usd": settings.max_cost_usd,
+            },
+            "daily_budget": {
+                "calls": settings.global_max_llm_calls_per_day,
+                "reserved_tokens": settings.global_max_tokens_per_day,
+                "cost_usd": settings.global_max_cost_usd_per_day,
+            },
+            "release_status": "implementation_candidate",
+            "live_gates": [
+                "same-SHA CI",
+                "10 bounded live objectives with >=8 operator-accepted outcomes",
+                "live channel decisions/memory parity",
+                "restart persistence",
+                "measured self-improvement and staging rollback",
+                "exact-SHA release approval",
+            ],
+        }
+
     @router.get("/v1/overview")
     async def overview(project: str = "", actor=Depends(authorize)):
         async with store.sessions() as s:
@@ -89,8 +127,29 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
             if project:
                 dq = dq.where(Decision.project == project)
             decisions = list(await s.scalars(dq.order_by(Decision.id.desc()).limit(100)))
+            views = []
+            for task in tasks:
+                view = task_view(task)
+                try:
+                    effective = await _effective_task(s, task, actor)
+                except ValueError:
+                    view.update(
+                        effective_status="handoff_unverified",
+                        summary="Engineering handoff unavailable in this scope",
+                        next_action="Verifikasi referensi handoff.",
+                    )
+                    views.append(view)
+                    continue
+                if effective.id != task.id:
+                    view.update(
+                        handoff_task_id=effective.id,
+                        effective_status=effective.status,
+                        summary=effective.last_message,
+                        next_action=f"Pantau task engineering #{effective.id}.",
+                    )
+                views.append(view)
         return {
-            "tasks": [task_view(t) for t in tasks],
+            "tasks": views,
             "decisions": [decision_view(d) for d in decisions],
             "projects": [{"id": k, "repo": v.repo} for k, v in settings.projects().items()],
             "summary": f"{sum(d.state == 'open' for d in decisions)} keputusan terbuka; {sum(t.status == 'failed' for t in tasks)} pekerjaan perlu ditinjau.",
@@ -100,6 +159,21 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
             "evidence_refs": [f"task:{t.id}" for t in tasks[:10]],
             "risk": "unknown",
         }
+
+    @router.get("/v1/conversations/{conversation_id}")
+    async def conversation_history(conversation_id: str, actor=Depends(authorize)):
+        try:
+            return await history(conversation_id, actor)
+        except ValueError as exc:
+            raise HTTPException(404, "Conversation not found") from exc
+
+    @router.post("/v1/decisions/{decision_id}/clarification")
+    async def clarification_answer(decision_id: int, request: ClarificationRequest, actor=Depends(authorize)):
+        try:
+            task = await store.answer_clarification(decision_id, request.answer, actor)
+            return task_view(task)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @router.get("/v1/intents/{task_id}/result")
     async def result(task_id: int, actor=Depends(authorize)):
@@ -119,6 +193,14 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
             )
             ids = [t.id for t in tasks]
             runs = list(await s.scalars(select(ModelRun).where(ModelRun.task_id.in_(ids))))
+            artifacts = list(
+                await s.scalars(
+                    select(Artifact).where(
+                        Artifact.task_id.in_(ids),
+                        Artifact.kind.in_({"engineering_handoff", "improvement_outcome"}),
+                    )
+                )
+            )
             audits = list(
                 await s.scalars(
                     select(AuditLog)
@@ -136,8 +218,7 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
             ]
         return {
             "tasks": len(tasks),
-            "success_rate": sum(t.status in {"completed", "reviewed", "deployed"} for t in tasks)
-            / max(1, len(tasks)),
+            **task_outcomes(tasks, artifacts),
             "calls": len(runs),
             "tokens": sum(r.tokens for r in runs),
             "reported_cost_usd": sum(r.cost_usd or 0 for r in runs),

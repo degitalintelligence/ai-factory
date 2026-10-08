@@ -1,4 +1,4 @@
-# AI Factory V0.2
+# AI Factory / LioBot
 
 An operating engine for building software from Telegram requirements: **repository-aware planning → implementation → isolated tests → independent review → repair → GitHub PR → explicit publication or commit-bound Coolify deployment**.
 
@@ -7,19 +7,19 @@ engineering engine. `telegram-lab` is a test/acceptance harness only; it is not 
 second LioBot product. Quant Factory, Kedaya, and other business products remain
 separate registered repositories and runtimes.
 
-## LioBot Core v0.3 direction
+## Current release and v0.4 candidate
 
-The v0.2 engine is the guarded execution foundation. The v0.3 requirements are
-tracked in [docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md](docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md)
-and are delivered by milestone, not by weakening the v0.2 gates.
+v0.3 has an operator acceptance record; its Chief of Staff layer, skill DAG,
+Decision Inbox, provenance memory and guarded engineering workflow are implemented.
+The v0.4 implementation candidate adds durable conversation routing, clarification
+cards, rendered budget preflight and truthful handoff/outcome reporting.
 
-M1 currently adds channel-neutral intent/plan API aliases, a bounded skill
-registry, explicit plan assumptions/dependencies/skills/budget/approval gates,
-configurable `bunny-alpha` model alias resolution, and actionable budget
-warnings. Context/memory, Decision Inbox, and self-improvement contracts already
-present in v0.2 remain the source of truth for later M2–M4 work. Telegram is
-still only an adapter and `telegram-lab` remains the acceptance harness.
-
+**v0.4 is not yet a production release.** Live objectives, channel parity,
+restart/rollback, a measured self-improvement and a real product pilot need acceptance
+on the same candidate SHA. See [the implementation and acceptance runbook](docs/V04_IMPLEMENTATION_AND_ACCEPTANCE.md)
+and [the approved implementation plan](docs/AI_FACTORY_V0_4_PLAN.md).
+Nonengineering domains provide analysis/drafts; external business actions require
+registered tools and explicit policy. The model and approval boundaries remain binding.
 
 ## What works
 

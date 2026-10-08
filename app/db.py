@@ -131,6 +131,39 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class Conversation(Base):
+    """An owner/project-bound thread; its identity never grants task permissions."""
+
+    __tablename__ = "conversations"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(120), index=True)
+    owner: Mapped[int] = mapped_column(BigInteger, index=True)
+    project: Mapped[str] = mapped_column(String(40), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ChatTurn(Base):
+    """A durable idempotent response; action receipts commit with resume effects."""
+
+    __tablename__ = "chat_turns"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id"), index=True)
+    request_key: Mapped[str] = mapped_column(String(64), unique=True)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    message: Mapped[str] = mapped_column(Text)
+    task_id: Mapped[int | None] = mapped_column(ForeignKey("tasks.id"), index=True)
+    response_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class TelegramReference(Base):
+    __tablename__ = "telegram_references"
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    tenant: Mapped[str] = mapped_column(String(120), index=True)
+    owner: Mapped[int] = mapped_column(BigInteger)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+
+
 class Subtask(Base):
     __tablename__ = "subtasks"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -377,6 +410,12 @@ MIGRATIONS = (
         "0004_unique_subtask",
         "One durable work item per intent and key.",
         "CREATE UNIQUE INDEX IF NOT EXISTS ux_subtask ON subtasks (task_id, key, plan_hash)",
+    ),
+    (
+        "0005_single_open_clarification",
+        "One open clarification card per task; recovery cannot duplicate its question.",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_decision_open_clarification "
+        "ON decisions (task_id) WHERE state = 'open' AND category = 'clarification_needed'",
     ),
 )
 

@@ -35,6 +35,7 @@ from app.config import settings
 from app.db import (
     Artifact,
     AuditLog,
+    DailyBudget,
     Decision,
     Event,
     ImprovementProposal,
@@ -50,6 +51,15 @@ from app.llm import json_completion, run_context, subtask_context
 from app.schemas import CLEARANCE, DecisionRequest, SelfImprovementBrief
 from app.security import redact, secret_present
 from app.skills import SKILLS, select_skills
+from app.staff_budget import (
+    context_payload,
+    final_output_prompt,
+    final_review_prompt,
+    select_context,
+    skill_output_prompt,
+    skill_review_prompt,
+    workflow_envelope,
+)
 from app.staff_schemas import (
     ChatRequest,
     CompactStaffOutput,
@@ -408,6 +418,31 @@ async def assemble_context(task: Task) -> list[ContextItem]:
                     content=redact(json.dumps(evidence))[:4000],
                 )
             )
+        if not scoped_audit and not focused:
+            for row in tasks:
+                if row.id not in task_refs:
+                    continue
+                saved = await s.scalar(
+                    select(Artifact)
+                    .where(Artifact.task_id == row.id, Artifact.kind == "staff_result")
+                    .order_by(Artifact.id.desc())
+                    .limit(1)
+                )
+                if saved:
+                    items.append(
+                        ContextItem(
+                            ref=f"task:{row.id}:draft",
+                            source="previous_generated_draft",
+                            scope=row.project,
+                            owner=row.user_id,
+                            created_at=saved.created_at.isoformat(),
+                            confidence=0.5,
+                            label="unverified",
+                            content=(
+                                "Derived draft for explicit revision; not primary evidence: " + saved.content
+                            )[:4000],
+                        )
+                    )
         if focused:
             # Same policy/tenant/owner/project filters as normal context. No unrelated
             # history, memory, decisions, or repository requests for this contract.
@@ -580,11 +615,9 @@ def validate_output(output: StaffOutput, context: list[ContextItem]) -> list[str
     return list(dict.fromkeys(issues))
 
 
-async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
-    if secret_present(user):
-        raise ValueError("Credentials cannot enter a model prompt")
-    context = run_context.get()
-    if context and (await store.budget_status(context[0]))["utilization"] >= 0.8:
+def render_staff_prompt(schema, user: str, *, degraded: bool = False):
+    """One renderer shared by preflight estimates and actual provider calls."""
+    if degraded:
         user += "\nBudget degradation: keep findings and drafts short; avoid optional expansion. Do not omit evidence or review."
     if schema is ResolvedIntent:
         user += "\nKeep the intent JSON under 1500 characters. Objective and outcome each one sentence; at most 3 short scope items. Do not write the audit findings or repeat supplied evidence in intent fields. Use evidence_gaps for absent proof."
@@ -598,13 +631,23 @@ async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
     elif schema is OutputEvaluation:
         user += "\nCheck entailment for EACH material claim against the CONTENT of its cited refs, not merely ref existence or another review's approval. Reject a token-truncation claim citing only a completed task or a confidence rejection. Reject budget-exhaustion claims supported only by budget warnings. Treat prior generated conclusions as hypotheses, never independent confirmation; unavailable live evidence in this context is only a bounded evidence gap."
         user += "\nReview the submitted answer, not the health of the system it audits. Audit findings are not review issues merely because they describe failures. issues contains only defects requiring correction in this answer: identify the exact claim, why it violates evidence or scope, and the correction needed. Distinguish supported observations, labelled hypotheses and evidence gaps. Reject unsupported generalizations; missing live acceptance proof is a limitation, not proof of production failure. Return approved=true with issues=[] when the answer satisfies the objective, otherwise approved=false with concrete issues. Keep JSON under 1800 characters, at most 3 issues and a one-sentence verdict. Do not rewrite the answer or repeat its findings."
+    system = REPOSITORY_AUDIT_BOUNDARY if "repository_audit_scope" in user else STAFF_BOUNDARY
+    return schema, system, user
+
+
+async def complete(*, schema, role: str, user: str, max_attempts: int = 3):
+    if secret_present(user):
+        raise ValueError("Credentials cannot enter a model prompt")
+    context = run_context.get()
+    degraded = bool(context and (await store.budget_status(context[0]))["utilization"] >= 0.8)
+    schema, system, user = render_staff_prompt(schema, user, degraded=degraded)
     output = await json_completion(
         model=settings.model_for(role),
         role=role,
         schema=schema,
-        prompt_version="staff-v03-17",
+        prompt_version="staff-v04-1",
         max_attempts=max_attempts,
-        system=REPOSITORY_AUDIT_BOUNDARY if "repository_audit_scope" in user else STAFF_BOUNDARY,
+        system=system,
         user=user,
     )
     if secret_present(output.model_dump_json()):
@@ -634,8 +677,11 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
 
     async def transition(status, message):
         await store.check(task_id, owner)
-        await store.update(task_id, owner, status=status, last_message=message)
-        await store.event(task_id, status, message)
+        if status == "waiting_input":
+            await store.wait_for_clarification(task_id, owner, message)
+        else:
+            await store.update(task_id, owner, status=status, last_message=message)
+            await store.event(task_id, status, message)
         await deliver(f"LioBot — tujuan #{task_id}\n{redact(message)}")
 
     async def checkpoint(kind, content):
@@ -1165,6 +1211,56 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                     f"Revised plan cannot fit: {current.llm_calls} calls used + {required_calls} required; "
                     f"limit {limits['max_llm_calls']}. No execution approval requested."
                 )
+        admission_task = await store.get(task_id)
+        limits = store.budget_envelope(admission_task)
+        execution_hash = hashlib.sha256((requirement_hash + plan.model_dump_json()).encode()).hexdigest()
+        async with store.sessions() as session:
+            completed_keys = set(
+                await session.scalars(
+                    select(Subtask.key).where(
+                        Subtask.task_id == task_id,
+                        Subtask.plan_hash == execution_hash,
+                        Subtask.status == "completed",
+                    )
+                )
+            )
+            daily = await session.get(DailyBudget, f"{task.tenant}:{utcnow().date().isoformat()}")
+        envelope = workflow_envelope(
+            plan,
+            task.requirement,
+            context,
+            output_rules,
+            output_schema,
+            render_staff_prompt,
+            completed=completed_keys,
+            final_calls=final_calls,
+            full_context=evidence_audit or bool(factual),
+            compact_context=readonly_repository_audit(task.requirement),
+        )
+        envelope.update(
+            used_tokens=admission_task.tokens,
+            limits=limits,
+            daily_reserved_tokens=daily.reserved_tokens if daily else 0,
+            daily_token_limit=settings.global_max_tokens_per_day,
+        )
+        await checkpoint("workflow_budget_envelope", json.dumps(envelope))
+        remaining_tokens = limits["max_total_tokens"] - admission_task.tokens
+        if (
+            envelope["max_single_reservation"] > remaining_tokens
+            or envelope["estimated_tokens"] > remaining_tokens
+        ):
+            raise BudgetExceeded(
+                "Plan token preflight cannot fit mandatory output/review/finalization; "
+                f"used={admission_task.tokens}, estimated_remaining={envelope['estimated_tokens']}, "
+                f"largest_reserve={envelope['max_single_reservation']}, limit={limits['max_total_tokens']}. "
+                "Narrow the objective/context; no execution approval requested and no budget was widened."
+            )
+        if (daily.reserved_tokens if daily else 0) + envelope[
+            "planned_mandatory_daily_reservations"
+        ] > settings.global_max_tokens_per_day:
+            raise BudgetExceeded(
+                "Tenant daily token preflight cannot fit mandatory workflow reservations; no execution started"
+            )
         if (
             intent.risk_level == "high"
             or plan.risk == "high"
@@ -1232,6 +1328,31 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                             Subtask.plan_hash == execution_hash,
                         )
                     )
+                dependency_refs = {
+                    ref
+                    for d in step.dependencies
+                    for finding in done[d].findings
+                    for ref in finding.evidence_refs
+                }
+                step_context = select_context(
+                    context, step.objective, dependency_refs, complete=evidence_audit or bool(factual)
+                )
+                step_context_json = context_payload(
+                    step_context, compact=readonly_repository_audit(task.requirement)
+                )
+                await checkpoint(
+                    "step_context_manifest",
+                    json.dumps(
+                        {
+                            "step_id": step.id,
+                            "refs": [i.ref for i in step_context],
+                            "omitted_refs": [i.ref for i in context if i not in step_context],
+                            "dependency_refs": sorted(dependency_refs),
+                            "source": "authorized persisted context",
+                            "plan_hash": execution_hash,
+                        }
+                    ),
+                )
                 if row.status == "completed":
                     output = output_schema.model_validate_json(row.output_json)
                 else:
@@ -1258,7 +1379,15 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         schema=output_schema,
                         role="developer",
                         max_attempts=output_attempts,
-                        user=f"{output_rules}\nSKILL:{step.skill}; objective:{task.requirement if readonly_repository_audit(task.requirement) else step.objective}\nCONTEXT:{context_json}\nDEPENDENCIES:{json.dumps({d: done[d].model_dump() for d in step.dependencies})}",
+                        user=skill_output_prompt(
+                            output_rules,
+                            step.skill,
+                            task.requirement
+                            if readonly_repository_audit(task.requirement)
+                            else step.objective,
+                            step_context_json,
+                            {d: done[d].model_dump() for d in step.dependencies},
+                        ),
                     )
                     if evidence_audit and not readonly_repository_audit(task.requirement):
                         output.missing_information = list(
@@ -1267,7 +1396,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                     issues = (
                         validate_factual(output, context, factual[1])
                         if factual
-                        else validate_output(output, context)
+                        else validate_output(output, step_context)
                     )
                     if (
                         not factual
@@ -1287,7 +1416,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                                 - future_calls,
                             )
                         output, issues = await repair_confidence(
-                            output, issues, context, step.objective, "developer", available, step.id
+                            output, issues, step_context, step.objective, "developer", available, step.id
                         )
                         if issues:
                             raise ValueError("Skill evaluation failed: " + "; ".join(issues))
@@ -1335,7 +1464,14 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                         max_attempts=review_attempts,
                         schema=OutputEvaluation,
                         role="reviewer",
-                        user=f"{output_rules}\nIndependently check claims against the supplied facts, goal and constraints. Reject unsupported inference, unsafe authority or missing required output.\nOBJECTIVE:{task.requirement if readonly_repository_audit(task.requirement) else step.objective}\nCONTEXT:{context_json}\nOUTPUT:{output.model_dump_json()}",
+                        user=skill_review_prompt(
+                            output_rules,
+                            task.requirement
+                            if readonly_repository_audit(task.requirement)
+                            else step.objective,
+                            step_context_json,
+                            output.model_dump_json(),
+                        ),
                     )
                     if factual and not issues:
                         await checkpoint("factual_draft_evaluation", evaluation.model_dump_json())
@@ -1446,7 +1582,9 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 schema=output_schema,
                 role="lead",
                 max_attempts=final_attempts,
-                user=f"{output_rules}\nProduce the final answer to the objective. If asked for top three, return at most three prioritized findings. Do not invent findings if data is insufficient.\nOBJECTIVE:{task.requirement}\nCONTEXT:{context_json}\nSKILL OUTPUTS:{json.dumps({k: v.model_dump() for k, v in done.items()})}",
+                user=final_output_prompt(
+                    output_rules, task.requirement, context_json, {k: v.model_dump() for k, v in done.items()}
+                ),
             )
             if not factual:
                 result.missing_information = list(
@@ -1483,7 +1621,7 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
                 schema=OutputEvaluation,
                 role="reviewer",
                 max_attempts=final_attempts,
-                user=f"{output_rules}\nCheck final result against success criteria; reject any unsupported claim.\nPLAN:{plan.model_dump_json()}\nCONTEXT:{context_json}\nRESULT:{result.model_dump_json()}",
+                user=final_review_prompt(output_rules, plan, context_json, result.model_dump_json()),
             )
             await checkpoint(
                 "staff_final_draft_evaluation",

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 
 from app.config import settings
@@ -89,7 +90,7 @@ For other requirements, build only in the explicitly registered target repositor
 # corresponding system or user prompt changes, so a stored run can be traced back to the
 # exact instructions that produced it.
 PROMPT_VERSION_LEAD = "lead-v1"
-PROMPT_VERSION_DEVELOPER = "developer-v13"
+PROMPT_VERSION_DEVELOPER = "developer-v14"
 PROMPT_VERSION_REVIEWER = "reviewer-v4"
 
 
@@ -159,11 +160,10 @@ later sections, e.g. {"action":"read_file","path":"app/workspace.py","offset":33
 Do not read a file you have just written in the same iteration: compose the next anchor from the content you
 wrote and reserve read_file for files you have not inspected yet. Repeated whole-file writes and re-reads of
 large files burn the task budget; prefer many small targeted replace_text edits.
-Non-mutating steps are capped per iteration: reads and searches make no file change, and an iteration ends
-once too many pass without a successful mutation. Treat inspection as setup, not progress: decide your full
-edit set early and issue the first write_file or replace_text within about five steps. On a recovery
-iteration where no file has been mutated yet, do not restart full reconnaissance: use the anchors already in
-your context and start editing immediately.
+Inspect relevant evidence before editing. Distinct successful read windows count as inspection progress,
+but repeated unchanged reads/searches are capped. Plan a bounded edit set; do not mutate just to reset a
+stall counter. On recovery, inspect actual changed content and missing anchors rather than restarting
+full reconnaissance. Authoring steps, lifetime budgets and mandatory review remain binding.
 Use content for search text and replacement text; do not invent query, args, parameters or new_text fields.
 write_file replaces the WHOLE file. The controller blocks whole-file replacement of an existing file until
 that exact path has been read in the current iteration. Prefer replace_text for targeted edits. Never replace
@@ -269,6 +269,7 @@ async def developer_loop(
     history = []
     inspected = False
     read_paths = set()
+    inspected_windows = set()
     diff_inspected = False
     last_signature = None
     repeated_steps = 0
@@ -330,6 +331,11 @@ async def developer_loop(
                 )
             attempts = min(3, available - 1)
         turn_context = context
+        if inspected_windows:
+            turn_context += (
+                "\nPreviously inspected windows (content may be outside the history window): "
+                + ", ".join(f"{path}@{offset}" for path, offset, _ in sorted(inspected_windows))[:2500]
+            )
         if artifact_cleanup_required and tracked_artifacts:
             turn_context += (
                 "\nCONTROLLER BLOCKER: delete these tracked runtime artifacts now with delete_file before "
@@ -560,6 +566,14 @@ async def developer_loop(
                     f"{action.path}. Preserve current partial changes and rewrite from a fresh explicit read."
                 )
         successful_mutation = action.action in mutations and not str(result).startswith("ERROR")
+        window_key = (action.path or "", action.offset or 1, hashlib.sha256(str(result).encode()).hexdigest())
+        new_inspection = (
+            action.action == "read_file"
+            and not str(result).startswith(("ERROR", "[offset"))
+            and window_key not in inspected_windows
+        )
+        if new_inspection:
+            inspected_windows.add(window_key)
         recovery_read = (
             action.action == "read_file"
             and action.path == recovery_read_path
@@ -574,7 +588,7 @@ async def developer_loop(
             last_failed_replace = None
             repeated_failed_replace = 0
             ambiguous_replace_paths.pop(action.path, None)
-        elif recovery_read:
+        elif recovery_read or new_inspection:
             # A fresh read of the exact file whose mutation failed is corrective
             # progress: it invalidates stale replacement anchors. It is allowed
             # once per failed mutation; unrelated/repeated reads remain bounded.

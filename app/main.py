@@ -1,6 +1,7 @@
 import hmac
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 
 import httpx
@@ -29,6 +30,7 @@ from app.schemas import (
 )
 from app.store import store
 from app.telegram_control import build_telegram_app
+from app.version import VERSION
 from app.worker import WorkerPool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -54,7 +56,12 @@ async def lifespan(app):
         async def notify(chat_id, message):
             if telegram_app:
                 for n in range(0, len(message), 3500):
-                    await telegram_app.bot.send_message(chat_id=chat_id, text=message[n : n + 3500])
+                    sent = await telegram_app.bot.send_message(chat_id=chat_id, text=message[n : n + 3500])
+                    matched = re.match(r"(?:Task|LioBot — tujuan) #(\d+)", message)
+                    if matched:
+                        from app.conversations import bind_telegram_message
+
+                        await bind_telegram_message(chat_id, sent.message_id, int(matched[1]))
 
         if settings.worker_enabled:
             worker = WorkerPool(notify)
@@ -72,7 +79,7 @@ async def lifespan(app):
         await engine.dispose()
 
 
-app = FastAPI(title="LioBot by AI Factory", version="0.3.0", lifespan=lifespan, docs_url=None, redoc_url=None)
+app = FastAPI(title="LioBot by AI Factory", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
 
 
 def authorize(authorization: str = Header(default="")):
@@ -94,7 +101,7 @@ def authorize(authorization: str = Header(default="")):
 @app.get("/health")
 @app.get("/v1/health")
 async def health():
-    return {"status": "ok", "version": "0.3.0"}
+    return {"status": "ok", "version": VERSION, "release_sha": settings.release_sha or None}
 
 
 @app.get("/ready")
@@ -120,7 +127,7 @@ async def ready():
                 response.raise_for_status()
     except Exception:
         raise HTTPException(503, "A required dependency is not ready") from None
-    return {"status": "ready", "version": "0.3.0"}
+    return {"status": "ready", "version": VERSION, "release_sha": settings.release_sha or None}
 
 
 @app.get("/health/telegram", dependencies=[Depends(authorize)])

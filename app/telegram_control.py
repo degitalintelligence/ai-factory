@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 async def reply(update, text):
+    sent = []
     for start in range(0, len(text), 3500):
-        await update.effective_message.reply_text(text[start : start + 3500])
+        sent.append(await update.effective_message.reply_text(text[start : start + 3500]))
+    return sent
 
 
 def protected(handler):
@@ -309,17 +311,34 @@ async def improve_handler(update, context):
 @protected
 async def chat_handler(update, context):
     from app.chat import converse
+    from app.conversations import bind_telegram_message, telegram_target
     from app.staff_schemas import ChatRequest
 
+    target = None
+    replied = getattr(update.effective_message, "reply_to_message", None)
+    if replied and isinstance(getattr(replied, "message_id", None), int):
+        target = await telegram_target(update.effective_chat.id, replied.message_id, update.effective_user.id)
     result = await converse(
-        ChatRequest(message=update.effective_message.text, idempotency_key=f"telegram:{update.update_id}"),
+        ChatRequest(
+            message=update.effective_message.text,
+            idempotency_key=f"telegram:{update.update_id}",
+            reply_to_intent_id=target,
+        ),
         update.effective_user.id,
         update.effective_chat.id,
     )
     summary = result.get("summary", str(result))
     if result.get("intent_id") is not None:
         summary = f"LioBot — tujuan #{result['intent_id']} [{result['status']}]\n{summary}"
-    await reply(update, summary)
+    sent = await reply(update, summary)
+    if result.get("intent_id"):
+        for item in [update.effective_message, *sent]:
+            await bind_telegram_message(
+                update.effective_chat.id,
+                getattr(item, "message_id", None),
+                result["intent_id"],
+                update.effective_user.id,
+            )
 
 
 def build_telegram_app():
