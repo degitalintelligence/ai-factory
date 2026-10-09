@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from app.config import settings
@@ -24,6 +25,8 @@ class FakeGitHub:
     checks_pass = True
     current_base = "b" * 40
     merge_is_ancestor = True
+    status_error = None
+    check_runs_error = None
 
     async def pull(self, repo, number):
         return {"merged": self.merged, "head": {"sha": "a" * 40}, "merge_commit_sha": "b" * 40}
@@ -41,8 +44,18 @@ class FakeGitHub:
         if "/git/commits/" in path:
             return {"tree": {"sha": "tree" if self.tree_equal or path.endswith("a" * 40) else "different"}}
         if path.endswith("/status"):
+            if self.status_error:
+                raise self.status_error
             return {"total_count": 1, "state": "success" if self.checks_pass else "pending"}
+        if path.endswith("/check-runs") and self.check_runs_error:
+            raise self.check_runs_error
         return {"total_count": 1, "check_runs": [{"conclusion": "success"}]}
+
+
+def github_http_error(status_code):
+    request = httpx.Request("GET", f"https://api.github.com/mock/{status_code}")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError(f"GitHub {status_code}", request=request, response=response)
 
 
 class FakeService(DeploymentService):
@@ -138,6 +151,32 @@ async def test_publish_completes_non_deploy_project_without_calling_coolify(db, 
     repeated = await service.publish(publication_task.id, "b" * 40)
     assert repeated.commit_sha == record.commit_sha
     assert repeated.status == "published"
+
+
+async def test_publish_falls_back_when_check_runs_endpoint_is_unavailable(db, publication_task):
+    service = FakeService(db.sessions)
+    service.github.check_runs_error = github_http_error(403)
+
+    record = await service.publish(publication_task.id, "b" * 40)
+
+    assert record.status == "published"
+    assert record.deployment_uuid is None
+
+
+async def test_publish_surfaces_commit_status_access_errors(db, publication_task):
+    service = FakeService(db.sessions)
+    service.github.status_error = github_http_error(403)
+
+    with pytest.raises(ValueError, match=r"GitHub commit status unavailable \(403\)"):
+        await service.publish(publication_task.id, "b" * 40)
+
+
+async def test_publish_surfaces_non_fallback_check_run_errors(db, publication_task):
+    service = FakeService(db.sessions)
+    service.github.check_runs_error = github_http_error(500)
+
+    with pytest.raises(ValueError, match=r"GitHub check-runs unavailable \(500\)"):
+        await service.publish(publication_task.id, "b" * 40)
 
 
 async def test_deploy_alias_publishes_non_deploy_project_without_coolify(db, publication_task):

@@ -52,6 +52,18 @@ class DeploymentService:
         async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
             return await send(client)
 
+    async def _github_json(self, method, path, *, label, fallback_statuses=(), **kwargs):
+        try:
+            return await self.github.request(method, path, **kwargs)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in fallback_statuses:
+                return None
+            raise ValueError(
+                f"{label} unavailable ({exc.response.status_code}); verify GitHub token access and retry"
+            ) from None
+        except httpx.HTTPError:
+            raise ValueError(f"{label} unavailable; verify GitHub connectivity and retry") from None
+
     async def _validated_release(self, task_id, approved_sha):
         task = await store.get(task_id)
         if not task or task.status != "pr_created" or not task.pr_url or not task.head_sha:
@@ -78,10 +90,18 @@ class DeploymentService:
         merged = await self.github.request("GET", f"{task.repo}/git/commits/{approved_sha}")
         if reviewed["tree"]["sha"] != merged["tree"]["sha"]:
             raise ValueError("Merge contains changes outside the reviewed tree; run a fresh review")
-        status = await self.github.request("GET", f"{task.repo}/commits/{approved_sha}/status")
-        checks = await self.github.request(
-            "GET", f"{task.repo}/commits/{approved_sha}/check-runs", params={"per_page": 100}
+        status = await self._github_json(
+            "GET",
+            f"{task.repo}/commits/{approved_sha}/status",
+            label="GitHub commit status",
         )
+        checks = await self._github_json(
+            "GET",
+            f"{task.repo}/commits/{approved_sha}/check-runs",
+            label="GitHub check-runs",
+            fallback_statuses={403, 404},
+            params={"per_page": 100},
+        ) or {"total_count": 0, "check_runs": []}
         if (
             (status.get("total_count", 0) and status["state"] != "success")
             or checks.get("total_count", 0) > 100
