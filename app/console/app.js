@@ -604,7 +604,9 @@ function initDashboard() {
     const sequence = ++selectionSequence;
     selectedId = id;
     conversationId = task.conversation_id || null;
-    el("project").value = task.project || "";
+    el("project").value = task.conversation_id
+      ? (task.conversation_project ?? "")
+      : task.project || "";
     pendingSend = null;
     renderTasks();
     renderDecisions();
@@ -615,6 +617,7 @@ function initDashboard() {
       try {
         const data = await api(`/v1/conversations/${conversationId}`);
         if (sequence !== selectionSequence) return;
+        el("project").value = data.project ?? el("project").value;
         renderConversation(data);
       } catch (error) {
         if (sequence === selectionSequence) {
@@ -1103,10 +1106,17 @@ function initDashboard() {
       await refresh().catch((error) =>
         note(`Pesan diterima; pembaruan state gagal: ${error.message}`, true),
       );
+      if (sequence !== selectionSequence) return;
       updateTarget();
       if (conversationId) {
+        const requestedThread = conversationId;
         try {
-          renderConversation(await api(`/v1/conversations/${conversationId}`));
+          const history = await api(`/v1/conversations/${requestedThread}`);
+          if (
+            sequence === selectionSequence &&
+            requestedThread === conversationId
+          )
+            renderConversation(history);
         } catch (error) {
           note(
             `Pesan diterima; riwayat belum berhasil dimuat: ${error.message}`,

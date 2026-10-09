@@ -14,12 +14,19 @@ from app.main import app
 from app.staff_schemas import ChatRequest
 
 
-async def test_overview_returns_owned_thread_without_foreign_receipts(db, monkeypatch):
+@pytest.mark.parametrize(
+    "project,message,resolved",
+    [
+        ("lab", "Review product requirements", "lab"),
+        ("", "Audit repository ai-factory. Jangan melakukan perubahan.", "self"),
+    ],
+)
+async def test_overview_returns_owned_thread_without_foreign_receipts(
+    db, monkeypatch, project, message, resolved
+):
     monkeypatch.setattr(settings, "api_token", "operator-test-token")
     monkeypatch.setattr(settings, "api_operator_user_id", 7)
-    result = await converse(
-        ChatRequest(message="Review product requirements", project="lab", idempotency_key="dash-1"), 7
-    )
+    result = await converse(ChatRequest(message=message, project=project, idempotency_key="dash-1"), 7)
     async with db.sessions() as session, session.begin():
         session.add(Conversation(id="foreign", owner=8, tenant=settings.tenant_id, project="lab"))
         await session.flush()
@@ -39,9 +46,24 @@ async def test_overview_returns_owned_thread_without_foreign_receipts(db, monkey
         overview = (await client.get("/v1/overview", headers=headers)).json()
         task = overview["tasks"][0]
         assert task["conversation_id"] == result["conversation_id"]
+        assert task["conversation_project"] == project
+        assert task["project"] == resolved
         history = await client.get(f"/v1/conversations/{task['conversation_id']}", headers=headers)
         assert history.status_code == 200
-        assert history.json()["turns"][0]["message"] == "Review product requirements"
+        assert history.json()["turns"][0]["message"] == message
+        followup = await client.post(
+            "/v1/chat",
+            headers=headers,
+            json={
+                "message": "status",
+                "project": task["conversation_project"],
+                "conversation_id": task["conversation_id"],
+                "reply_to_intent_id": task["id"],
+                "idempotency_key": "dash-followup",
+            },
+        )
+        assert followup.status_code == 202
+        assert followup.json()["intent_id"] == task["id"]
         assert (await client.get("/v1/conversations/foreign", headers=headers)).status_code == 404
 
 
