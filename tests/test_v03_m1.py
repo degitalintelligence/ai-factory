@@ -44,8 +44,8 @@ def test_lead_plan_normalization_makes_budget_gates_and_rollback_explicit():
 
 
 def test_model_alias_resolves_without_hardcoding_it_in_agent_calls(monkeypatch):
-    monkeypatch.setattr(settings, "model_aliases_json", '{"bunny-alpha":"provider/model-v1"}')
-    monkeypatch.setattr(settings, "lead_model", "bunny-alpha")
+    monkeypatch.setattr(settings, "model_aliases_json", '{"team-default":"provider/model-v1"}')
+    monkeypatch.setattr(settings, "lead_model", "team-default")
     assert settings.model_for("lead") == "provider/model-v1"
 
 
@@ -111,5 +111,5 @@ async def test_budget_warnings_are_durable_and_actionable(db, monkeypatch):
 
 
 @pytest.mark.parametrize("role", ["lead", "developer", "reviewer"])
-def test_all_agent_roles_use_the_same_default_alias(role):
-    assert settings.model_for(role) == "stealth/space-bunny-alpha"
+def test_all_agent_roles_use_the_same_default_model(role):
+    assert settings.model_for(role) == "deepseek/deepseek-v4-flash-0731"

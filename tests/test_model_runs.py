@@ -50,8 +50,8 @@ async def test_every_attempt_is_recorded_with_role_alias_model_and_prompt_eviden
         monkeypatch,
         [("bad json", "stop"), ('{"objective":"Feature","acceptance_criteria":["Works"]}', "stop")],
     )
-    monkeypatch.setattr(settings, "model_aliases_json", '{"bunny-alpha":"stealth/space-bunny-alpha"}')
-    monkeypatch.setattr(settings, "lead_model", "bunny-alpha")
+    monkeypatch.setattr(settings, "model_aliases_json", '{"team-default":"provider/model-v1"}')
+    monkeypatch.setattr(settings, "lead_model", "team-default")
     task = await claimed(db)
     token = llm.run_context.set((task.id, "w"))
     try:
@@ -73,8 +73,8 @@ async def test_every_attempt_is_recorded_with_role_alias_model_and_prompt_eviden
         assert run.role == "lead"
         # The configured alias and the resolved provider model are both recorded, so a
         # later provider change is explainable without reading application code.
-        assert run.model_alias == "bunny-alpha"
-        assert run.model == "stealth/space-bunny-alpha"
+        assert run.model_alias == "team-default"
+        assert run.model == "provider/model-v1"
         assert run.prompt_version == "lead-v1"
         assert run.schema_name == "LeadPlan"
         assert len(run.prompt_sha256) == 64
@@ -189,8 +189,8 @@ async def test_calls_without_a_task_context_persist_nothing(db, monkeypatch):
 
 async def test_model_runs_are_append_only_evidence_for_a_task(db):
     task = await claimed(db, "Append-only evidence")
-    await db.record_model_run(task.id, role="lead", model_alias="bunny-alpha", model="m", attempt=1)
-    await db.record_model_run(task.id, role="reviewer", model_alias="bunny-alpha", model="m", attempt=1)
+    await db.record_model_run(task.id, role="lead", model_alias="team-default", model="m", attempt=1)
+    await db.record_model_run(task.id, role="reviewer", model_alias="team-default", model="m", attempt=1)
     runs = await db.model_runs(task.id)
     assert [(run.role, run.attempt) for run in runs] == [("lead", 1), ("reviewer", 1)]
     assert all(run.task_id == task.id for run in runs)

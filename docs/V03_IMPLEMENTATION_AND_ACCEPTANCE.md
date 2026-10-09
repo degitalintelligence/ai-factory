@@ -147,7 +147,7 @@ To claim v0.3 done, require all of these release gates on the same candidate:
 1. Ruff, full pytest, real PostgreSQL concurrent tests and real Docker sandbox CI pass.
 2. Run `FACTORY_URL=<staging> API_TOKEN=<configured outside git> FACTORY_PROJECT=self
    python scripts/v03_acceptance.py` against a registered staging instance using the
-   configured bunny-alpha alias. It creates only a bounded analysis intent and never
+   configured production model (currently `deepseek/deepseek-v4-flash-0731`). It creates only a bounded analysis intent and never
    bypasses approval. Record task ID, model runs, exact candidate SHA and evidence.
 3. Independently check the three findings are distinct, source-backed and useful, and
    compare their task/card state in Telegram and dashboard. Check clarification, revision,
@@ -167,6 +167,9 @@ is recorded, this is an implementation candidate, not a claim of production v0.3
 Candidate: main at commit 6e64fae, deployed staging build at https://liobot.kreasheet.com
 (`GET /v1/health` → `0.3.0`), configured model alias `bunny-alpha`. Operator credentials
 lived outside git; all evidence below is durable server-side at the cited task endpoints.
+On 2026-10-09, Dedi retired that alias because it was no longer available and approved
+`deepseek/deepseek-v4-flash-0731` as the current runtime standard. The historical
+acceptance record below remains unchanged as evidence of what ran on 2026-10-08.
 
 1. Golden acceptance: `scripts/v03_acceptance.py` with `FACTORY_PROJECT=self` produced
    intent #77, `completed` with 5 model runs / 41,432 tokens; three distinct

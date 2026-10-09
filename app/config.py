@@ -45,10 +45,10 @@ class Settings(BaseSettings):
     github_owner: str = "degitalintelligence"
     lab_repo: str = "telegram-lab"
     # Roles accept either a concrete provider model or an audited alias.
-    model_aliases_json: str = '{"bunny-alpha":"stealth/space-bunny-alpha"}'
-    lead_model: str = "bunny-alpha"
-    developer_model: str = "bunny-alpha"
-    reviewer_model: str = "bunny-alpha"
+    model_aliases_json: str = '{"deepseek-default":"deepseek/deepseek-v4-flash-0731"}'
+    lead_model: str = "deepseek/deepseek-v4-flash-0731"
+    developer_model: str = "deepseek/deepseek-v4-flash-0731"
+    reviewer_model: str = "deepseek/deepseek-v4-flash-0731"
     projects_json: str = ""
     # Self-improvement must target an explicitly registered self-hosting alias, never
     # the default lab harness (AGENTS.md §15: register ai-factory explicitly before
@@ -117,7 +117,10 @@ class Settings(BaseSettings):
     def model_aliases(self) -> dict[str, str]:
         """Resolve model aliases from operator configuration; unknown aliases fail closed."""
         try:
-            raw = self.model_aliases_json.strip() or '{"bunny-alpha":"stealth/space-bunny-alpha"}'
+            raw = (
+                self.model_aliases_json.strip()
+                or '{"deepseek-default":"deepseek/deepseek-v4-flash-0731"}'
+            )
             data = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise ValueError("MODEL_ALIASES_JSON must be valid JSON") from exc

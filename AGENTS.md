@@ -24,9 +24,9 @@
 - Channels today: Telegram control interface and optional authenticated HTTP API.
 - Execution: control service, disposable worker leases, and a separate credential-free sandbox service.
 - Release: GitHub PR publication, non-deploy publication acknowledgement, and explicit full-commit-SHA Coolify deployment.
-- Current model convention: Lead, Developer, and Reviewer use the configured alias `bunny-alpha`
-  (provider model `stealth/space-bunny-alpha`) unless Dedi explicitly approves a tested
-  configuration change. The alias is resolved through environment configuration only; never
+- Current model convention: Lead, Developer, and Reviewer use the configured provider model
+  `deepseek/deepseek-v4-flash-0731` unless Dedi explicitly approves a tested configuration
+  change. If an alias is used, resolve it through environment configuration only; never
   hard-code it in business logic.
 
 Generated caches, local databases, runtime workspaces, credentials, and Docker
@@ -218,10 +218,9 @@ deployment credentials.
 ### 6.1 Model policy
 
 - Configure Lead, Developer, and Reviewer explicitly through environment variables.
-- Current standard is the alias `bunny-alpha`, resolved to provider model
-  `stealth/space-bunny-alpha`, for all three roles. The alias exists so the
-  provider model can change without a code change; keep it configurable and
-  never hard-code it in business logic.
+- Current standard is provider model `deepseek/deepseek-v4-flash-0731` for
+  Lead, Developer, and Reviewer. An alias is optional, but any alias must stay
+  environment-configured and must never be hard-coded in business logic.
 - Record the alias and the resolved provider model for every call.
 - Do not silently switch provider, model, temperature, output limit, or fallback path.
 - A fallback model is permitted only when policy explicitly allows it, and the
@@ -711,7 +710,7 @@ model prompts or code comments.
 | telegram-lab role | RESOLVED | Test harness and acceptance target only. |
 | Merge and production deployment | RESOLVED | Human-controlled. |
 | V0.3 versus amendment V1.1 authority | RESOLVED | `LIOBOT_CORE_V0_3_REQUIREMENTS.md` is current and wins; V1.1 applies only where V0.3 is silent. |
-| Default model | RESOLVED | Alias `bunny-alpha` (provider model `stealth/space-bunny-alpha`) for Lead, Developer, Reviewer through config. Record alias and resolved model per call. |
+| Default model | RESOLVED | Provider model `deepseek/deepseek-v4-flash-0731` for Lead, Developer, Reviewer through config. Record the configured name and the resolved provider model per call. |
 | V0.3 capability levels L0 to L3 | RESOLVED | L0 read, L1 plan/draft in isolated workspace, L2 non-production change and staging deploy per project policy, L3 production, external message, financial transaction, credential. L3 always requires Dedi approval. An agent must not skip a level because it feels confident. |
 | V0.3 minimum data model and `/v1` API | IMPLEMENTED CANDIDATE | Core `/v1` chat, overview, intent result, memory and improvement endpoints plus the dashboard are implemented and covered by tests; broader conversation continuity and live acceptance remain roadmap. Business logic must remain usable without Telegram. |
 | Final Dedi interface | RESOLVED | Telegram private natural chat and the same-origin operator dashboard share the existing core inbox/state. User authorized autonomous v0.3 design decisions; see V03_IMPLEMENTATION_AND_ACCEPTANCE.md. |
@@ -783,9 +782,15 @@ Before reporting completion:
 *Last reviewed: 2026-10-04. Owner: Dedi Setiadi.*
 
 *Amendment 2026-10-04: recorded `LIOBOT_CORE_V0_3_REQUIREMENTS.md` as the current
-requirement with precedence over amendment V1.1; resolved the `bunny-alpha` alias against
-provider model `stealth/space-bunny-alpha`; recorded V0.3 capability levels L0 to L3 as
-binding; labelled the V0.3 data model, `/v1` API, and Decision Inbox categories as roadmap;
-opened a memory tenant-isolation decision. No runtime behaviour changed.*
+requirement with precedence over amendment V1.1; resolved the then-current `bunny-alpha`
+alias against provider model `stealth/space-bunny-alpha`; recorded V0.3 capability levels
+L0 to L3 as binding; labelled the V0.3 data model, `/v1` API, and Decision Inbox
+categories as roadmap; opened a memory tenant-isolation decision. No runtime behaviour
+changed.*
+
+*Amendment 2026-10-09: Dedi approved replacing the retired `bunny-alpha` standard with
+provider model `deepseek/deepseek-v4-flash-0731` for Lead, Developer, and Reviewer.
+Historical acceptance records may still mention the retired alias; current config and
+operator documentation should follow the new model standard.*
 
 
