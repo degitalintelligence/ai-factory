@@ -169,6 +169,12 @@ class FactualOutput(StrictModel):
         return []
 
 
+class QuickReplyOutput(StrictModel):
+    """Bounded direct reply for trivial L0 requests that do not need a durable task."""
+
+    answer: str = Field(min_length=1, max_length=240)
+
+
 class OutputEvaluation(StrictModel):
     approved: bool = Field(
         description="Whether the submitted answer satisfies its objective and evidence constraints."

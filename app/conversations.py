@@ -9,7 +9,9 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.db import Artifact, ChatTurn, Conversation, Decision, Task, TelegramReference
+from app.llm import json_completion
 from app.security import secret_present
+from app.staff_schemas import QuickReplyOutput
 from app.store import store
 
 
@@ -27,6 +29,85 @@ def response(summary, *, status="information", task_id=None, **extra):
         "evidence_refs": [f"task:{task_id}"] if task_id else [],
         "risk": "unknown",
         **extra,
+    }
+
+
+QUICK_REPLY_BOUNDARY = """You are LioBot. Answer only the user's trivial L0 request directly.
+Do not create a plan, decision, audit, workflow, or implementation steps.
+Use natural Indonesian unless the user asks otherwise.
+If the user asks for one word, return exactly one word.
+If the user asks for a short answer or a maximum word count, obey it strictly.
+If the request actually needs repository inspection, task history, deployment state, or operator authority,
+do not invent facts; reply briefly that it needs a tracked task instead.
+"""
+
+
+def quick_reply_profile(request, message: str, lowered: str) -> tuple[int, bool] | None:
+    """Only obvious trivial L0 asks may skip the durable orchestration path."""
+    if request.project or request.reply_to_intent_id or request.conversation_id:
+        return None
+    if re.search(r"(?:task|tujuan|intent|decision|keputusan)\s*#?\d+", message, re.I):
+        return None
+    if re.search(
+        r"\b(review|audit|analisis|rencana|plan|implement|build|buatkan|perbaiki|fix|deploy|publish|merge|commit|push|pr|sandbox|test|tes|repo|repository|workflow|budget|status|hasil|clarif|klarif)\b",
+        lowered,
+        re.I,
+    ):
+        return None
+    exact_one = bool(re.search(r"\b(?:satu|1)\s+kata\b", lowered, re.I))
+    max_words = re.search(r"\bmaksimal\s+(\d+)\s+kata\b", lowered, re.I)
+    brief = bool(re.search(r"\b(?:singkat|pendek|tanpa penjelasan)\b", lowered, re.I))
+    simple_question = (
+        len(message) <= 120
+        and message.rstrip().endswith("?")
+        and bool(re.match(r"\s*(apa|apakah|siapa|kapan|berapa|mana|benarkah|bisakah)\b", lowered, re.I))
+    )
+    if exact_one:
+        return 1, True
+    if max_words:
+        return min(max(int(max_words[1]), 2), 40), False
+    if brief:
+        return 20, False
+    if simple_question:
+        return 25, False
+    return None
+
+
+async def quick_reply(request, actor: int) -> dict:
+    message = request.message.strip()
+    lowered = message.casefold()
+    profile = quick_reply_profile(request, message, lowered)
+    if not profile:
+        raise ValueError("Quick reply is unavailable for this request")
+    word_limit, exact_one = profile
+    result = await json_completion(
+        model=settings.model_for("lead"),
+        role="lead",
+        prompt_version="quick-reply-v1",
+        system=QUICK_REPLY_BOUNDARY,
+        user=(
+            f"Jawab permintaan berikut secara langsung.\n"
+            f"BATAS_KATA_MAKS:{word_limit}\n"
+            f"SATU_KATA:{str(exact_one).lower()}\n"
+            f"PERMINTAAN:{message}"
+        ),
+        schema=QuickReplyOutput,
+        max_attempts=1,
+    )
+    words = re.findall(r"\S+", result.answer.strip())
+    if exact_one and len(words) != 1:
+        raise RuntimeError("Quick reply must be exactly one word")
+    if len(words) > word_limit:
+        raise RuntimeError("Quick reply exceeded the requested word limit")
+    return {
+        "summary": result.answer.strip(),
+        "status": "completed",
+        "intent_id": None,
+        "next_action": "Ajukan tujuan baru bila perlu.",
+        "decision_required": False,
+        "evidence_refs": [],
+        "risk": "low",
+        "quick_reply": True,
     }
 
 
@@ -314,17 +395,33 @@ async def conversation_turn(request, actor, chat_id=None):
                     "Sampaikan tujuan beserta proyeknya. Untuk follow-up, pilih task atau balas pesannya; approval perlu ID keputusan."
                 )
             else:
-                from app.staff import create_intent
-
                 effective_request = request.model_copy(update={"project": thread.project})
-                task = await create_intent(effective_request, actor, chat_id)
-                task_id = task.id
-                result = response(
-                    task.last_message,
-                    status=task.status,
-                    task_id=task.id,
-                    next_action="LioBot menyiapkan konteks dan rencana.",
-                )
+                profile = quick_reply_profile(effective_request, message, lowered)
+                if profile:
+                    try:
+                        result = await quick_reply(effective_request, actor)
+                    except RuntimeError:
+                        from app.staff import create_intent
+
+                        task = await create_intent(effective_request, actor, chat_id)
+                        task_id = task.id
+                        result = response(
+                            task.last_message,
+                            status=task.status,
+                            task_id=task.id,
+                            next_action="LioBot menyiapkan konteks dan rencana.",
+                        )
+                else:
+                    from app.staff import create_intent
+
+                    task = await create_intent(effective_request, actor, chat_id)
+                    task_id = task.id
+                    result = response(
+                        task.last_message,
+                        status=task.status,
+                        task_id=task.id,
+                        next_action="LioBot menyiapkan konteks dan rencana.",
+                    )
             result["conversation_id"] = thread.id
             s.add(
                 ChatTurn(

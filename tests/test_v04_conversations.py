@@ -123,6 +123,35 @@ async def test_duplicate_delivery_and_changed_payload(db):
         assert await s.scalar(select(func.count()).select_from(Conversation)) == 1
 
 
+async def test_trivial_one_word_request_uses_quick_reply_without_creating_a_task(db, monkeypatch):
+    async def fake_quick_reply(request, actor):
+        assert actor == 7
+        return {
+            "summary": "Sehat",
+            "status": "completed",
+            "intent_id": None,
+            "next_action": "Ajukan tujuan baru bila perlu.",
+            "decision_required": False,
+            "evidence_refs": [],
+            "risk": "low",
+            "quick_reply": True,
+        }
+
+    monkeypatch.setattr("app.conversations.quick_reply", fake_quick_reply)
+    result = await converse(request("Jawab satu kata saja: sehat.", "quick-one-word"), 7)
+    assert result["status"] == "completed"
+    assert result["intent_id"] is None
+    assert result["summary"] == "Sehat"
+    assert result["quick_reply"] is True
+    assert await db.list(user_id=7) == []
+
+
+async def test_review_request_still_creates_a_durable_intent(db):
+    result = await converse(request("Review product requirements", "durable-review", project="lab"), 7)
+    assert result["intent_id"] is not None
+    assert result["status"] == "received"
+
+
 async def test_project_switch_requires_new_thread(db):
     initial = await goal(db)
     with pytest.raises(ValueError, match="Project changed"):
