@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap util
 COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
-COPY app/__init__.py app/config.py app/security.py app/schemas.py ./app/
+COPY app/__init__.py app/config.py app/security.py app/schemas.py app/version.py ./app/
 COPY sandbox ./sandbox
 USER 10001:10001
 EXPOSE 8090
