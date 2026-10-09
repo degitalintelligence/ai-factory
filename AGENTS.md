@@ -111,18 +111,20 @@ create a DECISION_REQUIRED item for Dedi instead of choosing silently.
 
 ### 4.1 Current release
 
-V0.2 is a bounded software engine. It supports repository-aware planning,
-bounded implementation, isolated tests, independent review, evidence, PR
-publication, acknowledgement of merged PRs for non-deployable targets, and explicit deployment of an existing registered Coolify target.
+The bounded V0.2 engine remains mandatory. It supports repository-aware
+planning, bounded implementation, isolated tests, independent review, evidence,
+PR publication, acknowledgement of merged PRs for non-deployable targets, and
+explicit deployment of an existing registered Coolify target.
 
 It is not yet an unlimited autonomous company, unrestricted shell agent,
 automatic production deployer, or generic workflow engine.
 
-V0.3 (`LIOBOT_CORE_V0_3_REQUIREMENTS.md`) is the approved target and moves the
-product to a Chief of Staff and orchestration engine. Its intent resolution,
-context assembly, skill registry, scoped memory, improvement proposal
-lifecycle, budget warning, and `/v1` API surface are roadmap until implemented
-and covered by tests. Do not describe them as working behaviour.
+V0.3 (`LIOBOT_CORE_V0_3_REQUIREMENTS.md`) moves the product to a Chief of Staff
+and orchestration engine. Intent resolution, context assembly, skill registry,
+scoped memory, improvement proposal lifecycle, budget warning, `/v1` APIs, and
+the shared dashboard/inbox are now implemented in this repository and covered
+by tests plus the staged acceptance record. Do not describe unsatisfied release
+gates, broader live acceptance, or later milestones as already complete.
 
 Implement V0.3 in the milestone order given in that document (M1 core
 orchestration, M2 decision experience, M3 memory and evaluator, M4
@@ -711,7 +713,7 @@ model prompts or code comments.
 | V0.3 versus amendment V1.1 authority | RESOLVED | `LIOBOT_CORE_V0_3_REQUIREMENTS.md` is current and wins; V1.1 applies only where V0.3 is silent. |
 | Default model | RESOLVED | Alias `bunny-alpha` (provider model `stealth/space-bunny-alpha`) for Lead, Developer, Reviewer through config. Record alias and resolved model per call. |
 | V0.3 capability levels L0 to L3 | RESOLVED | L0 read, L1 plan/draft in isolated workspace, L2 non-production change and staging deploy per project policy, L3 production, external message, financial transaction, credential. L3 always requires Dedi approval. An agent must not skip a level because it feels confident. |
-| V0.3 minimum data model and `/v1` API | ROADMAP | Add only when the milestone that needs it is active, with migration and contract tests. Business logic must remain usable without Telegram. |
+| V0.3 minimum data model and `/v1` API | IMPLEMENTED CANDIDATE | Core `/v1` chat, overview, intent result, memory and improvement endpoints plus the dashboard are implemented and covered by tests; broader conversation continuity and live acceptance remain roadmap. Business logic must remain usable without Telegram. |
 | Final Dedi interface | RESOLVED | Telegram private natural chat and the same-origin operator dashboard share the existing core inbox/state. User authorized autonomous v0.3 design decisions; see V03_IMPLEMENTATION_AND_ACCEPTANCE.md. |
 | Context/memory backend | RESOLVED | Existing SQL memory with tenant/owner/role filtering, provenance, versioning, conflict records and withdrawal checks on checkpoint recovery. No additional memory service. |
 | Memory tenant isolation key | RESOLVED | Dedi chose a real `tenant` column as the hard boundary plus `owner` as a real filter within one tenant. Every read, write, correction, retraction, and history lookup filters on tenant. A row owned by a person is visible only to that owner, unowned rows are shared inside the tenant, and a read with no principal returns shared memory only. Role clearance applies after the owner filter and never widens across it. The active-key uniqueness is `(tenant, key, scope)`; `owner` stays outside it, so one tenant holds one active value per key and scope. A tenant registry/mapping is still OPEN. |

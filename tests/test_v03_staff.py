@@ -208,6 +208,69 @@ async def test_chat_api_dashboard_and_decisions_share_durable_state(db, monkeypa
         assert len(overview["tasks"]) == 1
 
 
+async def test_metrics_separate_handoff_from_final_outcomes(db, monkeypatch):
+    monkeypatch.setattr(settings, "api_token", "test-token")
+    monkeypatch.setattr(settings, "api_operator_user_id", 7)
+    headers = {"Authorization": "Bearer test-token"}
+
+    handoff = await db.create("Route this to engineering", user_id=7, kind="orchestration")
+    await db.update(handoff.id, status="completed")
+    await db.artifact(handoff.id, "engineering_handoff", '{"task_id": 99, "project": "lab"}')
+
+    reviewed = await db.create("Reviewed fix", user_id=7)
+    await db.update(reviewed.id, status="reviewed")
+
+    failed = await db.create("Failed fix", user_id=7)
+    await db.update(failed.id, status="failed")
+
+    waiting = await db.create("Waiting clarification", user_id=7, kind="orchestration")
+    await db.update(waiting.id, status="waiting_input")
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://factory") as client:
+        body = (await client.get("/v1/metrics", headers=headers)).json()
+
+    assert body["tasks"] == 4
+    assert body["handoff_tasks"] == 1
+    assert body["final_tasks"] == 2
+    assert body["successful_final_tasks"] == 1
+    assert body["active_tasks"] == 1
+    assert body["success_rate"] == 0.5
+
+
+@pytest.mark.parametrize(
+    ("intent_update", "expected"),
+    [
+        ({"missing_information": ["Repo target apa?"]}, "Perlu informasi: Repo target apa?"),
+        (
+            {"execution": "engineering", "desired_outcome": "Implement bounded change"},
+            "Pilih alias proyek terdaftar:",
+        ),
+    ],
+)
+async def test_waiting_input_creates_one_clarification_card(db, monkeypatch, intent_update, expected):
+    task, _ = await setup_goal(db)
+
+    async def complete(*, schema, role, user, max_attempts=3):
+        if schema is ResolvedIntent:
+            data = {
+                "objective": "Clarify the next step",
+                "desired_outcome": "Bounded answer",
+            } | intent_update
+            return ResolvedIntent(**data)
+        raise AssertionError("Planning must stop at clarification")
+
+    monkeypatch.setattr(staff, "complete", complete)
+    await staff.run_staff_task(task.id, "worker")
+    saved = await db.get(task.id)
+    assert saved.status == "waiting_input"
+    assert expected in saved.last_message
+    cards = await db.inbox(state="open", owner=7)
+    assert len(cards) == 1
+    assert cards[0].category == "clarification_needed"
+    assert cards[0].kind == "NEED_INFO"
+    assert expected in cards[0].situation
+
+
 async def test_decision_view_exposes_every_required_v03_card_field(db):
     decision = await db.create_decision(
         DecisionRequest(

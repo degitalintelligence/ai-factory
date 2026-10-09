@@ -984,9 +984,9 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             raise ValueError("Factual contract requires low-risk L0 analysis")
         if intent.execution == "engineering" and intent.requested_authority != "L3":
             if not task.project:
-                await transition(
-                    "waiting_input", "Pilih alias proyek terdaftar: " + ", ".join(settings.projects())
-                )
+                question = "Pilih alias proyek terdaftar: " + ", ".join(settings.projects())
+                await store.ensure_task_clarification_decision(task, question)
+                await transition("waiting_input", question)
                 return
             child = await store.create(
                 task.requirement + "\nResolved intent: " + intent.model_dump_json(),
@@ -1004,7 +1004,9 @@ async def run_staff_task(task_id: int, owner: str, notify=None) -> None:
             )
             return
         if intent.missing_information:
-            await transition("waiting_input", "Perlu informasi: " + " | ".join(intent.missing_information))
+            question = "Perlu informasi: " + " | ".join(intent.missing_information)
+            await store.ensure_task_clarification_decision(task, question)
+            await transition("waiting_input", question)
             return
         stage = "audit_planning" if evidence_audit else "skill_planning"
         planning_task = await store.get(task_id)

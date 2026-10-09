@@ -231,3 +231,14 @@ Outstanding at acceptance time (tracked, not silently dropped):
   (intent #80); `waiting_input` tasks may set `decision_required` without a matching
   decision card (intent #78); generic staff drafts overstate confidence on unverified
   refs (intent #79).
+
+Post-acceptance changes now in the current tree:
+
+- `waiting_input` clarification-card parity was fixed so clarification pauses
+  always create or refresh one durable `clarification_needed` card and close it
+  idempotently on `/answer` or the equivalent API action. Regression coverage:
+  `tests/test_store.py` and `tests/test_v03_staff.py`.
+- `/v1/metrics` now separates orchestration handoff from final outcomes, so
+  `success_rate` reflects reviewed/completed/deployed end states rather than
+  counting handoff-only parents or active tasks. Regression coverage:
+  `tests/test_v03_staff.py`.

@@ -206,6 +206,14 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
                 await s.scalars(select(Task).where(Task.tenant == settings.tenant_id, Task.user_id == actor))
             )
             ids = [t.id for t in tasks]
+            handoff_ids = set(
+                await s.scalars(
+                    select(Artifact.task_id).where(
+                        Artifact.task_id.in_(ids),
+                        Artifact.kind == "engineering_handoff",
+                    )
+                )
+            )
             runs = list(await s.scalars(select(ModelRun).where(ModelRun.task_id.in_(ids))))
             artifacts = list(
                 await s.scalars(
@@ -230,8 +238,27 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
             decision_seconds = [
                 (d.decided_at - d.created_at).total_seconds() for d in decisions if d.decided_at
             ]
+        terminal_statuses = {
+            "completed",
+            "reviewed",
+            "deployed",
+            "deployment_failed",
+            "failed",
+            "cancelled",
+            "superseded",
+        }
+        successful_final_statuses = {"completed", "reviewed", "deployed"}
+        handoff_tasks = [t for t in tasks if t.id in handoff_ids]
+        final_tasks = [t for t in tasks if t.status in terminal_statuses and t.id not in handoff_ids]
         return {
             "tasks": len(tasks),
+            **task_outcomes(tasks, artifacts),
+            "active_tasks": sum(t.status not in terminal_statuses for t in tasks),
+            "handoff_tasks": len(handoff_tasks),
+            "final_tasks": len(final_tasks),
+            "successful_final_tasks": sum(t.status in successful_final_statuses for t in final_tasks),
+            "success_rate": sum(t.status in successful_final_statuses for t in final_tasks)
+            / max(1, len(final_tasks)),
             **task_outcomes(tasks, artifacts),
             "calls": len(runs),
             "tokens": sum(r.tokens for r in runs),

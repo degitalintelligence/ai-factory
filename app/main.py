@@ -30,7 +30,6 @@ from app.schemas import (
 )
 from app.store import store
 from app.telegram_control import build_telegram_app
-from app.version import VERSION
 from app.worker import WorkerPool
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -79,7 +78,21 @@ async def lifespan(app):
         await engine.dispose()
 
 
-app = FastAPI(title="LioBot by AI Factory", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None)
+def build_info() -> dict[str, str | None]:
+    """Return deploy metadata that operators can stamp into the runtime environment."""
+    return {
+        "version": settings.app_version,
+        "release_sha": settings.release_sha or None,
+    }
+
+
+app = FastAPI(
+    title="LioBot by AI Factory",
+    version=settings.app_version,
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+)
 
 
 def authorize(authorization: str = Header(default="")):
@@ -101,7 +114,7 @@ def authorize(authorization: str = Header(default="")):
 @app.get("/health")
 @app.get("/v1/health")
 async def health():
-    return {"status": "ok", "version": VERSION, "release_sha": settings.release_sha or None}
+    return {"status": "ok"} | build_info()
 
 
 @app.get("/ready")
@@ -127,7 +140,7 @@ async def ready():
                 response.raise_for_status()
     except Exception:
         raise HTTPException(503, "A required dependency is not ready") from None
-    return {"status": "ready", "version": VERSION, "release_sha": settings.release_sha or None}
+    return {"status": "ready"} | build_info()
 
 
 @app.get("/health/telegram", dependencies=[Depends(authorize)])

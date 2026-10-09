@@ -1,4 +1,10 @@
-# AI Factory / LioBot
+# AI Factory / LioBot Core
+
+Status: v0.3 Chief-of-Staff is implemented in this repository and has an
+operator-accepted staging candidate recorded on 2026-10-08. The bounded v0.2
+engineering guardrails remain mandatory, and production-complete v0.3 still
+depends on the remaining live gates in
+[docs/V03_IMPLEMENTATION_AND_ACCEPTANCE.md](docs/V03_IMPLEMENTATION_AND_ACCEPTANCE.md).
 
 An operating engine for building software from Telegram requirements: **repository-aware planning → implementation → isolated tests → independent review → repair → GitHub PR → explicit publication or commit-bound Coolify deployment**.
 
@@ -7,12 +13,19 @@ engineering engine. `telegram-lab` is a test/acceptance harness only; it is not 
 second LioBot product. Quant Factory, Kedaya, and other business products remain
 separate registered repositories and runtimes.
 
-## Current release and v0.4 candidate
+## Current status
 
-v0.3 has an operator acceptance record; its Chief of Staff layer, skill DAG,
-Decision Inbox, provenance memory and guarded engineering workflow are implemented.
-The v0.4 implementation candidate adds durable conversation routing, clarification
-cards, rendered budget preflight and truthful handoff/outcome reporting.
+The v0.2 engine remains the guarded execution foundation. On top of it, the
+v0.3 Chief-of-Staff layer now ships natural chat intake, `POST /v1/chat`,
+`/dashboard`, Decision Inbox, scoped memory, model-run audit, self-improvement
+proposal flow, and the shared staff workflow described in
+[docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md](docs/LIOBOT_CORE_V0_3_REQUIREMENTS.md).
+
+The current state is an implementation candidate with operator acceptance on a
+staging deployment, not a blanket claim that every live gate is complete.
+Self-improvement through controlled release/outcome measurement and broader
+live channel-parity checks are still tracked work. Telegram remains a channel
+adapter and `telegram-lab` remains the acceptance harness.
 
 **v0.4 is not yet a production release.** Live objectives, channel parity,
 restart/rollback, a measured self-improvement and a real product pilot need acceptance
@@ -25,8 +38,10 @@ registered tools and explicit policy. The model and approval boundaries remain b
 
 - Persistent PostgreSQL queue, task events, plans, diffs, test reports and review evidence.
 - Atomic claims, worker leases/heartbeats, bounded restart recovery, one active task per repository.
+- Natural private-chat goals and `POST /v1/chat`, plus `/dashboard` for the shared Decision Inbox, task summaries and evidence drill-down.
 - Multiple registered projects with explicit repository, branch, Python/Node test profile and deployment policy.
 - Separate OpenRouter models for Lead, Developer and Reviewer. Structured responses, bounded retries, token/call/time budgets and provider-reported cost tracking.
+- Scoped tenant/owner memory, durable decisions, improvement proposals, rollback confirmation flow, and model-run audit records.
 - Developer tools: inspect, search, replace/write/delete files, review a complete diff, run sandbox checks.
 - Deterministic gates: failing/absent tests, generated databases, credentials, symlink escapes, changed source after review, incomplete acceptance mapping and oversized diff cannot be approved by a model.
 - Post-publication verification is fail-closed: a PR that does not match the reviewed evidence leaves the task in `failed` with the exact issues, not `pr_created`. A retry re-checks the same PR.
@@ -122,15 +137,22 @@ Memory is isolated per tenant, and within a tenant a memory owned by a person is
 
 ## Current limits
 
-V0.2 is a bounded software engine, not an unlimited autonomous team. Source snapshots are UTF-8, up to 200 KB per file and 4 MB/2,500 files total, with a 110 KB complete review diff. Binary assets, empty repositories, monorepo-scale changes, arbitrary shells, networked tests, infrastructure provisioning and automatically creating Coolify resources are outside this release. Split larger work into separate tasks. No automatic merge or production rollback is performed.
+This is still a bounded software engine, not an unlimited autonomous team.
+Source snapshots are UTF-8, up to 200 KB per file and 4 MB/2,500 files total,
+with a 110 KB complete review diff. Binary assets, empty repositories,
+monorepo-scale changes, arbitrary shells, networked tests, infrastructure
+provisioning and automatically creating Coolify resources are outside this
+release. Split larger work into separate tasks. No automatic merge or
+production rollback is performed.
 
 Deployment validation covers file structure and review, not an actual Docker build of every target. Target CI and post-deployment smoke tests remain necessary. Reported dollar limits are checked between model calls and can overshoot by one call; if a provider omits cost, `/status` marks the total partial and token/call/time limits still apply. Set an OpenRouter key credit limit for a hard spend ceiling.
 
 See [architecture](docs/ARCHITECTURE.md), [operations and upgrade](docs/OPERATIONS.md), and [acceptance/verification](docs/VERIFICATION.md).
 
-## v0.3 Chief-of-Staff candidate
+## v0.3 implementation and acceptance
 
 Natural private-chat goals and `POST /v1/chat` now use a bounded, durable skill DAG in the
 existing queue. `/dashboard` provides the shared Decision Inbox, task/evidence views and
 knowledge actions. See [implementation, operating choices and release acceptance](docs/V03_IMPLEMENTATION_AND_ACCEPTANCE.md)
-for deployment recovery, rollback confirmation, budget semantics and the remaining live gates.
+for the operator-accepted staging record, deployment recovery, rollback confirmation,
+budget semantics and the remaining live gates.

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import settings
 from app.db import Task, _default_clause, init_db, utcnow
-from app.schemas import SelfImprovementBrief
+from app.schemas import DecisionState, SelfImprovementBrief
 from app.store import BudgetExceeded, TaskStopped, plan_hash
 
 
@@ -115,6 +115,24 @@ async def test_approval_is_bound_to_plan_and_clarification_resets_it(db):
     await db.resume(task.id, "answer", "Use a backup")
     assert (await db.get(task.id)).plan_json is None
     assert (await db.get(task.id)).approved_plan_hash is None
+
+
+async def test_waiting_input_clarification_card_is_durable_and_closes_on_answer(db):
+    task = await db.create("Clarify the target repository", user_id=7)
+    await db.update(task.id, status="waiting_input")
+    card = await db.ensure_task_clarification_decision(task, "Perlu informasi: repositori target mana?")
+    assert card.category == "clarification_needed"
+    assert card.kind == "NEED_INFO"
+    assert card.state == DecisionState.OPEN
+
+    same = await db.ensure_task_clarification_decision(task, "Perlu informasi: repositori target mana?")
+    assert same.id == card.id
+
+    await db.resume(task.id, "answer", "Gunakan repo lab", user_id=7)
+    closed = (await db.inbox(state="approved", owner=7))[0]
+    assert closed.id == card.id
+    assert closed.decided_by == 7
+    assert closed.decision_note == "Gunakan repo lab"
 
 
 async def test_budget_survives_retry(db, monkeypatch):

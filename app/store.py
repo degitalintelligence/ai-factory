@@ -926,6 +926,17 @@ class Store:
         except IntegrityError:
             return await self._open_approval_card(task.id)
 
+    async def ensure_task_clarification_decision(self, task, question):
+        """Create or refresh one durable clarification card for a waiting task.
+
+        waiting_input must be visible in the shared inbox, not only in a task status,
+        so Telegram and the dashboard present the same blocking question.
+        """
+        try:
+            return await self._create_clarification_card(task, question)
+        except IntegrityError:
+            return await self._open_clarification_card(task.id)
+
     async def _open_approval_card(self, task_id):
         async with self.sessions() as s, s.begin():
             return await s.scalar(
@@ -934,6 +945,18 @@ class Store:
                     Decision.task_id == task_id,
                     Decision.state == DecisionState.OPEN,
                     Decision.kind == DecisionMessageType.APPROVAL_REQUIRED,
+                )
+                .order_by(Decision.id.desc())
+            )
+
+    async def _open_clarification_card(self, task_id):
+        async with self.sessions() as s, s.begin():
+            return await s.scalar(
+                select(Decision)
+                .where(
+                    Decision.task_id == task_id,
+                    Decision.state == DecisionState.OPEN,
+                    Decision.category == "clarification_needed",
                 )
                 .order_by(Decision.id.desc())
             )
@@ -994,6 +1017,116 @@ class Store:
                 required_action=f"approve with plan hash {plan_digest[:12]}, or reject",
                 priority="high",
                 risk_level="high" if reason == "Self-improvement" else "medium",
+            )
+            s.add(decision)
+            await s.flush()
+            s.add(
+                Event(
+                    task_id=task.id,
+                    kind="decision",
+                    message=redact(f"Decision #{decision.id} requested: {decision.title}"),
+                )
+            )
+            await s.refresh(decision)
+            return decision
+
+    async def _create_clarification_card(self, task, question):
+        async with self.sessions() as s, s.begin():
+            await s.scalar(select(Task.id).where(Task.id == task.id).with_for_update())
+            digest = hashlib.sha256(task.requirement.encode()).hexdigest()
+            existing = await s.scalar(
+                select(Decision)
+                .where(
+                    Decision.task_id == task.id,
+                    Decision.state == DecisionState.OPEN,
+                    Decision.category == "clarification_needed",
+                )
+                .order_by(Decision.id.desc())
+            )
+            if existing:
+                existing.kind = DecisionMessageType.NEED_INFO
+                existing.title = f"Jawab klarifikasi tujuan #{task.id}"
+                existing.situation = redact(question)
+                existing.why_now = "Pekerjaan berhenti sampai klarifikasi diberikan."
+                existing.options_json = json.dumps(
+                    [
+                        {
+                            "id": "answer",
+                            "label": "Jawab klarifikasi",
+                            "impact": "Tujuan dapat direncanakan ulang dengan input yang kurang.",
+                            "risk": "Tanpa jawaban, pekerjaan tetap tertahan.",
+                        },
+                        {
+                            "id": "defer",
+                            "label": "Tunda tujuan ini",
+                            "impact": "Tidak ada eksekusi lanjutan sampai operator memulai lagi.",
+                            "risk": "Kebutuhan tetap belum terselesaikan.",
+                        },
+                    ]
+                )
+                existing.impact_json = json.dumps(
+                    [
+                        "Tujuan dapat direncanakan ulang dengan input yang kurang.",
+                        "Tidak ada eksekusi lanjutan sampai operator memulai lagi.",
+                    ]
+                )
+                existing.risk_json = json.dumps(
+                    [
+                        "Tanpa jawaban, pekerjaan tetap tertahan.",
+                        "Kebutuhan tetap belum terselesaikan.",
+                    ]
+                )
+                existing.recommendation = "answer"
+                existing.evidence_json = json.dumps([f"task:{task.id}", f"requirement_sha256={digest}"])
+                existing.required_action = (
+                    f"Jawab lewat /answer {task.id} <jawaban> atau endpoint klarifikasi intent."
+                )
+                existing.priority = "normal"
+                existing.risk_level = "low"
+                return existing
+            decision = Decision(
+                task_id=task.id,
+                project=task.project,
+                kind=DecisionMessageType.NEED_INFO,
+                category="clarification_needed",
+                tenant=task.tenant,
+                owner=task.user_id,
+                title=f"Jawab klarifikasi tujuan #{task.id}",
+                situation=redact(question),
+                why_now="Pekerjaan berhenti sampai klarifikasi diberikan.",
+                options_json=json.dumps(
+                    [
+                        {
+                            "id": "answer",
+                            "label": "Jawab klarifikasi",
+                            "impact": "Tujuan dapat direncanakan ulang dengan input yang kurang.",
+                            "risk": "Tanpa jawaban, pekerjaan tetap tertahan.",
+                        },
+                        {
+                            "id": "defer",
+                            "label": "Tunda tujuan ini",
+                            "impact": "Tidak ada eksekusi lanjutan sampai operator memulai lagi.",
+                            "risk": "Kebutuhan tetap belum terselesaikan.",
+                        },
+                    ]
+                ),
+                impact_json=json.dumps(
+                    [
+                        "Tujuan dapat direncanakan ulang dengan input yang kurang.",
+                        "Tidak ada eksekusi lanjutan sampai operator memulai lagi.",
+                    ]
+                ),
+                risk_json=json.dumps(
+                    [
+                        "Tanpa jawaban, pekerjaan tetap tertahan.",
+                        "Kebutuhan tetap belum terselesaikan.",
+                    ]
+                ),
+                recommendation="answer",
+                evidence_json=json.dumps([f"task:{task.id}", f"requirement_sha256={digest}"]),
+                required_action=f"Jawab lewat /answer {task.id} <jawaban> atau endpoint klarifikasi intent.",
+                priority="normal",
+                risk_level="low",
             )
             s.add(decision)
             await s.flush()

@@ -7,6 +7,13 @@ Repository: https://github.com/degitalintelligence/ai-factory
 Baseline main: `48dce5206a9de8fbf36950f8a2fd6bd828695972`.
 Tujuan v0.4: Dedi bisa melanjutkan pekerjaan lewat percakapan, mendapat hasil yang terverifikasi dalam budget, dan menyetujui satu perbaikan diri yang manfaatnya terbukti.
 
+Update 9 Oktober 2026 pada working tree ini:
+- clarification-card parity untuk `waiting_input` sudah diperbaiki dan ditutup
+  idempotently saat jawaban masuk;
+- `/v1/metrics` sekarang memisahkan orchestration handoff dari final outcomes;
+- README dan AGENTS disinkronkan ke status v0.3 implementation candidate /
+  operator-accepted tanpa menghapus gate live yang masih tertunda.
+
 ## 1. Kesimpulan review
 
 v0.3 sudah memiliki fondasi Chief of Staff: intake Telegram/API, bounded skill DAG, Decision Inbox, memory dengan provenance, model-run audit, engineering pipeline, dan proposal improvement. Enam domain terdaftar; domain selain engineering masih berupa analysis/draft, bukan connector bisnis yang mengeksekusi tindakan eksternal.

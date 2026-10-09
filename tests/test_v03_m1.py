@@ -79,6 +79,26 @@ def test_v03_channel_neutral_routes_exist():
     } <= paths
 
 
+async def test_health_reports_build_metadata(monkeypatch):
+    monkeypatch.setattr(settings, "app_version", "0.4.0-rc1")
+    monkeypatch.setattr(settings, "release_sha", "abc123")
+    assert await main.health() == {
+        "status": "ok",
+        "version": "0.4.0-rc1",
+        "release_sha": "abc123",
+    }
+
+
+async def test_health_omits_blank_release_sha(monkeypatch):
+    monkeypatch.setattr(settings, "app_version", "0.4.0-rc1")
+    monkeypatch.setattr(settings, "release_sha", "")
+    assert await main.health() == {
+        "status": "ok",
+        "version": "0.4.0-rc1",
+        "release_sha": None,
+    }
+
+
 async def test_budget_warnings_are_durable_and_actionable(db, monkeypatch):
     monkeypatch.setattr(settings, "max_llm_calls", 10)
     task = await db.create("Track budget warnings")

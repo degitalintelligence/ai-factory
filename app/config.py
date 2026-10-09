@@ -6,6 +6,8 @@ from urllib.parse import quote
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.version import VERSION
+
 
 class Project(BaseModel):
     repo: str
@@ -32,6 +34,8 @@ class Project(BaseModel):
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    app_version: str = VERSION
+    release_sha: str = ""
     database_url: str = "sqlite+aiosqlite:///./factory.db"
     database_host: str = ""
     database_password: str = ""
