@@ -5,6 +5,8 @@ registry is intentionally small: Engineering is executable in M1, while the
 other domains are draft-only until they have a connector and evaluator.
 """
 
+import re
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -175,19 +177,51 @@ def select_skills(objective: str) -> list[str]:
     if readonly_repository_audit(objective):
         return ["engineering", "product_research"]
     text = objective.lower()
+    technical_requirements = bool(
+        re.search(r"\b(?:requirements?\.txt|file requirements?|dependency|dependencies|readme(?:\.md)?|tests?)\b", text)
+    )
     selected: list[str] = []
-    keyword_groups = (
+    skill_patterns = (
         (
             "engineering",
-            ("code", "coding", "repository", "repo", "test", "deploy", "api", "bug", "implement"),
+            (
+                r"\bcode\b",
+                r"\bcoding\b",
+                r"\brepository\b",
+                r"\brepo\b",
+                r"\btests?\b",
+                r"\bdeploy\b",
+                r"\bapi\b",
+                r"\bbug\b",
+                r"\bimplement\b",
+                r"\breadme(?:\.md)?\b",
+                r"\brequirements?\.txt\b",
+            ),
         ),
-        ("product_research", ("requirement", "product", "research", "prioritize", "experiment", "strategy")),
-        ("marketing", ("marketing", "campaign", "content", "funnel", "competitor", "ads", "seo")),
-        ("admin_ops", ("admin", "ops", "sop", "schedule", "vendor", "checklist", "operational")),
-        ("finance", ("finance", "cashflow", "invoice", "budget", "reconcile", "anomaly")),
-        ("sales_cs", ("sales", "lead", "customer", "support", "follow-up", "cs", "client")),
+        (
+            "product_research",
+            (
+                r"\bproduct requirements?\b",
+                r"\brequirements?\b",
+                r"\bproduct\b",
+                r"\bresearch\b",
+                r"\bprioriti(?:s|z)e\b",
+                r"\bexperiment\b",
+                r"\bstrategy\b",
+            ),
+        ),
+        ("marketing", (r"\bmarketing\b", r"\bcampaign\b", r"\bcontent\b", r"\bfunnel\b", r"\bcompetitor\b", r"\bads\b", r"\bseo\b")),
+        ("admin_ops", (r"\badmin\b", r"\bops\b", r"\bsop\b", r"\bschedule\b", r"\bvendor\b", r"\bchecklist\b", r"\boperational\b")),
+        ("finance", (r"\bfinance\b", r"\bcashflow\b", r"\binvoice\b", r"\bbudget\b", r"\breconcile\b", r"\banomaly\b")),
+        ("sales_cs", (r"\bsales\b", r"\blead\b", r"\bcustomer\b", r"\bsupport\b", r"\bfollow-up\b", r"\bcs\b", r"\bclient\b")),
     )
-    for skill_id, keywords in keyword_groups:
-        if any(keyword in text for keyword in keywords):
+    for skill_id, patterns in skill_patterns:
+        if skill_id == "product_research":
+            explicit_product_work = any(re.search(pattern, text) for pattern in patterns if pattern != r"\brequirements?\b")
+            requirement_only = bool(re.search(r"\brequirements?\b", text))
+            if explicit_product_work or (requirement_only and not technical_requirements):
+                selected.append(skill_id)
+            continue
+        if any(re.search(pattern, text) for pattern in patterns):
             selected.append(skill_id)
     return selected or ["product_research"]

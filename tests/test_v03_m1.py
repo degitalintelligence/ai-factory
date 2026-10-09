@@ -24,6 +24,16 @@ def test_cross_functional_objective_selects_relevant_skills():
     ]
 
 
+def test_technical_requirements_files_do_not_force_product_research():
+    assert select_skills(
+        "Review telegram-lab. Baca README.md dan file requirements atau test yang paling relevan."
+    ) == ["engineering"]
+
+
+def test_explicit_product_requirements_still_select_product_research():
+    assert select_skills("Review product requirements untuk onboarding flow") == ["product_research"]
+
+
 def test_lead_plan_normalization_makes_budget_gates_and_rollback_explicit():
     plan = normalize_lead_plan(
         LeadPlan(
