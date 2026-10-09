@@ -130,7 +130,7 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
                 dq = dq.where(Decision.project == project)
             decisions = list(await s.scalars(dq.order_by(Decision.id.desc()).limit(100)))
             receipts = await s.execute(
-                select(ChatTurn.task_id, ChatTurn.conversation_id)
+                select(ChatTurn.task_id, ChatTurn.conversation_id, Conversation.project)
                 .join(Conversation, ChatTurn.conversation_id == Conversation.id)
                 .where(
                     Conversation.tenant == settings.tenant_id,
@@ -139,11 +139,11 @@ def build_router(authorize, task_view, decision_view) -> APIRouter:
                 )
                 .order_by(ChatTurn.id)
             )
-            threads = {task_id: thread_id for task_id, thread_id in receipts}
+            threads = {task_id: (thread_id, project) for task_id, thread_id, project in receipts}
             views = []
             for task in tasks:
                 view = task_view(task)
-                view["conversation_id"] = threads.get(task.id)
+                view["conversation_id"], view["conversation_project"] = threads.get(task.id, (None, None))
                 try:
                     effective = await _effective_task(s, task, actor)
                 except ValueError:

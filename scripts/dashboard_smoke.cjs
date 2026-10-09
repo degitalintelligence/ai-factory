@@ -17,6 +17,7 @@ const tasks = [
     cost_usd: 0.12,
     cost_incomplete: true,
     conversation_id: "thread_77",
+    conversation_project: "",
     updated_at: "2026-10-09T00:00:00Z",
   },
   {
@@ -146,6 +147,7 @@ async function main() {
         if (delayHistory && p.endsWith("77"))
           await new Promise((r) => setTimeout(r, 200));
         return json({
+          project: p.endsWith("78") ? "lab" : "",
           turns: [
             {
               message: p.endsWith("78")
@@ -237,7 +239,11 @@ async function main() {
       "Lost-response retry must reuse key",
     );
     assert.equal(mutations[1].body.reply_to_intent_id, 77);
-    assert.equal(mutations[1].body.project, "self");
+    assert.equal(
+      mutations[1].body.project,
+      "",
+      "Follow-up retains original inferred-project thread scope",
+    );
     await page
       .getByRole("button", { name: /Siapkan rencana fitur todo/ })
       .click();
@@ -281,6 +287,30 @@ async function main() {
     await page.waitForTimeout(300);
     assert.match(await page.locator("#thread-target").innerText(), /#78/);
     assert.match(await page.locator("#conversation").innerText(), /fitur todo/);
+    delayHistory = false;
+    await page.getByRole("button", { name: /Audit model dan budget/ }).click();
+    await page.waitForFunction(() =>
+      document
+        .getElementById("conversation")
+        .textContent.includes("Audit AI Factory"),
+    );
+    delayHistory = true;
+    await page.locator("#message").fill("hasilnya");
+    const sentHistory = page.waitForRequest((req) =>
+      req.url().includes("/v1/conversations/thread_77"),
+    );
+    await page.locator("#send").click();
+    await sentHistory;
+    await page
+      .getByRole("button", { name: /Siapkan rencana fitur todo/ })
+      .click();
+    await page.waitForTimeout(350);
+    assert.match(await page.locator("#thread-target").innerText(), /#78/);
+    assert.match(
+      await page.locator("#conversation").innerText(),
+      /fitur todo/,
+      "Late post-send history cannot replace the newly selected task",
+    );
     delayHistory = false;
     failOverview = true;
     await page.locator("#refresh").click();

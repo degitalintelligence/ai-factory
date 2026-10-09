@@ -142,3 +142,5 @@ The browser CI gate (`scripts/dashboard_smoke.cjs`) uses local fixtures to exerc
 scoped follow-up, exact clarification, lost-response duplicate protection, structured
 results, escaping, selection races, refresh failure, mobile width and disconnect.
 This verifies UI behavior, not live runtime/channel acceptance.
+
+PR re-review: overview returns both the task project and original conversation project. Follow-ups retain thread scope when repository inference resolved a task from a cross-project chat. Late history responses cannot replace a newly selected conversation. The candidate also includes main commit `42e8ca96...` provisioning Ruff in both images.
