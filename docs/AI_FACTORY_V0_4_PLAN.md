@@ -1,6 +1,8 @@
 # AI Factory / LioBot — Review main dan rencana v0.4
 
-Tanggal: 8 Oktober 2026. Status: usulan roadmap, belum persetujuan implementasi.
+Tanggal review: 8 Oktober 2026. Implementasi kemudian diotorisasi Dedi melalui permintaan menyelesaikan v0.4.
+Status terkini: implementation candidate; acceptance live dan persetujuan release belum selesai.
+Lihat `V04_IMPLEMENTATION_AND_ACCEPTANCE.md` untuk perubahan, verifikasi dan gate terbuka.
 Repository: https://github.com/degitalintelligence/ai-factory
 Baseline main: `48dce5206a9de8fbf36950f8a2fd6bd828695972`.
 Tujuan v0.4: Dedi bisa melanjutkan pekerjaan lewat percakapan, mendapat hasil yang terverifikasi dalam budget, dan menyetujui satu perbaikan diri yang manfaatnya terbukti.

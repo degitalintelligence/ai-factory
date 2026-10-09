@@ -108,3 +108,50 @@ async def test_postgres_tenant_budget_reservations_across_workers(monkeypatch):
     async with store.sessions() as session:
         assert (await session.scalar(select(DailyBudget))).calls == 2
     await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("TEST_POSTGRES_URL"), reason="TEST_POSTGRES_URL required for real PostgreSQL integration"
+)
+async def test_postgres_v04_duplicate_intake_and_atomic_clarification(monkeypatch):
+    from sqlalchemy import func, select
+
+    from app.chat import converse
+    from app.config import settings
+    from app.db import ChatTurn, Conversation
+    from app.staff_schemas import ChatRequest
+    from app.store import store
+
+    engine = create_async_engine(os.environ["TEST_POSTGRES_URL"])
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.drop_all)
+    await init_db(engine)
+    await init_db(engine)
+    monkeypatch.setattr(store, "sessions", async_sessionmaker(engine, expire_on_commit=False))
+    monkeypatch.setattr(settings, "projects_json", '{"lab":{"repo":"owner/repo"}}')
+    request = ChatRequest(message="Review product requirements", project="lab", idempotency_key="pg-v04")
+    try:
+        responses = await asyncio.gather(*(converse(request, 7) for _ in range(5)))
+        assert all(response == responses[0] for response in responses)
+        async with store.sessions() as session:
+            assert await session.scalar(select(func.count()).select_from(ChatTurn)) == 1
+            assert await session.scalar(select(func.count()).select_from(Conversation)) == 1
+        task_id = responses[0]["intent_id"]
+        claimed = await store.claim("v04-worker")
+        assert claimed.id == task_id
+        cards = await asyncio.gather(
+            *(store.wait_for_clarification(task_id, "v04-worker", "Which audience?") for _ in range(5))
+        )
+        assert len({card.id for card in cards}) == 1
+        assert len(await store.inbox(state="open")) == 1
+        await store.update(task_id, "v04-worker", lease_owner=None, lease_until=None)
+        answers = await asyncio.gather(
+            *(store.answer_clarification(cards[0].id, "Startup founders", 7) for _ in range(5))
+        )
+        assert all(answer.status == "received" for answer in answers)
+        fresh = await store.get(task_id)
+        assert fresh.requirement.count("Startup founders") == 1
+        assert fresh.approved_plan_hash is None
+        assert not await store.inbox(state="open")
+    finally:
+        await engine.dispose()

@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     global_max_tokens_per_day: int = Field(default=4_000_000, ge=1)
     global_max_cost_usd_per_day: float = Field(default=30.0, gt=0)
     dashboard_url: str = ""
+    release_sha: str = Field(default="", pattern=r"^(?:[a-fA-F0-9]{40})?$")
     self_improvement_enabled: bool = True
     telegram_allowed_user_ids: str = ""
     api_token: str = ""

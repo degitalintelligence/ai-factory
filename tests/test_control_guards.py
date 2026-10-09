@@ -330,7 +330,7 @@ async def test_finish_blocked_until_latest_test_command_reports_no_issues(monkey
         "Finish blocked: the most recent test command still reported sandbox issues" in prompt
         for prompt in prompts[3:]
     )
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v13"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v14"
 
 
 async def test_finish_guard_reads_issues_from_serialized_test_report(monkeypatch):
@@ -558,17 +558,38 @@ async def test_failed_replacement_echo_is_capped_to_a_tail_excerpt(monkeypatch):
     assert head_marker not in traces[1]
 
 
-def test_developer_prompt_requires_early_mutation_discipline():
-    """Task #92: the developer spent 24 consecutive read/search steps without a single
-    mutation and stalled three iterations in a row; the system prompt must demand an
-    early first mutation and forbid restarting reconnaissance on recovery iterations."""
-    system, _context = agents.developer_request(
-        file_index="README.md\n",
-        requirement="Small edit",
+async def test_distinct_read_windows_do_not_force_premature_mutation(monkeypatch):
+    """Task #92: bounded new inspection is progress; repeated inspection still stalls."""
+
+    class Workspace(FakeDeveloperWorkspace):
+        def read_file(self, path, offset=None):
+            return f"[lines {offset}-{offset + 9} of 100] Unique source section {offset}"
+
+        def replace_text(self, *args):
+            return "Changed"
+
+        def diff(self):
+            return "safe reviewed diff"
+
+    actions = iter(
+        [
+            *(DeveloperAction(action="read_file", path="README.md", offset=i * 10 + 1) for i in range(6)),
+            DeveloperAction(action="replace_text", path="README.md", old_text="Demo", content="Change"),
+            DeveloperAction(action="git_diff"),
+            DeveloperAction(action="finish", note="Done"),
+        ]
+    )
+
+    async def model(**kwargs):
+        return next(actions)
+
+    monkeypatch.setattr(settings, "max_developer_stall_steps", 3)
+    monkeypatch.setattr(agents, "json_completion", model)
+    await agents.developer_loop(
+        workspace=Workspace(),
+        requirement="Inspect relevant windows then edit",
         plan=LeadPlan(objective="Edit", acceptance_criteria=["Edited"]),
     )
-    assert "first write_file or replace_text within about five steps" in system
-    assert "do not restart full reconnaissance" in system
 
 
 async def test_resume_warning_reaches_the_developer_prompt_on_resumed_workspaces(monkeypatch):
@@ -740,7 +761,7 @@ async def test_repair_iteration_cannot_finish_without_a_new_mutation(monkeypatch
     assert result == "Implementation completed"
     assert any("repair feedback requires at least one successful file mutation" in item for item in traces)
     assert workspace.source == "fixed\n"
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v13"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v14"
 
 
 def test_tracked_runtime_artifact_is_binding_initial_feedback():
@@ -763,7 +784,7 @@ def test_developer_prompt_prioritizes_files_named_by_repair_feedback():
         reviewer_feedback=["Deterministic repair required: fix tests/test_smoke.py"],
     )
 
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v13"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v14"
     assert "inspect and repair that exact file first" in system
     assert "smoke or application-registration tests" in system
     assert "tests/test_smoke.py" in context
@@ -779,7 +800,7 @@ def test_developer_prompt_requires_creator_hunt_and_rerun_after_final_mutation()
         plan=LeadPlan(objective="Count", acceptance_criteria=["Counted"]),
     )
 
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v13"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v14"
     assert "standalone run of the single test file you" in system
     assert "read every test file you have" in system
     assert "identify the test that creates the artifact" in system
@@ -1063,7 +1084,7 @@ async def test_identical_stale_replacement_rolls_over_before_generic_stall(monke
 
     assert len(prompts) == 4
     assert "CURRENT FILE AFTER FAILED REPLACEMENT:\npartial edit" in prompts[-1]
-    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v13"
+    assert agents.PROMPT_VERSION_DEVELOPER == "developer-v14"
 
 
 async def test_different_ambiguous_replacements_roll_over_on_the_same_path(monkeypatch):

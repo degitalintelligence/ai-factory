@@ -567,3 +567,7 @@ any hygiene gate.
 Independent review occurs before publication and must never claim a PR already
 exists. Passing feature tests do not override sandbox artifact issues, and Python
 test definitions cannot be silently removed while adding replacement coverage.
+
+## v0.4 staging acceptance
+
+For the v0.4 candidate, follow [V04_IMPLEMENTATION_AND_ACCEPTANCE.md](V04_IMPLEMENTATION_AND_ACCEPTANCE.md). Set RELEASE_SHA to the full candidate commit, preserve volumes, and retain the previous image for rollback. CI success does not authorize production deployment.

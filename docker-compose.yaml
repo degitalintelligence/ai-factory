@@ -57,6 +57,7 @@ services:
       MAX_COST_USD: ${MAX_COST_USD:-5}
       TASK_TIMEOUT_SECONDS: ${TASK_TIMEOUT_SECONDS:-3600}
       WORKSPACE_ROOT: /workspaces
+      RELEASE_SHA: ${RELEASE_SHA:-}
       COOLIFY_URL: ${COOLIFY_URL:-}
       COOLIFY_TOKEN: ${COOLIFY_TOKEN:-}
     depends_on:

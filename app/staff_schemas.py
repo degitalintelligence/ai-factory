@@ -13,9 +13,11 @@ class StrictModel(BaseModel):
 
 
 class ChatRequest(StrictModel):
-    message: str = Field(min_length=5, max_length=20000)
+    message: str = Field(min_length=1, max_length=20000)
     project: str = Field(default="", max_length=40)
     idempotency_key: str = Field(min_length=1, max_length=120)
+    conversation_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    reply_to_intent_id: int | None = Field(default=None, ge=1)
 
 
 class ResolvedIntent(StrictModel):

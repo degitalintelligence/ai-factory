@@ -1,1 +1,202 @@
-<!doctype html><html lang="id"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LioBot · Decision Inbox</title><link rel="stylesheet" href="/dashboard/style.css"></head><body><main><header><p>LIOBOT / AI FACTORY</p><h1>Chief of Staff</h1><p>Tujuan, keputusan, dan evidence dalam satu ruang kerja.</p></header><form id="connect"><label>Token operator <input id="token" type="password" autocomplete="off" required></label><button>Hubungkan</button></form><p id="status" role="status">Masukkan token untuk membuka state operator.</p><section><h2>Tujuan baru</h2><form id="chat"><label>Proyek <select id="project"><option value="">Lintas proyek</option></select></label><label>Apa yang ingin dicapai?<textarea id="message" required minlength="5" placeholder="Audit AI Factory. Tunjukkan tiga masalah paling penting dan keputusan minggu ini."></textarea></label><button>Kirim tujuan</button></form></section><section><h2>Decision Inbox</h2><div id="decisions"></div></section><section><h2>Pekerjaan dan evidence</h2><div id="tasks"></div></section><section><h2>Knowledge</h2><form id="memory"><label>Kata kunci<input id="query"></label><button>Cari</button></form><div id="knowledge"></div><h3>Simpan knowledge</h3><form id="write-memory"><label>Key<input id="memory-key" required></label><label>Nilai<textarea id="memory-value" required></textarea></label><label>Source<input id="memory-source" required></label><label>Scope<input id="memory-scope" placeholder="Alias proyek atau kosong untuk shared"></label><button>Simpan</button></form><h3>Konflik knowledge</h3><div id="conflicts"></div></section><section><h2>Improvement proposals</h2><div id="proposals"></div></section><section><h2>Penggunaan dan audit</h2><pre id="metrics"></pre></section></main><script src="/dashboard/app.js" defer></script></body></html>
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>LioBot · Ruang kerja</title>
+    <link rel="stylesheet" href="/dashboard/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/dashboard"
+        >lio<span>bot</span><small>AI FACTORY</small></a
+      >
+      <p>Tujuan jelas. Kerja terlihat. Keputusan di tanganmu.</p>
+      <button id="disconnect" type="button" hidden>Putuskan koneksi</button>
+    </header>
+    <main>
+      <section id="access" class="access">
+        <p class="eyebrow">RUANG KERJA OPERATOR</p>
+        <h1>Arahkan pekerjaan.<br />Pahami yang terjadi.</h1>
+        <p>
+          Ngobrol dengan LioBot, lihat hasilnya, dan selesaikan hal yang butuh
+          keputusanmu.
+        </p>
+        <form id="connect">
+          <label
+            >Token operator<input
+              id="token"
+              type="password"
+              autocomplete="off"
+              required
+              placeholder="Token akses dashboard" /></label
+          ><button class="primary">Buka ruang kerja</button>
+        </form>
+        <p class="muted">Token hanya digunakan selama halaman ini terbuka.</p>
+      </section>
+      <p id="status" role="status" aria-live="polite">Belum terhubung.</p>
+      <div id="workspace" hidden>
+        <div class="workspace-heading">
+          <div>
+            <p class="eyebrow">RUANG KERJA</p>
+            <h1>Apa yang mau kita bereskan?</h1>
+          </div>
+          <button id="refresh" type="button">Perbarui</button>
+        </div>
+        <div id="summary" class="summary-strip"></div>
+        <nav class="mobile-tools" aria-label="Navigasi ruang kerja">
+          <button id="mobile-tasks" type="button">Pekerjaan</button>
+          <button id="mobile-context" type="button">Situasi task</button>
+          <button id="mobile-new" type="button">+ Tujuan baru</button>
+        </nav>
+        <div class="workspace-grid">
+          <aside class="work-panel">
+            <div class="section-heading">
+              <h2>Pekerjaan</h2>
+              <button id="new-thread" type="button">+ Baru</button>
+            </div>
+            <label class="search-label"
+              >Cari pekerjaan<input
+                id="task-search"
+                type="search"
+                placeholder="Tujuan, proyek, atau nomor…" /></label
+            ><label class="search-label"
+              >Tampilkan<select id="task-filter">
+                <option value="all">Semua pekerjaan</option>
+                <option value="attention">Butuh perhatian</option>
+                <option value="active">Sedang berjalan</option>
+                <option value="done">Hasil tersedia</option>
+              </select></label
+            >
+            <div id="tasks" class="task-list"></div>
+          </aside>
+          <section class="chat-panel" aria-labelledby="chat-heading">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">PERCAKAPAN</p>
+                <h2 id="chat-heading">Ngobrol dengan LioBot</h2>
+              </div>
+              <span class="live-label">State tersimpan</span>
+            </div>
+            <p id="thread-target" class="target-label">
+              Tujuan baru · belum ada pekerjaan dipilih
+            </p>
+            <div
+              id="conversation"
+              class="conversation"
+              role="log"
+              aria-label="Riwayat percakapan"
+            ></div>
+            <div id="suggestions" class="suggestions"></div>
+            <form id="chat">
+              <label
+                >Proyek<select id="project">
+                  <option value="">Lintas proyek</option>
+                </select></label
+              ><label class="sr-only" for="message">Pesan untuk LioBot</label
+              ><textarea
+                id="message"
+                required
+                minlength="1"
+                maxlength="20000"
+                placeholder="Ceritakan tujuanmu. Apa hasil yang ingin dicapai?"
+              ></textarea>
+              <div class="composer-footer">
+                <small id="composer-hint"
+                  >Pesan baru membuat tujuan. Pilih pekerjaan untuk
+                  menindaklanjuti.</small
+                ><button class="primary" id="send">Kirim pesan →</button>
+              </div>
+            </form>
+          </section>
+          <aside class="context-panel">
+            <div class="section-heading"><h2>Yang perlu kamu tahu</h2></div>
+            <div id="task-detail">
+              <p class="empty">
+                Pilih pekerjaan untuk memahami progres, hambatan, hasil, dan
+                langkah berikutnya.
+              </p>
+            </div>
+            <section class="decision-section">
+              <div class="section-heading">
+                <h2>Butuh keputusanmu</h2>
+                <span id="decision-count" class="badge">0</span>
+              </div>
+              <p id="decision-scope" class="muted">
+                Keputusan terbuka di ruang kerja ini.
+              </p>
+              <div id="decisions"></div>
+            </section>
+          </aside>
+        </div>
+        <section class="support">
+          <h2>Konteks dan pembelajaran</h2>
+          <p class="muted">
+            Kelola informasi yang dipakai LioBot dan usulan perbaikannya.
+          </p>
+          <details>
+            <summary>Knowledge · cari, koreksi, dan simpan informasi</summary>
+            <form id="memory">
+              <label>Kata kunci<input id="query" /></label
+              ><button>Cari knowledge</button>
+            </form>
+            <div id="knowledge"></div>
+            <details>
+              <summary>Simpan knowledge baru</summary>
+              <form id="write-memory">
+                <label>Key<input id="memory-key" required /></label
+                ><label
+                  >Nilai<textarea id="memory-value" required></textarea></label
+                ><label>Source<input id="memory-source" required /></label
+                ><label
+                  >Scope<input
+                    id="memory-scope"
+                    placeholder="Alias proyek atau kosong untuk shared" /></label
+                ><button>Simpan</button>
+              </form>
+            </details>
+            <h3>Konflik informasi</h3>
+            <div id="conflicts"></div>
+          </details>
+          <details>
+            <summary>Usulan perbaikan LioBot</summary>
+            <div id="proposals"></div>
+          </details>
+          <details>
+            <summary>Penggunaan dan audit teknis</summary>
+            <pre id="metrics"></pre>
+          </details>
+        </section>
+      </div>
+    </main>
+    <dialog id="action-dialog" aria-labelledby="action-title">
+      <form id="action-form">
+        <div class="section-heading">
+          <h2 id="action-title"></h2>
+          <button id="action-close" type="button" aria-label="Tutup">×</button>
+        </div>
+        <p id="action-context"></p>
+        <label id="action-label"
+          >Jawaban<textarea
+            id="action-value"
+            maxlength="10000"
+          ></textarea></label
+        ><label id="action-source-label" hidden
+          >Source keputusan<input id="action-source" maxlength="300" /></label
+        ><label id="action-delegate-label" hidden
+          >ID operator terdaftar<input
+            id="action-delegate"
+            type="number"
+            min="1"
+            step="1"
+        /></label>
+        <p id="action-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button id="action-cancel" type="button">Batal</button
+          ><button id="action-submit" class="primary">Simpan keputusan</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="/dashboard/app.js" defer></script>
+  </body>
+</html>

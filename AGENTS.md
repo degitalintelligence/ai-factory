@@ -16,8 +16,10 @@
 - Role: control plane, orchestration engine, policy/gates, worker, evidence store, sandbox client, and channel adapters.
 - Test repository: degitalintelligence/telegram-lab.
 - Important boundary: telegram-lab is a test laboratory and acceptance harness only.
-- Current baseline: V0.2 bounded software engine. V0.3 Chief of Staff layer is the approved
-  target and is not yet implemented; treat roadmap behaviour as roadmap.
+- Current baseline: implemented V0.3 Chief of Staff on the guarded V0.2 engine;
+  the repository records operator acceptance. V0.4 is an implementation candidate,
+  authorized by Dedi, with live release gates still pending. Consult
+  `docs/V04_IMPLEMENTATION_AND_ACCEPTANCE.md`; never infer live acceptance from CI.
 - Runtime: Python 3.12, FastAPI, async SQLAlchemy, Pydantic, PostgreSQL for multi-worker operation, SQLite only for local/unit tests.
 - Channels today: Telegram control interface and optional authenticated HTTP API.
 - Execution: control service, disposable worker leases, and a separate credential-free sandbox service.

@@ -9,7 +9,7 @@ from app.staff_schemas import ChatRequest
 from app.store import store
 
 
-async def converse(request: ChatRequest, actor: int, chat_id: int | None = None):
+async def legacy_converse(request: ChatRequest, actor: int, chat_id: int | None = None):
     decision = re.fullmatch(
         r"(approve|setujui|reject|tolak|ask|tanya|defer|tunda|request_changes|revisi)\s+(?:decision|keputusan)\s+#?(\d+)(?:\s*:\s*(.*))?",
         request.message.strip(),
@@ -65,3 +65,9 @@ async def converse(request: ChatRequest, actor: int, chat_id: int | None = None)
         "evidence_refs": [f"intent:{task.id}"],
         "risk": "unknown",
     }
+
+
+async def converse(request: ChatRequest, actor: int, chat_id: int | None = None):
+    from app.conversations import conversation_turn
+
+    return await conversation_turn(request, actor, chat_id)

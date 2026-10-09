@@ -729,11 +729,31 @@ class Store:
         elif action == "answer":
             if task.status != "waiting_input" or not message.strip():
                 raise ValueError("Task is not waiting for input or answer is empty")
+            cards = list(
+                await session.scalars(
+                    select(Decision)
+                    .where(
+                        Decision.task_id == task_id,
+                        Decision.category == "clarification_needed",
+                        Decision.state == DecisionState.OPEN,
+                    )
+                    .with_for_update()
+                )
+            )
+            digest = hashlib.sha256(task.requirement.encode()).hexdigest()
+            for card in cards:
+                if f"requirement_sha256={digest}" not in json.loads(card.evidence_json):
+                    raise ValueError("Clarification belongs to a different requirement version")
+                card.decision_note = redact(message[:10000])
+                self._close_decision_row(session, card, DecisionState.APPROVED, user_id)
             task.requirement += "\n\nUser clarification:\n" + message[:10000]
             task.plan_json = None
             task.approved_plan_hash = None
             if task.kind == "orchestration" and message.strip() in settings.projects():
                 task.project = message.strip()
+                policy = settings.projects()[task.project]
+                task.repo, task.base_branch = policy.repo, policy.base_branch
+                task.base_sha = None
         elif action == "feedback":
             if task.status != "pr_created" or not message.strip():
                 raise ValueError("Feedback requires a published PR and a message")
@@ -767,6 +787,91 @@ class Store:
     async def resume(self, task_id, action, message="", user_id=None):
         async with self.sessions() as s, s.begin():
             await self._apply_resume(s, task_id, action, message, user_id=user_id)
+
+    async def wait_for_clarification(self, task_id, owner, message):
+        """Persist waiting state and its version-bound question atomically, with lease fencing."""
+        async with self.sessions() as s, s.begin():
+            task = await s.get(Task, task_id, with_for_update=True)
+            if (
+                not task
+                or task.lease_owner != owner
+                or not task.lease_until
+                or task.lease_until <= utcnow()
+                or task.cancel_requested
+            ):
+                raise TaskStopped("Worker lease lost")
+            card = await s.scalar(
+                select(Decision).where(
+                    Decision.task_id == task_id,
+                    Decision.category == "clarification_needed",
+                    Decision.state == DecisionState.OPEN,
+                )
+            )
+            if card is None:
+                card = Decision(
+                    task_id=task.id,
+                    tenant=task.tenant,
+                    owner=task.user_id,
+                    project=task.project,
+                    kind=DecisionMessageType.NEED_INFO,
+                    category="clarification_needed",
+                    title=f"Klarifikasi tujuan #{task.id}",
+                    situation=redact(message),
+                    why_now="Jawaban diperlukan untuk menetapkan tujuan atau target dengan tepat.",
+                    missing_information=redact(message),
+                    recommendation="answer",
+                    options_json=json.dumps([{"id": "answer", "label": "Jawab klarifikasi"}]),
+                    evidence_json=json.dumps(
+                        [
+                            f"task:{task.id}",
+                            "requirement_sha256=" + hashlib.sha256(task.requirement.encode()).hexdigest(),
+                        ]
+                    ),
+                    required_action="Jawab klarifikasi; persetujuan saja tidak melanjutkan task.",
+                    rollback="Tidak ada aksi eksternal; rencana diperbarui setelah jawaban.",
+                    risk_level="low",
+                )
+                s.add(card)
+                await s.flush()
+                s.add(
+                    Event(
+                        task_id=task_id,
+                        kind="NEED_INFO",
+                        message=f"Klarifikasi #{card.id}: {redact(message)}",
+                    )
+                )
+            task.status, task.last_message = "waiting_input", redact(message)
+            task.updated_at = utcnow()
+            return card
+
+    async def answer_clarification(self, decision_id, message, user_id):
+        """Answer this exact question once; answering grants replanning, never execution approval."""
+        if not message.strip() or secret_present(message):
+            raise ValueError("Answer is empty or contains credentials")
+        async with self.sessions() as s, s.begin():
+            initial = await s.get(Decision, decision_id)
+            if not initial or initial.tenant != settings.tenant_id or initial.owner != user_id:
+                raise ValueError("Clarification not found")
+            # Match worker/resume lock order: task first, then its question.
+            await s.get(Task, initial.task_id, with_for_update=True)
+            card = await s.get(Decision, decision_id, with_for_update=True, populate_existing=True)
+            if (
+                not card
+                or card.tenant != settings.tenant_id
+                or card.owner != user_id
+                or card.category != "clarification_needed"
+            ):
+                raise ValueError("Clarification not found")
+            task = await s.get(Task, card.task_id, with_for_update=True)
+            if not task or task.user_id != user_id or task.tenant != settings.tenant_id:
+                raise ValueError("Clarification not found")
+            if card.state == DecisionState.APPROVED and card.decision_note == message[:10000]:
+                return task
+            if card.state != DecisionState.OPEN:
+                raise ValueError("Clarification already resolved; use the current question")
+            if card.expires_at and card.expires_at <= utcnow():
+                raise ValueError("Clarification expired")
+            return await self._apply_resume(s, task.id, "answer", message, user_id=user_id)
 
     async def create_decision(self, card, owner=None):
         """Persist a decision card. It never lives only in a channel message."""
@@ -977,6 +1082,8 @@ class Store:
                 raise ValueError("Decision not found or not owned by you")
             if decision.tenant != settings.tenant_id:
                 raise ValueError("Decision not found")
+            if decision.category == "clarification_needed":
+                raise ValueError("Answer the clarification question; approval is not an answer")
             if decision.task_id and user_id is not None:
                 linked = await s.get(Task, decision.task_id)
                 if (
